@@ -11,8 +11,11 @@ flowchart TD
   B -->|Many| D[Create group reservation]
   C --> E[Assign room now or later]
   D --> E
-  E --> F[Add guests and scan IDs]
-  F --> G[Post all nightly rent and tax]
+  E --> F[Add primary or extra guest]
+  F --> F1[Enter or scan required ID]
+  F1 --> F2[Find returning guest or enter basic data]
+  F2 --> F3[Enter contact details and attach guest]
+  F3 --> G[Post all nightly rent and tax]
   G --> H[Check in room or selected group rooms]
   H --> I{Checkout type}
   I -->|Non-company| J[Resolve room deposit and make balance zero]

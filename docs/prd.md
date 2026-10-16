@@ -42,6 +42,7 @@ The first release is employee-only. It supports many hotels, but one owner accou
 - **FR-GST-003:** Excel/CSV guest import is supported; ID type and ID number are mandatory. Other bulk imports are out of scope.
 - **FR-GST-004:** Matching ID numbers automatically merge duplicate profiles. The newest profile details win; remarks and DNR data merge; identical payment sources deduplicate; distinct payment sources remain.
 - **FR-GST-005:** DNR opens a warning rather than a hard block. Staff may override only after entering a reason. All guest and DNR remarks appear in reservations.
+- **FR-GST-006:** Adding an extra guest uses the same ID → basic data → contact flow as reservation creation, including returning-guest lookup and optional ID image capture. The reservation guest summary uses a compact single-screen layout on tablet and desktop.
 
 ### 3.3 Reservations, rooms, and groups
 
