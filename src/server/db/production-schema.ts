@@ -193,6 +193,45 @@ export const promotions = pgTable("promotions", {
   active: boolean("active").notNull().default(true),
 });
 
+export const promotionRoomTypes = pgTable("promotion_room_types", {
+  id: id(),
+  propertyId: propertyId(),
+  promotionId: uuid("promotion_id").notNull().references(() => promotions.id),
+  roomTypeId: uuid("room_type_id").notNull().references(() => roomTypes.id),
+}, (table) => [uniqueIndex("promotion_room_type_unique").on(table.promotionId, table.roomTypeId)]);
+
+export const taxDefinitions = pgTable("tax_definitions", {
+  id: id(),
+  propertyId: propertyId(),
+  name: text("name").notNull(),
+  rateBasisPoints: integer("rate_basis_points").notNull(),
+  appliesToRoomRent: boolean("applies_to_room_rent").notNull().default(true),
+  active: boolean("active").notNull().default(true),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, (table) => [uniqueIndex("tax_definition_property_name").on(table.propertyId, table.name)]);
+
+export const chargeTypes = pgTable("charge_types", {
+  id: id(),
+  propertyId: propertyId(),
+  name: text("name").notNull(),
+  revenueCategory: text("revenue_category").notNull(),
+  taxable: boolean("taxable").notNull().default(false),
+  active: boolean("active").notNull().default(true),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, (table) => [uniqueIndex("charge_type_property_name").on(table.propertyId, table.name)]);
+
+export const registrationRuleVersions = pgTable("registration_rule_versions", {
+  id: id(),
+  propertyId: propertyId(),
+  versionNumber: integer("version_number").notNull(),
+  content: text("content").notNull(),
+  active: boolean("active").notNull().default(true),
+  createdByEmployeeId: uuid("created_by_employee_id").references(() => employees.id),
+  createdAt: createdAt(),
+}, (table) => [uniqueIndex("registration_rules_property_version").on(table.propertyId, table.versionNumber)]);
+
 export const reservations = pgTable("reservations", {
   id: id(),
   propertyId: propertyId(),
@@ -239,6 +278,27 @@ export const reservationGuests = pgTable("reservation_guests", {
   guestId: uuid("guest_id").notNull().references(() => guests.id),
   primary: boolean("primary").notNull().default(false),
 }, (table) => [uniqueIndex("reservation_guest_unique").on(table.reservationId, table.guestId)]);
+
+export const dnrOverrides = pgTable("dnr_overrides", {
+  id: id(),
+  propertyId: propertyId(),
+  reservationId: uuid("reservation_id").notNull().references(() => reservations.id),
+  guestId: uuid("guest_id").notNull().references(() => guests.id),
+  reason: text("reason").notNull(),
+  overriddenByEmployeeId: uuid("overridden_by_employee_id").references(() => employees.id),
+  createdAt: createdAt(),
+});
+
+export const registrationAcceptances = pgTable("registration_acceptances", {
+  id: id(),
+  propertyId: propertyId(),
+  reservationId: uuid("reservation_id").notNull().references(() => reservations.id),
+  ruleVersionId: uuid("rule_version_id").notNull().references(() => registrationRuleVersions.id),
+  acceptedRuleContent: text("accepted_rule_content").notNull(),
+  signatureStorageKey: text("signature_storage_key"),
+  signedByGuestId: uuid("signed_by_guest_id").references(() => guests.id),
+  acceptedAt: timestamp("accepted_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const nightlyRates = pgTable("nightly_rates", {
   id: id(),
@@ -451,6 +511,18 @@ export const cashDrops = pgTable("cash_drops", {
   createdAt: createdAt(),
 });
 
+export const cashShiftTransactions = pgTable("cash_shift_transactions", {
+  id: id(),
+  propertyId: propertyId(),
+  cashShiftId: uuid("cash_shift_id").notNull().references(() => cashShifts.id),
+  type: text("type").notNull(),
+  amountCents: integer("amount_cents").notNull(),
+  sourceType: text("source_type"),
+  sourceId: uuid("source_id"),
+  note: text("note"),
+  createdAt: createdAt(),
+}, (table) => [index("cash_shift_transactions_shift").on(table.cashShiftId, table.createdAt)]);
+
 export const housekeepingRecords = pgTable("housekeeping_records", {
   id: id(),
   propertyId: propertyId(),
@@ -491,6 +563,35 @@ export const timeEntries = pgTable("time_entries", {
   correctionNote: text("correction_note"),
 }, (table) => [uniqueIndex("time_entries_employee_date").on(table.employeeId, table.workDate)]);
 
+export const payPeriods = pgTable("pay_periods", {
+  id: id(),
+  propertyId: propertyId(),
+  startsOn: date("starts_on").notNull(),
+  endsOn: date("ends_on").notNull(),
+  scheduledPayDate: date("scheduled_pay_date").notNull(),
+  status: text("status").notNull().default("open"),
+  createdAt: createdAt(),
+}, (table) => [uniqueIndex("pay_period_property_dates").on(table.propertyId, table.startsOn, table.endsOn)]);
+
+export const payrollEntries = pgTable("payroll_entries", {
+  id: id(),
+  propertyId: propertyId(),
+  payPeriodId: uuid("pay_period_id").notNull().references(() => payPeriods.id),
+  employeeId: uuid("employee_id").notNull().references(() => employees.id),
+  calculationType: text("calculation_type").notNull(),
+  regularMinutes: integer("regular_minutes").notNull().default(0),
+  overtimeMinutes: integer("overtime_minutes").notNull().default(0),
+  quantity: integer("quantity"),
+  rateCents: integer("rate_cents"),
+  description: text("description"),
+  grossPayCents: integer("gross_pay_cents").notNull(),
+  paid: boolean("paid").notNull().default(false),
+  paidOn: date("paid_on"),
+  paymentMethod: text("payment_method"),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, (table) => [uniqueIndex("payroll_entry_period_employee").on(table.payPeriodId, table.employeeId)]);
+
 export const vendors = pgTable("vendors", {
   id: id(),
   propertyId: propertyId(),
@@ -512,6 +613,82 @@ export const expenses = pgTable("expenses", {
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
+
+export const recurringExpenses = pgTable("recurring_expenses", {
+  id: id(),
+  propertyId: propertyId(),
+  vendorId: uuid("vendor_id").references(() => vendors.id),
+  category: text("category").notNull(),
+  description: text("description").notNull(),
+  paymentMethod: text("payment_method").notNull(),
+  amountCents: integer("amount_cents").notNull(),
+  frequency: text("frequency").notNull(),
+  nextRunOn: date("next_run_on").notNull(),
+  active: boolean("active").notNull().default(true),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+
+export const nightAuditRuns = pgTable("night_audit_runs", {
+  id: id(),
+  propertyId: propertyId(),
+  businessDayId: uuid("business_day_id").notNull().references(() => businessDays.id),
+  trigger: text("trigger").notNull(),
+  status: text("status").notNull(),
+  blockingIssues: jsonb("blocking_issues").notNull().default([]),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  initiatedByEmployeeId: uuid("initiated_by_employee_id").references(() => employees.id),
+});
+
+export const reportDefinitions = pgTable("report_definitions", {
+  id: id(),
+  propertyId: propertyId(),
+  name: text("name").notNull(),
+  reportType: text("report_type").notNull(),
+  selectedColumns: jsonb("selected_columns").notNull(),
+  filters: jsonb("filters").notNull().default({}),
+  createdByEmployeeId: uuid("created_by_employee_id").references(() => employees.id),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, (table) => [uniqueIndex("report_definition_property_name").on(table.propertyId, table.name)]);
+
+export const guestImportJobs = pgTable("guest_import_jobs", {
+  id: id(),
+  propertyId: propertyId(),
+  status: text("status").notNull(),
+  sourceFilename: text("source_filename").notNull(),
+  totalRows: integer("total_rows").notNull().default(0),
+  importedRows: integer("imported_rows").notNull().default(0),
+  rejectedRows: integer("rejected_rows").notNull().default(0),
+  errors: jsonb("errors").notNull().default([]),
+  createdByEmployeeId: uuid("created_by_employee_id").references(() => employees.id),
+  createdAt: createdAt(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+});
+
+export const backupJobs = pgTable("backup_jobs", {
+  id: id(),
+  propertyId: propertyId(),
+  type: text("type").notNull(),
+  status: text("status").notNull(),
+  storageKey: text("storage_key"),
+  schemaVersion: text("schema_version").notNull(),
+  manifest: jsonb("manifest"),
+  failureReason: text("failure_reason"),
+  createdByEmployeeId: uuid("created_by_employee_id").references(() => employees.id),
+  createdAt: createdAt(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+});
+
+export const retentionTombstones = pgTable("retention_tombstones", {
+  id: id(),
+  propertyId: propertyId(),
+  resourceType: text("resource_type").notNull(),
+  resourceId: uuid("resource_id").notNull(),
+  storageKeyHash: text("storage_key_hash").notNull(),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [uniqueIndex("retention_tombstone_resource").on(table.propertyId, table.resourceType, table.resourceId)]);
 
 export const notifications = pgTable("notifications", {
   id: id(),

@@ -8,6 +8,13 @@
       "when": 1792126756472,
       "tag": "0000_peaceful_sabretooth",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1792127506218,
+      "tag": "0001_wonderful_hiroim",
+      "breakpoints": true
     }
   ]
 }

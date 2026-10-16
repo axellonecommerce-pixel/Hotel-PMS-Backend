@@ -219,6 +219,26 @@ export const reservations = sqliteTable(
   ],
 );
 
+export const reservationRooms = sqliteTable(
+  "reservation_rooms",
+  {
+    id: id("id"),
+    propertyId: text("property_id").notNull().references(() => properties.id),
+    reservationId: text("reservation_id").notNull().references(() => reservations.id),
+    roomTypeId: text("room_type_id").notNull().references(() => roomTypes.id),
+    roomId: text("room_id").references(() => rooms.id),
+    status: text("status").notNull(),
+    checkedInAt: text("checked_in_at"),
+    checkedOutAt: text("checked_out_at"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index("reservation_rooms_reservation_idx").on(table.reservationId),
+    index("reservation_rooms_room_status_idx").on(table.roomId, table.status),
+  ],
+);
+
 export const guestVehicles = sqliteTable(
   "guest_vehicles",
   {

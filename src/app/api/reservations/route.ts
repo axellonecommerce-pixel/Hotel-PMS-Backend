@@ -5,7 +5,7 @@ import { z } from "zod";
 import { db } from "@/server/db/client";
 import { calculateCommissionCents } from "@/domain/rules/commission";
 import { calculateTaxCents } from "@/domain/rules/tax";
-import { bookingChannels, companies, guests, reservations, rooms, roomTypes } from "@/server/db/schema";
+import { bookingChannels, companies, guests, reservationRooms, reservations, rooms, roomTypes } from "@/server/db/schema";
 
 const propertyId = "property-sun-star-inn";
 
@@ -27,7 +27,10 @@ const payloadSchema = z.object({
   email: z.string().email().optional().or(z.literal("")),
   secondaryEmail: z.string().email().optional().or(z.literal("")),
   companyId: z.string().optional(),
-  roomNumber: z.string().trim().min(1),
+  roomTypeId: z.string().trim().min(1),
+  roomCount: z.number().int().positive(),
+  roomNumbers: z.array(z.string().trim().min(1)).default([]),
+  dnrOverrideReason: z.string().trim().optional(),
   checkInDate: z.string().min(1),
   checkoutDate: z.string().min(1),
   adults: z.number().int().positive(),
@@ -56,19 +59,21 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Check-out must be after check-in." }, { status: 400 });
   }
 
-  const room = await db.query.rooms.findFirst({
-    where: and(eq(rooms.propertyId, propertyId), eq(rooms.number, payload.roomNumber)),
+  const candidateRooms = await db.query.rooms.findMany({
+    where: and(eq(rooms.propertyId, propertyId), eq(rooms.roomTypeId, payload.roomTypeId)),
   });
-  if (!room || room.serviceStatus !== "in-service") {
-    return NextResponse.json({ error: "Selected room is not rentable." }, { status: 409 });
+  const rentableRooms = candidateRooms.filter((room) => room.active && room.serviceStatus === "in-service");
+  const selectedRooms = payload.roomNumbers.map((number) => rentableRooms.find((room) => room.number === number));
+  if (selectedRooms.some((room) => !room) || payload.roomNumbers.length > payload.roomCount) {
+    return NextResponse.json({ error: "One or more selected rooms are not rentable." }, { status: 409 });
   }
 
   const license = normalizeId(payload.idNumber);
   const guest = await db.query.guests.findFirst({
     where: and(eq(guests.propertyId, propertyId), eq(guests.driverLicenseNormalized, license)),
   });
-  if (guest?.guestStatus === "Do Not Rent") {
-    return NextResponse.json({ error: "This guest is marked Do Not Rent." }, { status: 403 });
+  if (guest?.guestStatus === "Do Not Rent" && !payload.dnrOverrideReason) {
+    return NextResponse.json({ error: "Enter a reason to override the Do Not Rent warning." }, { status: 403 });
   }
 
   if (payload.companyId) {
@@ -79,26 +84,37 @@ export async function POST(request: Request) {
   }
 
   const existingRoomReservations = await db.query.reservations.findMany({
-    where: and(eq(reservations.roomId, room.id), inArray(reservations.status, ["Reserved", "Checked In"])),
+    where: and(eq(reservations.roomTypeId, payload.roomTypeId), inArray(reservations.status, ["Reserved", "Checked In"])),
   });
-  const overlaps = existingRoomReservations.some(
+  const overlappingReservations = existingRoomReservations.filter(
     (reservation) => reservation.arrivalDate < payload.checkoutDate && reservation.departureDate > payload.checkInDate,
   );
-  if (overlaps) {
-    return NextResponse.json({ error: "That room is no longer available for those dates." }, { status: 409 });
+  const existingRoomStays = await db.query.reservationRooms.findMany({
+    where: inArray(reservationRooms.reservationId, overlappingReservations.map((reservation) => reservation.id)),
+  });
+  if (payload.roomCount > rentableRooms.length - existingRoomStays.length) {
+    return NextResponse.json({ error: "That room type no longer has enough inventory for those dates." }, { status: 409 });
+  }
+  const assignedRoomIds = new Set(selectedRooms.flatMap((room) => room ? [room.id] : []));
+  if (existingRoomStays.some((stay) => stay.roomId && assignedRoomIds.has(stay.roomId))) {
+    return NextResponse.json({ error: "One of the selected rooms is no longer available." }, { status: 409 });
   }
 
-  const roomType = await db.query.roomTypes.findFirst({ where: eq(roomTypes.id, room.roomTypeId) });
+  const roomType = await db.query.roomTypes.findFirst({ where: eq(roomTypes.id, payload.roomTypeId) });
+  if (!roomType || !roomType.active) {
+    return NextResponse.json({ error: "Select an active room type." }, { status: 409 });
+  }
   const channel = await db.query.bookingChannels.findFirst({
     where: and(eq(bookingChannels.propertyId, propertyId), eq(bookingChannels.name, payload.source)),
   });
   const nights = Math.round((new Date(`${payload.checkoutDate}T12:00:00Z`).getTime() - new Date(`${payload.checkInDate}T12:00:00Z`).getTime()) / 86_400_000);
   const roomRateCents = roomType?.baseRateCents ?? 0;
-  const roomRentCents = roomRateCents * nights;
+  const roomRentCents = roomRateCents * nights * payload.roomCount;
   const taxCents = calculateTaxCents(roomRentCents, 0.1);
   const commissionCents = calculateCommissionCents(roomRentCents, (channel?.commissionBasisPoints ?? 0) / 100);
   const now = new Date().toISOString();
   const guestId = guest?.id ?? `guest-${crypto.randomUUID()}`;
+  const reservationId = `reservation-${crypto.randomUUID()}`;
 
   db.transaction((tx) => {
     if (guest) {
@@ -149,11 +165,11 @@ export async function POST(request: Request) {
       }).run();
     }
     tx.insert(reservations).values({
-      id: `reservation-${crypto.randomUUID()}`,
+      id: reservationId,
       propertyId,
       guestId,
-      roomId: room.id,
-      roomTypeId: room.roomTypeId,
+      roomId: selectedRooms[0]?.id ?? null,
+      roomTypeId: roomType.id,
       companyId: payload.companyId || null,
       confirmationNumber: `SSI-${Date.now().toString().slice(-8)}`,
       source: payload.source,
@@ -170,10 +186,22 @@ export async function POST(request: Request) {
       createdAt: now,
       updatedAt: now,
     }).run();
+    tx.insert(reservationRooms).values(Array.from({ length: payload.roomCount }, (_, index) => ({
+      id: `reservation-room-${crypto.randomUUID()}`,
+      propertyId,
+      reservationId,
+      roomTypeId: roomType.id,
+      roomId: selectedRooms[index]?.id ?? null,
+      status: "Reserved",
+      createdAt: now,
+      updatedAt: now,
+    }))).run();
   });
 
   return NextResponse.json({
     guestId,
+    reservationId,
+    groupReservation: payload.roomCount > 1,
     roomRateCents,
     roomRentCents,
     taxCents,
