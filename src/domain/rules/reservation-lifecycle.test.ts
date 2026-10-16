@@ -89,15 +89,16 @@ test("Night Audit reports every blocking category", () => {
 });
 
 test("No Show immediately releases every reserved room and optionally posts a fee", () => {
-  expect(planNoShow({ currentStatus: "Reserved", requestedFeeCents: 7_500, reservationRoomIds: ["room-stay-1", "room-stay-2"] })).toEqual({
+  expect(planNoShow({ currentStatus: "Reserved", requestedFeeCents: 7_500, amountPaidCents: 2_500, reservationRoomIds: ["room-stay-1", "room-stay-2"] })).toEqual({
     allowed: true,
     status: "No Show",
     feeCents: 7_500,
+    balanceCents: 5_000,
     releasedReservationRoomIds: ["room-stay-1", "room-stay-2"],
   });
   expect(planNoShow({ currentStatus: "Checked In", reservationRoomIds: ["room-stay-1"] })).toEqual({ allowed: false, reason: "NOT_RESERVED" });
 });
 
 test("cancellation releases inventory and applies only the selected fee", () => {
-  expect(planCancellation({ currentStatus: "Reserved", requestedFeeCents: 5_000, reservationRoomIds: ["room-stay-1"] })).toEqual({ allowed: true, status: "Cancelled", feeCents: 5_000, releasedReservationRoomIds: ["room-stay-1"] });
+  expect(planCancellation({ currentStatus: "Reserved", requestedFeeCents: 5_000, amountPaidCents: 7_500, reservationRoomIds: ["room-stay-1"] })).toEqual({ allowed: true, status: "Cancelled", feeCents: 5_000, balanceCents: 0, releasedReservationRoomIds: ["room-stay-1"] });
 });

@@ -123,6 +123,7 @@ export function nightAuditBlockers(input: {
 export function planNoShow(input: {
   currentStatus: string;
   requestedFeeCents?: number;
+  amountPaidCents?: number;
   reservationRoomIds: readonly string[];
 }) {
   if (input.currentStatus !== "Reserved") {
@@ -133,6 +134,7 @@ export function planNoShow(input: {
     allowed: true,
     status: "No Show" as const,
     feeCents,
+    balanceCents: Math.max(0, feeCents - Math.max(0, input.amountPaidCents ?? 0)),
     releasedReservationRoomIds: [...input.reservationRoomIds],
   };
 }
@@ -140,6 +142,7 @@ export function planNoShow(input: {
 export function planCancellation(input: {
   currentStatus: string;
   requestedFeeCents?: number;
+  amountPaidCents?: number;
   reservationRoomIds: readonly string[];
 }) {
   if (input.currentStatus !== "Reserved") return { allowed: false, reason: "NOT_RESERVED" as const };
@@ -147,6 +150,7 @@ export function planCancellation(input: {
     allowed: true,
     status: "Cancelled" as const,
     feeCents: Math.max(0, Math.round(input.requestedFeeCents ?? 0)),
+    balanceCents: Math.max(0, Math.round(input.requestedFeeCents ?? 0) - Math.max(0, input.amountPaidCents ?? 0)),
     releasedReservationRoomIds: [...input.reservationRoomIds],
   };
 }
