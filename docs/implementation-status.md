@@ -14,12 +14,12 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 46 |
-| Partial | 19 |
+| Verified demo | 48 |
+| Partial | 17 |
 | Not implemented | 0 |
 | Total | 65 |
 
-All requirements now have an implementation path, but the product is **not yet production-complete against all approved requirements** because 19 remain partial. Most workflows are available for evaluation, while several operational screens still use React state and seeded data.
+All requirements now have an implementation path, but the product is **not yet production-complete against all approved requirements** because 17 remain partial. Most workflows are available for evaluation, while several operational screens still use React state and seeded data.
 
 ## Requirement-by-requirement traceability
 
@@ -27,7 +27,7 @@ All requirements now have an implementation path, but the product is **not yet p
 |---|---|---|
 | FR-TEN-001 | Verified demo | Protected product-team provisioning API transactionally creates the hotel, owner membership/employee, and starting settings. |
 | FR-TEN-002 | Verified demo | APIs derive hotel scope from the authenticated user's active membership and reject cross-hotel access. |
-| FR-TEN-003 | Partial | Broad Settings UI and schema exist; settings are not fully persisted through backend APIs. |
+| FR-TEN-003 | Verified demo | The full hotel configuration is loaded and saved through a tenant-scoped settings API. |
 | FR-TEN-004 | Verified demo | USD/US defaults are used and production schema includes currency/country-ready fields. |
 | FR-GST-001 | Verified demo | Multi-guest data, ID fields, remarks, DNR, and payment-source UI/domain models exist. |
 | FR-GST-002 | Partial | Upload/download UI and retention rules exist; secure object storage, seven-day scheduled notification, and deletion worker are absent. |
@@ -61,7 +61,7 @@ All requirements now have an implementation path, but the product is **not yet p
 | FR-PAY-003 | Verified demo | Payment deletion and bounded partial refund flows exist. |
 | FR-PAY-004 | Verified demo | BAD DEBT checkout settlement and loss representation exist. |
 | FR-DEP-001 | Verified demo | Per-room cash/card deposits, deductions, reasons, partial release, and folio display choice exist. |
-| FR-COM-001 | Partial | Company profile/rate UI and schema exist; durable CRUD is not exposed by backend APIs. |
+| FR-COM-001 | Partial | Tenant-scoped company CRUD is connected; negotiated room-rate editing still needs durable UI/API fields. |
 | FR-COM-002 | Verified demo | Checked-out Guest/Stay items can be marked Sent and moved to Invoices. |
 | FR-COM-003 | Partial | Invoice statuses/reminder display exist; recurring seven-day reminder worker is absent. |
 | FR-COM-004 | Verified demo | One payment can allocate across invoices with partial allocation and company credit. |
@@ -73,14 +73,14 @@ All requirements now have an implementation path, but the product is **not yet p
 | FR-TIM-001 | Verified demo | Separate time events, live clock, complete manual shift, corrections, breaks, and configured overtime logic exist. |
 | FR-PAYR-001 | Verified demo | Pay periods, payday, hourly/piece/total compensation, and gross-pay calculations exist. |
 | FR-PAYR-002 | Verified demo | Paid state/date/method and optional correction note exist. |
-| FR-EXP-001 | Partial | Category/vendor/recurring/payment/receipt UI exists; records and uploaded receipts are not durably stored. |
+| FR-EXP-001 | Partial | Expense and recurrence records now persist; receipt file bytes still need secure object storage. |
 | FR-CSH-001 | Verified demo | Employee-shift cash, opening amount, multiple drops, and retained float exist. |
 | FR-CSH-002 | Verified demo | Expected/count/over-short calculation and Other-expense note validation exist. |
 | FR-AUD-001 | Partial | Manual/scheduled UI and blockers exist; durable scheduler, locked business day transaction, and failure notification job are absent. |
 | FR-REV-001 | Partial | Accounting classifications are represented; a durable double-entry or equivalent posting service is not implemented. |
 | FR-REV-002 | Verified demo | Gross/net revenue, ADR, both occupancy measures, and both RevPAR measures are shown. |
 | FR-RPT-001 | Verified demo | Custom range, print, PDF/Excel export, comparison, and report detail controls exist. |
-| FR-RPT-002 | Partial | Standard/custom report UI exists; saved reports are session-only and not backed by report APIs. |
+| FR-RPT-002 | Verified demo | Standard reports and tenant-scoped saved custom report definitions are connected to backend APIs. |
 | FR-NOT-001 | Partial | Unified notification UI/read controls exist; persisted event production and scheduled alerts are absent. |
 | FR-SRC-001 | Verified demo | Global search covers guests, reservations, rooms, companies, folios, and invoices. |
 | FR-BKP-001 | Partial | Manual JSON backup download exists; retained files and a server-generated complete hotel snapshot are absent. |
