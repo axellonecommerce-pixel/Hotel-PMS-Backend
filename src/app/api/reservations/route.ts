@@ -5,7 +5,7 @@ import { z } from "zod";
 import { db } from "@/server/db/client";
 import { calculateCommissionCents } from "@/domain/rules/commission";
 import { calculateTaxCents } from "@/domain/rules/tax";
-import { bookingChannels, companies, guests, reservationRooms, reservations, rooms, roomTypes } from "@/server/db/schema";
+import { bookingChannels, companies, guests, reservationCharges, reservationRooms, reservations, rooms, roomTypes } from "@/server/db/schema";
 
 const propertyId = "property-sun-star-inn";
 
@@ -38,6 +38,13 @@ const payloadSchema = z.object({
   petCount: z.number().int().nonnegative().default(0),
   servicePetCount: z.number().int().nonnegative().default(0),
   rateCode: z.string().trim().min(1),
+  nightlyRatesCents: z.array(z.number().int().nonnegative()).min(1),
+  promotionIds: z.array(z.string().trim().min(1)).default([]),
+  taxRatePercentage: z.number().nonnegative().max(100),
+  taxExempt: z.boolean().default(false),
+  taxExemptionReason: z.string().trim().optional(),
+  taxExemptionCertificate: z.string().trim().optional(),
+  otaPaymentStatus: z.enum(["Guest Pays Hotel", "Paid Online", "Virtual Card Pending"]).optional(),
   source: z.string().trim().min(1),
 });
 
@@ -108,9 +115,16 @@ export async function POST(request: Request) {
     where: and(eq(bookingChannels.propertyId, propertyId), eq(bookingChannels.name, payload.source)),
   });
   const nights = Math.round((new Date(`${payload.checkoutDate}T12:00:00Z`).getTime() - new Date(`${payload.checkInDate}T12:00:00Z`).getTime()) / 86_400_000);
-  const roomRateCents = roomType?.baseRateCents ?? 0;
-  const roomRentCents = roomRateCents * nights * payload.roomCount;
-  const taxCents = calculateTaxCents(roomRentCents, 0.1);
+  if (payload.nightlyRatesCents.length !== nights) {
+    return NextResponse.json({ error: "Enter one nightly rate for every night of the stay." }, { status: 400 });
+  }
+  if (payload.taxExempt && (!payload.taxExemptionReason || !payload.taxExemptionCertificate)) {
+    return NextResponse.json({ error: "Tax-exempt stays require a reason and certificate number." }, { status: 400 });
+  }
+  const roomRateCents = payload.nightlyRatesCents[0] ?? roomType.baseRateCents;
+  const roomRentCents = payload.nightlyRatesCents.reduce((sum, rateCents) => sum + rateCents, 0) * payload.roomCount;
+  const taxRateBasisPoints = Math.round(payload.taxRatePercentage * 100);
+  const taxCents = payload.taxExempt ? 0 : calculateTaxCents(roomRentCents, payload.taxRatePercentage / 100);
   const commissionCents = calculateCommissionCents(roomRentCents, (channel?.commissionBasisPoints ?? 0) / 100);
   const now = new Date().toISOString();
   const guestId = guest?.id ?? `guest-${crypto.randomUUID()}`;
@@ -179,6 +193,13 @@ export async function POST(request: Request) {
       adultCount: payload.adults,
       childCount: payload.children,
       roomRateCents,
+      nightlyRatesJson: JSON.stringify(payload.nightlyRatesCents),
+      promotionIdsJson: JSON.stringify(payload.promotionIds),
+      taxRateBasisPoints,
+      taxExempt: payload.taxExempt,
+      taxExemptionReason: payload.taxExemptionReason || null,
+      taxExemptionCertificate: payload.taxExemptionCertificate || null,
+      otaPaymentStatus: channel?.channelType === "OTA" ? payload.otaPaymentStatus ?? "Guest Pays Hotel" : null,
       paymentArrangement: payload.companyId ? "Direct Bill" : "Credit",
       rateCode: payload.rateCode,
       petCount: payload.petCount,
@@ -195,6 +216,23 @@ export async function POST(request: Request) {
       status: "Reserved",
       createdAt: now,
       updatedAt: now,
+    }))).run();
+    tx.insert(reservationCharges).values(payload.nightlyRatesCents.flatMap((nightlyRateCents, nightIndex) => Array.from({ length: payload.roomCount }, (_, roomIndex) => {
+      const nightlyTaxCents = payload.taxExempt ? 0 : calculateTaxCents(nightlyRateCents, payload.taxRatePercentage / 100);
+      return {
+        id: `charge-${crypto.randomUUID()}`,
+        reservationId,
+        type: "Room Rent",
+        description: `Room ${roomIndex + 1} · Night ${nightIndex + 1}`,
+        serviceDate: new Date(new Date(`${payload.checkInDate}T12:00:00Z`).getTime() + nightIndex * 86_400_000).toISOString().slice(0, 10),
+        quantity: 1,
+        unitAmountCents: nightlyRateCents,
+        amountCents: nightlyRateCents,
+        taxable: !payload.taxExempt,
+        taxAmountCents: nightlyTaxCents,
+        status: "Posted",
+        createdAt: now,
+      };
     }))).run();
   });
 

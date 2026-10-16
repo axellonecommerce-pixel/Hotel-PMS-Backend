@@ -210,6 +210,13 @@ export const reservations = sqliteTable(
     adultCount: integer("adult_count").notNull(),
     childCount: integer("child_count").notNull(),
     roomRateCents: integer("room_rate_cents").notNull(),
+    nightlyRatesJson: text("nightly_rates_json").notNull().default("[]"),
+    promotionIdsJson: text("promotion_ids_json").notNull().default("[]"),
+    taxRateBasisPoints: integer("tax_rate_basis_points").notNull().default(1000),
+    taxExempt: integer("tax_exempt", { mode: "boolean" }).notNull().default(false),
+    taxExemptionReason: text("tax_exemption_reason"),
+    taxExemptionCertificate: text("tax_exemption_certificate"),
+    otaPaymentStatus: text("ota_payment_status"),
     paymentArrangement: text("payment_arrangement").notNull(),
     rateCode: text("rate_code"),
     petCount: integer("pet_count").notNull().default(0),
@@ -434,6 +441,9 @@ export const expenses = sqliteTable(
     amountCents: integer("amount_cents").notNull(),
     notes: text("notes"),
     receiptReference: text("receipt_reference"),
+    recurring: integer("recurring", { mode: "boolean" }).notNull().default(false),
+    recurrence: text("recurrence"),
+    nextDueDate: text("next_due_date"),
     status: text("status").notNull(),
     enteredByEmployeeId: text("entered_by_employee_id").references(() => employees.id),
     createdAt: createdAt(),
@@ -475,6 +485,40 @@ export const propertyTasks = sqliteTable(
     updatedAt: updatedAt(),
   },
   (table) => [index("property_tasks_property_completed_idx").on(table.propertyId, table.completed)],
+);
+
+export const savedReportDefinitions = sqliteTable(
+  "saved_report_definitions",
+  {
+    id: id("id"),
+    propertyId: text("property_id").notNull().references(() => properties.id),
+    name: text("name").notNull(),
+    baseReportId: text("base_report_id").notNull(),
+    columnKeysJson: text("column_keys_json").notNull(),
+    filtersJson: text("filters_json").notNull().default("{}"),
+    active: integer("active", { mode: "boolean" }).notNull().default(true),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [uniqueIndex("saved_reports_property_name_key").on(table.propertyId, table.name)],
+);
+
+export const notifications = sqliteTable(
+  "notifications",
+  {
+    id: id("id"),
+    propertyId: text("property_id").notNull().references(() => properties.id),
+    employeeId: text("employee_id").references(() => employees.id),
+    type: text("type").notNull(),
+    title: text("title").notNull(),
+    detail: text("detail").notNull(),
+    href: text("href"),
+    status: text("status").notNull().default("Unread"),
+    readAt: text("read_at"),
+    resolvedAt: text("resolved_at"),
+    createdAt: createdAt(),
+  },
+  (table) => [index("notifications_property_status_idx").on(table.propertyId, table.status)],
 );
 
 export const auditEvents = sqliteTable(
