@@ -4,7 +4,9 @@
   "private": true,
   "scripts": {
     "typecheck": "NODE_OPTIONS=--max-old-space-size=1024 tsc --noEmit",
+    "test": "bun test",
     "db:generate": "drizzle-kit generate",
+    "db:generate:production": "drizzle-kit generate --config drizzle.production.config.ts",
     "db:migrate": "mkdir -p data && drizzle-kit migrate",
     "db:seed": "tsx src/server/db/seed.ts",
     "db:reset": "rm -f data/sun-star-demo-v3.sqlite && bun run db:migrate && bun run db:seed"
