@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { authorizePropertyAccess, hasPermission } from "./authorization";
+import { authorizePropertyAccess, hasEditConflict, hasPermission, selectPropertyMembership } from "./authorization";
 
 describe("role authorization", () => {
   test("owner and manager can manage every feature", () => {
@@ -33,4 +33,19 @@ test("hotel isolation rejects a valid employee from another property", () => {
     status: 403,
     reason: "WRONG_PROPERTY",
   });
+});
+
+test("tenant selection never falls through to another hotel", () => {
+  const memberships = [
+    { propertyId: "hotel-a", role: "manager", active: true },
+    { propertyId: "hotel-b", role: "owner", active: true },
+  ];
+  expect(selectPropertyMembership(memberships, "hotel-b")?.propertyId).toBe("hotel-b");
+  expect(selectPropertyMembership(memberships, "hotel-c")).toBeNull();
+  expect(selectPropertyMembership(memberships)).toBeNull();
+});
+
+test("optimistic versions detect a second employee's stale edit", () => {
+  expect(hasEditConflict(4, 3)).toBe(true);
+  expect(hasEditConflict(4, 4)).toBe(false);
 });

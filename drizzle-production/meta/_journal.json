@@ -43,6 +43,13 @@
       "when": 1792132571265,
       "tag": "0005_thankful_gabe_jones",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792165664686,
+      "tag": "0006_large_banshee",
+      "breakpoints": true
     }
   ]
 }

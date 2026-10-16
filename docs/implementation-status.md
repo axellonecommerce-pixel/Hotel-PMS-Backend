@@ -14,19 +14,19 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 43 |
+| Verified demo | 46 |
 | Partial | 19 |
-| Not implemented | 3 |
+| Not implemented | 0 |
 | Total | 65 |
 
-The product is therefore **not yet production-complete against all approved requirements**. Most workflows are available for evaluation, but many operational screens still use React state and seeded data. The backend currently exposes only reservation creation/listing and guest-license lookup APIs, and both API routes use a fixed property ID.
+All requirements now have an implementation path, but the product is **not yet production-complete against all approved requirements** because 19 remain partial. Most workflows are available for evaluation, while several operational screens still use React state and seeded data.
 
 ## Requirement-by-requirement traceability
 
 | Requirement | Status | Evidence / remaining work |
 |---|---|---|
-| FR-TEN-001 | Not implemented | Product-team hotel provisioning workflow and API are absent. |
-| FR-TEN-002 | Not implemented | Production schema is property-scoped, but API routes currently use a fixed property ID instead of the authenticated employee membership. |
+| FR-TEN-001 | Verified demo | Protected product-team provisioning API transactionally creates the hotel, owner membership/employee, and starting settings. |
+| FR-TEN-002 | Verified demo | APIs derive hotel scope from the authenticated user's active membership and reject cross-hotel access. |
 | FR-TEN-003 | Partial | Broad Settings UI and schema exist; settings are not fully persisted through backend APIs. |
 | FR-TEN-004 | Verified demo | USD/US defaults are used and production schema includes currency/country-ready fields. |
 | FR-GST-001 | Verified demo | Multi-guest data, ID fields, remarks, DNR, and payment-source UI/domain models exist. |
@@ -87,7 +87,7 @@ The product is therefore **not yet production-complete against all approved requ
 | FR-BKP-002 | Partial | Destructive confirmation and restore UI exist; transactional server restore and expired-image filtering are absent. |
 | NFR-UX-001 | Verified demo | Responsive phone/tablet/desktop layouts and overflow controls exist across the main workspace. |
 | NFR-UX-002 | Partial | Light/dark, focus, keyboard, and semantic improvements exist; complete WCAG 2.2 AA audit/automation is outstanding. |
-| NFR-RT-001 | Not implemented | No realtime subscription or optimistic-concurrency conflict/version check is present. |
+| NFR-RT-001 | Verified demo | Tenant-scoped server-sent events update reservation clients without refresh; versioned writes return a conflict instead of overwriting a newer edit. |
 | NFR-SEC-001 | Partial | Property-scoped schema and authorization policy tests exist; API tenant identity is still fixed and end-to-end RLS evidence is incomplete. |
 | NFR-QA-001 | Partial | Backend domain tests cover important rules; complete automated browser/API coverage for every named release flow is absent. |
 
@@ -95,9 +95,8 @@ The product is therefore **not yet production-complete against all approved requ
 
 The remaining work should be completed in this order:
 
-1. Replace fixed property IDs with authenticated membership-derived tenant context and database isolation policies.
-2. Add backend services/APIs for folios, charges, payments, deposits, companies, invoices, housekeeping, maintenance, time, payroll, expenses, cash, reports, notifications, Night Audit, and backup/restore.
-3. Move uploaded ID images and receipts to secure object storage and add retention/reminder workers.
-4. Add database transactions, idempotency keys, document-sequence locking, and optimistic version checks.
-5. Add complete end-to-end release tests and an automated WCAG 2.2 AA audit.
+1. Add backend services/APIs for folios, charges, payments, deposits, companies, invoices, housekeeping, maintenance, time, payroll, expenses, cash, reports, notifications, Night Audit, and backup/restore.
+2. Move uploaded ID images and receipts to secure object storage and add retention/reminder workers.
+3. Add database transactions, idempotency keys, and document-sequence locking to the remaining financial workflows.
+4. Add complete end-to-end release tests and an automated WCAG 2.2 AA audit.
 

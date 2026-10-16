@@ -1,6 +1,6 @@
-# Sun Star Inn Demo Backend
+# Hotel PMS Backend
 
-SQLite + Drizzle foundation for the Sun Star Inn PMS demo.
+Next.js + Drizzle backend foundation for the multi-hotel PMS. SQLite powers local development; the production schema targets PostgreSQL.
 
 ## Included
 
@@ -8,6 +8,9 @@ SQLite + Drizzle foundation for the Sun Star Inn PMS demo.
 - Seed data for rooms, guests, reservations, companies, booking channels, maintenance, expenses, cash drops, employees, and tasks
 - Booking channel commission configuration
 - Business-day and maintenance work-order tables
+- Product-team hotel provisioning API
+- Supabase-token authentication with membership-derived hotel isolation
+- Reservation optimistic locking and a tenant-scoped realtime event stream
 
 ## Run Locally
 
@@ -17,4 +20,14 @@ bun run db:migrate
 bun run db:seed
 ```
 
-This is a demo backend foundation. Supabase PostgreSQL, authenticated API routes, and Supabase Auth/RLS remain the next integration phase.
+## Authentication and tenancy
+
+Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. Every operational API resolves the signed-in user to an active `property_memberships` row. If the employee belongs to more than one hotel, send `X-Property-Id`; the server rejects hotels outside that user's memberships.
+
+For local development only, set `PMS_DEMO_AUTH_ENABLED=true`, `PMS_DEMO_AUTH_TOKEN`, and `PMS_DEMO_AUTH_USER_ID`. Production never accepts the demo path.
+
+## Product-team hotel provisioning
+
+Set a strong `PMS_PROVISIONING_KEY`, then call `POST /api/admin/properties` with `X-PMS-Provisioning-Key`. The payload contains hotel contact/timezone details plus the existing Supabase owner's user ID and name. Provisioning transactionally creates the property, owner membership, owner employee, and starting settings.
+
+Set `PMS_FRONTEND_ORIGINS` to the comma-separated frontend origins allowed to call the API. Reservation clients subscribe to `GET /api/events`; writes use a required expected version and return `409 EDIT_CONFLICT` instead of overwriting a newer edit.

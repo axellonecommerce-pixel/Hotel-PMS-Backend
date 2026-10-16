@@ -740,3 +740,15 @@ export const attachments = pgTable("attachments", {
   sizeBytes: integer("size_bytes").notNull(),
   createdAt: createdAt(),
 }, (table) => [index("attachments_resource").on(table.propertyId, table.resourceType, table.resourceId)]);
+
+export const changeEvents = pgTable("change_events", {
+  id: id(),
+  propertyId: propertyId(),
+  actorAuthUserId: uuid("actor_auth_user_id").notNull(),
+  entityType: text("entity_type").notNull(),
+  entityId: uuid("entity_id").notNull(),
+  action: text("action").notNull(),
+  entityVersion: integer("entity_version").notNull(),
+  payload: jsonb("payload").notNull().default({}),
+  occurredAt: createdAt(),
+}, (table) => [index("change_events_property_time").on(table.propertyId, table.occurredAt)]);

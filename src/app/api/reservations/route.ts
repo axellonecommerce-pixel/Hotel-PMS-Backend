@@ -5,9 +5,9 @@ import { z } from "zod";
 import { db } from "@/server/db/client";
 import { calculateCommissionCents } from "@/domain/rules/commission";
 import { calculateTaxCents } from "@/domain/rules/tax";
+import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { bookingChannels, companies, guests, reservationCharges, reservationRooms, reservations, rooms, roomTypes } from "@/server/db/schema";
-
-const propertyId = "property-sun-star-inn";
+import { recordChange } from "@/server/realtime/change-events";
 
 const payloadSchema = z.object({
   idType: z.enum(["US Driver License", "Passport", "Other"]),
@@ -57,6 +57,13 @@ function normalizePhone(phone: string) {
 }
 
 export async function POST(request: Request) {
+  let session;
+  try {
+    session = await requirePropertySession(request, "reservations.manage");
+  } catch (error) {
+    return propertyAccessResponse(error);
+  }
+  const { propertyId } = session;
   const parsed = payloadSchema.safeParse(await request.json());
   if (!parsed.success) {
     return NextResponse.json({ error: "Required guest and stay details are missing.", issues: parsed.error.flatten() }, { status: 400 });
@@ -84,14 +91,14 @@ export async function POST(request: Request) {
   }
 
   if (payload.companyId) {
-    const company = await db.query.companies.findFirst({ where: eq(companies.id, payload.companyId) });
+    const company = await db.query.companies.findFirst({ where: and(eq(companies.id, payload.companyId), eq(companies.propertyId, propertyId)) });
     if (!company || company.status !== "Active") {
       return NextResponse.json({ error: "Select an active company for Direct Bill." }, { status: 400 });
     }
   }
 
   const existingRoomReservations = await db.query.reservations.findMany({
-    where: and(eq(reservations.roomTypeId, payload.roomTypeId), inArray(reservations.status, ["Reserved", "Checked In"])),
+    where: and(eq(reservations.propertyId, propertyId), eq(reservations.roomTypeId, payload.roomTypeId), inArray(reservations.status, ["Reserved", "Checked In"])),
   });
   const overlappingReservations = existingRoomReservations.filter(
     (reservation) => reservation.arrivalDate < payload.checkoutDate && reservation.departureDate > payload.checkInDate,
@@ -107,7 +114,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "One of the selected rooms is no longer available." }, { status: 409 });
   }
 
-  const roomType = await db.query.roomTypes.findFirst({ where: eq(roomTypes.id, payload.roomTypeId) });
+  const roomType = await db.query.roomTypes.findFirst({ where: and(eq(roomTypes.id, payload.roomTypeId), eq(roomTypes.propertyId, propertyId)) });
   if (!roomType || !roomType.active) {
     return NextResponse.json({ error: "Select an active room type." }, { status: 409 });
   }
@@ -236,6 +243,37 @@ export async function POST(request: Request) {
     }))).run();
   });
 
+  recordChange({
+    propertyId,
+    actorAuthUserId: session.authUserId,
+    entityType: "reservation",
+    entityId: reservationId,
+    action: "created",
+    entityVersion: 1,
+    payload: {
+      reservation: {
+        id: reservationId,
+        version: 1,
+        firstName: payload.firstName,
+        lastName: payload.lastName,
+        phone: payload.phone,
+        room: payload.roomNumbers[0] ?? "Unassigned",
+        groupReservation: payload.roomCount > 1,
+        checkInDate: payload.checkInDate,
+        checkoutDate: payload.checkoutDate,
+        checkInTime: "3:00 PM",
+        nights,
+        source: payload.source,
+        paymentType: payload.companyId ? "Direct Bill" : "Credit",
+        roomRentCents,
+        taxCents,
+        totalCents: roomRentCents + taxCents,
+        balanceCents: roomRentCents + taxCents,
+        status: "Reserved",
+      },
+    },
+  });
+
   return NextResponse.json({
     guestId,
     reservationId,
@@ -245,5 +283,64 @@ export async function POST(request: Request) {
     taxCents,
     commissionCents,
     totalCents: roomRentCents + taxCents,
+    version: 1,
   }, { status: 201 });
+}
+
+const updateSchema = z.object({
+  id: z.string().trim().min(1),
+  expectedVersion: z.number().int().positive(),
+  status: z.enum(["Reserved", "Checked In", "Checked Out", "Cancelled", "No Show"]).optional(),
+  notes: z.string().nullable().optional(),
+  arrivalDate: z.string().optional(),
+  departureDate: z.string().optional(),
+});
+
+export async function PATCH(request: Request) {
+  let session;
+  try {
+    session = await requirePropertySession(request, "reservations.manage");
+  } catch (error) {
+    return propertyAccessResponse(error);
+  }
+  const parsed = updateSchema.safeParse(await request.json());
+  if (!parsed.success) return Response.json({ error: "The reservation update is invalid.", issues: parsed.error.flatten() }, { status: 400 });
+  const { id, expectedVersion, ...changes } = parsed.data;
+  if (changes.arrivalDate && changes.departureDate && changes.departureDate <= changes.arrivalDate) {
+    return Response.json({ error: "Check-out must be after check-in." }, { status: 400 });
+  }
+  const now = new Date().toISOString();
+  const result = db.update(reservations).set({
+    ...(changes.status ? { status: changes.status } : {}),
+    ...(changes.notes !== undefined ? { notes: changes.notes } : {}),
+    ...(changes.arrivalDate ? { arrivalDate: changes.arrivalDate } : {}),
+    ...(changes.departureDate ? { departureDate: changes.departureDate } : {}),
+    version: expectedVersion + 1,
+    updatedAt: now,
+  }).where(and(
+    eq(reservations.id, id),
+    eq(reservations.propertyId, session.propertyId),
+    eq(reservations.version, expectedVersion),
+  )).run();
+  if (result.changes === 0) {
+    const current = await db.query.reservations.findFirst({
+      where: and(eq(reservations.id, id), eq(reservations.propertyId, session.propertyId)),
+    });
+    return Response.json({
+      error: current ? "Another employee changed this reservation. Review the latest version before saving." : "Reservation not found.",
+      code: current ? "EDIT_CONFLICT" : "NOT_FOUND",
+      currentVersion: current?.version,
+      current,
+    }, { status: current ? 409 : 404 });
+  }
+  recordChange({
+    propertyId: session.propertyId,
+    actorAuthUserId: session.authUserId,
+    entityType: "reservation",
+    entityId: id,
+    action: "updated",
+    entityVersion: expectedVersion + 1,
+    payload: { changes },
+  });
+  return Response.json({ id, version: expectedVersion + 1, ...changes });
 }

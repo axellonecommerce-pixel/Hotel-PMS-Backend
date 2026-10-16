@@ -2,11 +2,17 @@ import { and, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 
 import { db } from "@/server/db/client";
+import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { guests } from "@/server/db/schema";
 
-const propertyId = "property-sun-star-inn";
-
 export async function GET(request: Request) {
+  let session;
+  try {
+    session = await requirePropertySession(request, "guests.manage");
+  } catch (error) {
+    return propertyAccessResponse(error);
+  }
+  const { propertyId } = session;
   const license = new URL(request.url).searchParams.get("number")?.replace(/\s/g, "").toUpperCase();
   if (!license) return NextResponse.json({ error: "ID number is required." }, { status: 400 });
   const guest = await db.query.guests.findFirst({

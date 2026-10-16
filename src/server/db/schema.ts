@@ -20,6 +20,23 @@ export const properties = sqliteTable("properties", {
   updatedAt: updatedAt(),
 });
 
+export const propertyMemberships = sqliteTable(
+  "property_memberships",
+  {
+    id: id("id"),
+    propertyId: text("property_id").notNull().references(() => properties.id),
+    authUserId: text("auth_user_id").notNull(),
+    role: text("role").notNull(),
+    active: integer("active", { mode: "boolean" }).notNull().default(true),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("property_memberships_user_property_key").on(table.authUserId, table.propertyId),
+    index("property_memberships_user_active_idx").on(table.authUserId, table.active),
+  ],
+);
+
 export const propertySettings = sqliteTable(
   "property_settings",
   {
@@ -183,6 +200,7 @@ export const employees = sqliteTable(
   {
     id: id("id"),
     propertyId: text("property_id").notNull().references(() => properties.id),
+    membershipId: text("membership_id").references(() => propertyMemberships.id),
     name: text("name").notNull(),
     role: text("role").notNull(),
     status: text("status").notNull(),
@@ -229,6 +247,7 @@ export const reservations = sqliteTable(
     checkedInAt: text("checked_in_at"),
     checkedOutAt: text("checked_out_at"),
     createdByEmployeeId: text("created_by_employee_id").references(() => employees.id),
+    version: integer("version").notNull().default(1),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -537,8 +556,26 @@ export const auditEvents = sqliteTable(
   (table) => [index("audit_events_entity_idx").on(table.entityType, table.entityId)],
 );
 
+export const changeEvents = sqliteTable(
+  "change_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    propertyId: text("property_id").notNull().references(() => properties.id),
+    actorAuthUserId: text("actor_auth_user_id").notNull(),
+    entityType: text("entity_type").notNull(),
+    entityId: text("entity_id").notNull(),
+    action: text("action").notNull(),
+    entityVersion: integer("entity_version").notNull(),
+    payloadJson: text("payload_json").notNull().default("{}"),
+    occurredAt: text("occurred_at").notNull(),
+  },
+  (table) => [index("change_events_property_id_idx").on(table.propertyId, table.id)],
+);
+
 export type Property = typeof properties.$inferSelect;
 export type NewProperty = typeof properties.$inferInsert;
+export type PropertyMembership = typeof propertyMemberships.$inferSelect;
+export type NewPropertyMembership = typeof propertyMemberships.$inferInsert;
 export type RoomType = typeof roomTypes.$inferSelect;
 export type NewRoomType = typeof roomTypes.$inferInsert;
 export type Room = typeof rooms.$inferSelect;

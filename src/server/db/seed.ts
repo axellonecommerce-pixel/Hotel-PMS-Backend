@@ -24,6 +24,7 @@ import {
   maintenanceWorkOrders,
   payments,
   properties,
+  propertyMemberships,
   propertySettings,
   propertyTasks,
   reservationCharges,
@@ -66,6 +67,7 @@ function clearDatabase() {
     DELETE FROM rooms;
     DELETE FROM room_types;
     DELETE FROM employees;
+    DELETE FROM property_memberships;
     DELETE FROM companies;
     DELETE FROM booking_channels;
     DELETE FROM business_days;
@@ -94,6 +96,16 @@ async function seed() {
     { id: "setting-charges", propertyId, key: "charge_types", value: JSON.stringify(defaultSettings.chargeTypes), updatedAt: seededAt },
     { id: "setting-expenses", propertyId, key: "expense_categories", value: JSON.stringify(defaultSettings.expenseCategories), updatedAt: seededAt },
   ]);
+
+  await db.insert(propertyMemberships).values({
+    id: "membership-demo-owner",
+    propertyId,
+    authUserId: process.env.PMS_DEMO_AUTH_USER_ID ?? "demo-owner-auth-user",
+    role: "owner",
+    active: true,
+    createdAt: seededAt,
+    updatedAt: seededAt,
+  });
 
   await db.insert(roomTypes).values(
     defaultSettings.roomTypes.map((roomType, index) => ({
@@ -132,10 +144,10 @@ async function seed() {
       status: employee.status,
       hourlyRateCents: employee.hourlyRateCents,
     })),
-    { id: "employee-owner", name: "Owner Admin", role: "Owner/Admin", status: "Active", hourlyRateCents: 0 },
+    { id: "employee-owner", membershipId: "membership-demo-owner", name: "Owner Admin", role: "Owner/Admin", status: "Active", hourlyRateCents: 0 },
   ];
   await db.insert(employees).values(
-    employeeRows.map((employee) => ({ ...employee, propertyId, createdAt: seededAt, updatedAt: seededAt })),
+    employeeRows.map((employee) => ({ ...employee, propertyId, membershipId: "membershipId" in employee ? employee.membershipId : undefined, createdAt: seededAt, updatedAt: seededAt })),
   );
 
   await db.insert(companies).values(

@@ -54,6 +54,22 @@ export type PropertySession = {
   active: boolean;
 };
 
+export type MembershipCandidate = {
+  propertyId: string;
+  role: string;
+  active: boolean;
+};
+
+export function selectPropertyMembership(memberships: MembershipCandidate[], requestedPropertyId?: string | null) {
+  const active = memberships.filter((membership) => membership.active);
+  if (requestedPropertyId) return active.find((membership) => membership.propertyId === requestedPropertyId) ?? null;
+  return active.length === 1 ? active[0] : null;
+}
+
+export function hasEditConflict(currentVersion: number, expectedVersion: number) {
+  return currentVersion !== expectedVersion;
+}
+
 export function authorizePropertyAccess(
   session: PropertySession | null,
   requestedPropertyId: string,
