@@ -15,6 +15,13 @@
       "when": 1792127506218,
       "tag": "0001_wonderful_hiroim",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792130856504,
+      "tag": "0002_cultured_wonder_man",
+      "breakpoints": true
     }
   ]
 }

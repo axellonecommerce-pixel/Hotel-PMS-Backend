@@ -22,6 +22,20 @@ flowchart TD
   L --> M[Room becomes dirty and available]
 ```
 
+### Cancel, No Show, and reinstate
+
+```mermaid
+flowchart TD
+  A[Reserved stay] --> B{Release reason}
+  B -->|Cancelled| C[Release inventory and optionally post cancellation fee]
+  B -->|No Show| D[Release inventory and optionally post no-show fee]
+  C --> E[Staff chooses Reinstate Reservation]
+  D --> E
+  E --> F[Check assigned rooms and room-type inventory]
+  F -->|Unavailable| G[Block reinstatement and explain what must change]
+  F -->|Available| H[Restore Reserved status, group-room statuses, rent, tax, total, and balance]
+```
+
 ## 2. Group partial checkout
 
 ```mermaid

@@ -55,11 +55,11 @@ erDiagram
 
 ## 4. Inventory, guests, and reservations
 
-- `room_types`, `rooms`, `room_blocks/out_of_order_periods`, `floor_map_items`.
+- `room_types`, `rooms`, `room_blocks/out_of_order_periods`, `floor_map_items`. Each room stores its Smoking/Non-Smoking designation.
 - `guests`: canonical profile and DNR state.
 - `guest_identities`: ID type/number normalized hash/key, metadata, storage object, captured/expiry/deletion dates. Unique `(property_id, normalized_id_type, normalized_id_number)` drives automatic merge.
 - `guest_merge_events`: surviving ID and merged IDs for operational recovery/reference without exposing deleted duplicates.
-- `guest_payment_sources`, `guest_remarks`, `guest_vehicles`.
+- `guest_payment_sources`, `guest_remarks`, `guest_vehicles`. `guest_remarks` stores one immutable row per remark with its own creation timestamp so new remarks append instead of overwriting history.
 - `reservations`: main guest, company, source, status, dates, stored tax snapshot, currency, group flag, notes.
 - `reservation_rooms`: one row per room in a single/group booking; room type, assigned room, dates/status, checkout state.
 - `reservation_guests`: guest membership and room association.

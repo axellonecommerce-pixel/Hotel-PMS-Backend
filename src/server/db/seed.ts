@@ -116,6 +116,7 @@ async function seed() {
       mapOrder: room.mapOrder,
       serviceStatus: room.serviceStatus,
       housekeepingStatus: room.housekeepingStatus,
+      smokingAllowed: room.smokingAllowed,
       outOfOrderReason: room.outOfOrderReason,
       active: true,
       createdAt: seededAt,

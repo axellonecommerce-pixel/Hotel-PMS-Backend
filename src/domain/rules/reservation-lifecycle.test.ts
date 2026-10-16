@@ -9,6 +9,7 @@ import {
   planRoomChargeMove,
   planNoShow,
   planCancellation,
+  planReservationReinstatement,
   remainingDepositCents,
   roomTypeAvailability,
 } from "./reservation-lifecycle";
@@ -101,4 +102,36 @@ test("No Show immediately releases every reserved room and optionally posts a fe
 
 test("cancellation releases inventory and applies only the selected fee", () => {
   expect(planCancellation({ currentStatus: "Reserved", requestedFeeCents: 5_000, amountPaidCents: 7_500, reservationRoomIds: ["room-stay-1"] })).toEqual({ allowed: true, status: "Cancelled", feeCents: 5_000, balanceCents: 0, releasedReservationRoomIds: ["room-stay-1"] });
+});
+
+test("cancelled and no-show reservations can be reinstated only when inventory is still available", () => {
+  expect(planReservationReinstatement({
+    currentStatus: "Cancelled",
+    requestedRoomCount: 2,
+    availableRoomCount: 2,
+    assignedRoomNumbers: ["101", "102"],
+  })).toEqual({
+    allowed: true,
+    status: "Reserved",
+    restoredRoomStatuses: [
+      { roomNumber: "101", status: "Reserved" },
+      { roomNumber: "102", status: "Reserved" },
+    ],
+  });
+  expect(planReservationReinstatement({
+    currentStatus: "No Show",
+    requestedRoomCount: 1,
+    availableRoomCount: 1,
+    unavailableAssignedRoomNumbers: ["101"],
+  })).toEqual({ allowed: false, reason: "ASSIGNED_ROOM_UNAVAILABLE", unavailableRooms: ["101"] });
+  expect(planReservationReinstatement({
+    currentStatus: "No Show",
+    requestedRoomCount: 2,
+    availableRoomCount: 1,
+  })).toEqual({ allowed: false, reason: "ROOM_TYPE_SOLD_OUT", requestedRoomCount: 2, availableRoomCount: 1 });
+  expect(planReservationReinstatement({
+    currentStatus: "Checked Out",
+    requestedRoomCount: 1,
+    availableRoomCount: 1,
+  })).toEqual({ allowed: false, reason: "NOT_RELEASED" });
 });

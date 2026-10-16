@@ -22,6 +22,7 @@ export type Room = {
   serviceStatus: RoomServiceStatus;
   housekeepingStatus: HousekeepingStatus;
   occupancyStatus: OccupancyStatus;
+  smokingAllowed: boolean;
   isDueOut: boolean;
   outOfOrderReason?: string;
 };

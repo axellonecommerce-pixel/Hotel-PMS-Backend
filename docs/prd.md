@@ -37,7 +37,7 @@ The first release is employee-only. It supports many hotels, but one owner accou
 
 ### 3.2 Guests and identity
 
-- **FR-GST-001:** A reservation may contain multiple guests. Each guest stores name, phone, address, ID type/number, ID image, remarks, DNR information, and payment-source metadata.
+- **FR-GST-001:** A reservation may contain multiple guests. Each guest stores name, phone, address, ID type/number, ID image, dated append-only remark entries, DNR information, and payment-source metadata. Adding a new guest remark never replaces an earlier remark.
 - **FR-GST-002:** ID images may be uploaded or scanned and are retained for one year. Staff receive an in-app notification seven days before automatic image deletion and can download the guest profile plus image as PDF. Other guest/stay data is retained until an authorized deletion.
 - **FR-GST-003:** Excel/CSV guest import is supported; ID type and ID number are mandatory. Other bulk imports are out of scope.
 - **FR-GST-004:** Matching ID numbers automatically merge duplicate profiles. The newest profile details win; remarks and DNR data merge; identical payment sources deduplicate; distinct payment sources remain.
@@ -52,7 +52,7 @@ The first release is employee-only. It supports many hotels, but one owner accou
 - **FR-RES-005:** On partial company checkout, room charges transfer toward one group company invoice. The invoice is created only after all group rooms check out.
 - **FR-RES-006:** Staff may change room or room type only after entering a remark. They choose whether to retain or replace the rate. The prior room becomes vacant/available and dirty. A dirty available destination is allowed after a warning; out-of-order rooms are blocked.
 - **FR-RES-007:** All moves appear in a date-filtered Room Move Report.
-- **FR-RES-008:** Early check-in, cancellation fee, late checkout, and no-show fee are supported. Marking No Show releases inventory immediately.
+- **FR-RES-008:** Early check-in, cancellation fee, late checkout, and no-show fee are supported. Marking No Show releases inventory immediately. Staff may reinstate a cancelled or No Show reservation after the system confirms that the assigned room and room-type inventory are still available; reinstatement restores the stay charges and group-room reservation statuses.
 - **FR-RES-009:** Online/OTA bookings are entered manually. Payment status supports Guest Pays Hotel, Paid Online, and Virtual Card Pending.
 
 ### 3.4 Rates, promotions, taxes, and charges
@@ -91,6 +91,7 @@ The first release is employee-only. It supports many hotels, but one owner accou
 ### 3.8 Housekeeping and maintenance
 
 - **FR-HSK-001:** All hotel rooms appear. Cleanliness (Dirty/Clean) and assignment (Assigned/Unassigned) are separate. One housekeeper per room; manager/front desk assigns, unassigns, and marks clean.
+- **FR-HSK-003:** Rooms store a Smoking or Non-Smoking designation. Smoking rooms show a clear smoking icon in Housekeeping and Floor Map views.
 - **FR-HSK-002:** Room cards show arrival, checkout, and stayover context. Productivity reports show rooms cleaned and average rooms per paid work period using clock-in/out time; no per-room timer is required.
 - **FR-MNT-001:** Maintenance stores room, problem, priority, worker, cost, notes, dates, photos, and receipts. Staff choose rentable versus out of order.
 - **FR-MNT-002:** Completing work does not reopen inventory. Staff explicitly make the room available, after which it is dirty.

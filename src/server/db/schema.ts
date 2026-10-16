@@ -62,6 +62,7 @@ export const rooms = sqliteTable(
     mapOrder: integer("map_order").notNull(),
     serviceStatus: text("service_status").notNull(),
     housekeepingStatus: text("housekeeping_status").notNull(),
+    smokingAllowed: integer("smoking_allowed", { mode: "boolean" }).notNull().default(false),
     outOfOrderReason: text("out_of_order_reason"),
     active: integer("active", { mode: "boolean" }).notNull(),
     createdAt: createdAt(),
@@ -110,6 +111,18 @@ export const guests = sqliteTable(
     index("guests_property_name_idx").on(table.propertyId, table.lastName, table.firstName),
     uniqueIndex("guests_property_license_key").on(table.propertyId, table.driverLicenseNormalized),
   ],
+);
+
+export const guestRemarks = sqliteTable(
+  "guest_remarks",
+  {
+    id: id("id"),
+    propertyId: text("property_id").notNull().references(() => properties.id),
+    guestId: text("guest_id").notNull().references(() => guests.id),
+    remark: text("remark").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [index("guest_remarks_guest_date_idx").on(table.guestId, table.createdAt)],
 );
 
 export const companies = sqliteTable(

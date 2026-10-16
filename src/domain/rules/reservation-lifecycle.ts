@@ -154,3 +154,32 @@ export function planCancellation(input: {
     releasedReservationRoomIds: [...input.reservationRoomIds],
   };
 }
+
+export function planReservationReinstatement(input: {
+  currentStatus: string;
+  requestedRoomCount: number;
+  availableRoomCount: number;
+  assignedRoomNumbers?: readonly string[];
+  unavailableAssignedRoomNumbers?: readonly string[];
+}) {
+  if (input.currentStatus !== "Cancelled" && input.currentStatus !== "No Show") {
+    return { allowed: false, reason: "NOT_RELEASED" as const };
+  }
+  const unavailableRooms = [...new Set(input.unavailableAssignedRoomNumbers ?? [])];
+  if (unavailableRooms.length > 0) {
+    return { allowed: false, reason: "ASSIGNED_ROOM_UNAVAILABLE" as const, unavailableRooms };
+  }
+  if (input.requestedRoomCount < 1 || input.availableRoomCount < input.requestedRoomCount) {
+    return {
+      allowed: false,
+      reason: "ROOM_TYPE_SOLD_OUT" as const,
+      requestedRoomCount: input.requestedRoomCount,
+      availableRoomCount: Math.max(0, input.availableRoomCount),
+    };
+  }
+  return {
+    allowed: true,
+    status: "Reserved" as const,
+    restoredRoomStatuses: (input.assignedRoomNumbers ?? []).map((roomNumber) => ({ roomNumber, status: "Reserved" as const })),
+  };
+}

@@ -92,6 +92,7 @@ export const rooms = pgTable("rooms", {
   section: text("section"),
   cleanlinessStatus: text("cleanliness_status").notNull().default("clean"),
   serviceStatus: text("service_status").notNull().default("rentable"),
+  smokingAllowed: boolean("smoking_allowed").notNull().default(false),
   active: boolean("active").notNull().default(true),
   mapData: jsonb("map_data"),
   createdAt: createdAt(),
@@ -116,6 +117,14 @@ export const guests = pgTable("guests", {
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 }, (table) => [index("guests_property_name").on(table.propertyId, table.lastName, table.firstName)]);
+
+export const guestRemarks = pgTable("guest_remarks", {
+  id: id(),
+  propertyId: propertyId(),
+  guestId: uuid("guest_id").notNull().references(() => guests.id),
+  remark: text("remark").notNull(),
+  createdAt: createdAt(),
+}, (table) => [index("guest_remarks_guest_date").on(table.guestId, table.createdAt)]);
 
 export const guestIdentities = pgTable("guest_identities", {
   id: id(),

@@ -28,6 +28,7 @@ const occupiedRooms = new Set([
 
 const dirtyRooms = new Set(["103", "125", "138", "139", "140"]);
 const dueOutRooms = new Set(["107", "117", "129"]);
+const smokingRooms = new Set(["134", "135", "136", "137", "138", "139", "140", "141", "142"]);
 
 function roomTypeFor(number: string) {
   const code = propertyRoomCodes[number];
@@ -58,6 +59,7 @@ export const mockRooms: Room[] = roomNumbers.map((number, index) => {
     serviceStatus: isOutOfOrder ? "out-of-order" : "in-service",
     housekeepingStatus,
     occupancyStatus,
+    smokingAllowed: smokingRooms.has(number),
     isDueOut: dueOutRooms.has(number),
     outOfOrderReason: isOutOfOrder ? "Air conditioner service" : undefined,
   } satisfies Room;
