@@ -540,6 +540,83 @@ export const notifications = sqliteTable(
   (table) => [index("notifications_property_status_idx").on(table.propertyId, table.status)],
 );
 
+export const attachments = sqliteTable(
+  "attachments",
+  {
+    id: id("id"),
+    propertyId: text("property_id").notNull().references(() => properties.id),
+    resourceType: text("resource_type").notNull(),
+    resourceId: text("resource_id").notNull(),
+    storageKey: text("storage_key").notNull(),
+    originalName: text("original_name").notNull(),
+    mimeType: text("mime_type").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    deleteAfter: text("delete_after"),
+    warnedAt: text("warned_at"),
+    deletedAt: text("deleted_at"),
+    createdAt: createdAt(),
+  },
+  (table) => [index("attachments_property_resource_idx").on(table.propertyId, table.resourceType, table.resourceId)],
+);
+
+export const documentSequences = sqliteTable(
+  "document_sequences",
+  {
+    id: id("id"), propertyId: text("property_id").notNull().references(() => properties.id),
+    prefix: text("prefix").notNull(), format: text("format").notNull(), nextNumber: integer("next_number").notNull(),
+    annualReset: integer("annual_reset", { mode: "boolean" }).notNull().default(false), resetYear: integer("reset_year"), updatedAt: updatedAt(),
+  },
+  (table) => [uniqueIndex("document_sequences_property_key").on(table.propertyId)],
+);
+
+export const registrationRuleVersions = sqliteTable(
+  "registration_rule_versions",
+  {
+    id: id("id"), propertyId: text("property_id").notNull().references(() => properties.id), versionNumber: integer("version_number").notNull(),
+    content: text("content").notNull(), active: integer("active", { mode: "boolean" }).notNull().default(true), createdAt: createdAt(),
+  },
+  (table) => [uniqueIndex("registration_rules_property_version_key").on(table.propertyId, table.versionNumber)],
+);
+
+export const registrationAcceptances = sqliteTable(
+  "registration_acceptances",
+  {
+    id: id("id"), propertyId: text("property_id").notNull().references(() => properties.id), reservationId: text("reservation_id").notNull().references(() => reservations.id),
+    ruleVersionId: text("rule_version_id").notNull().references(() => registrationRuleVersions.id), signedName: text("signed_name").notNull(), signatureStorageKey: text("signature_storage_key"), acceptedAt: text("accepted_at").notNull(),
+  },
+  (table) => [index("registration_acceptances_reservation_idx").on(table.reservationId)],
+);
+
+export const documentRecords = sqliteTable(
+  "document_records",
+  {
+    id: id("id"), propertyId: text("property_id").notNull().references(() => properties.id), reservationId: text("reservation_id").references(() => reservations.id),
+    companyId: text("company_id").references(() => companies.id), documentNumber: text("document_number").notNull(), documentType: text("document_type").notNull(),
+    status: text("status").notNull(), totalCents: integer("total_cents").notNull().default(0), balanceCents: integer("balance_cents").notNull().default(0),
+    dueDate: text("due_date"), sentAt: text("sent_at"), version: integer("version").notNull().default(1), createdAt: createdAt(), updatedAt: updatedAt(),
+  },
+  (table) => [uniqueIndex("document_records_property_number_key").on(table.propertyId, table.documentNumber)],
+);
+
+export const ledgerEntries = sqliteTable(
+  "ledger_entries",
+  {
+    id: id("id"), propertyId: text("property_id").notNull().references(() => properties.id), businessDate: text("business_date").notNull(),
+    account: text("account").notNull(), debitCents: integer("debit_cents").notNull().default(0), creditCents: integer("credit_cents").notNull().default(0),
+    resourceType: text("resource_type").notNull(), resourceId: text("resource_id").notNull(), description: text("description").notNull(), createdAt: createdAt(),
+  },
+  (table) => [index("ledger_entries_property_date_idx").on(table.propertyId, table.businessDate)],
+);
+
+export const nightAuditRuns = sqliteTable(
+  "night_audit_runs",
+  {
+    id: id("id"), propertyId: text("property_id").notNull().references(() => properties.id), businessDate: text("business_date").notNull(),
+    status: text("status").notNull(), blockingIssuesJson: text("blocking_issues_json").notNull().default("[]"), startedAt: text("started_at").notNull(), completedAt: text("completed_at"),
+  },
+  (table) => [uniqueIndex("night_audit_property_date_key").on(table.propertyId, table.businessDate)],
+);
+
 export const auditEvents = sqliteTable(
   "audit_events",
   {

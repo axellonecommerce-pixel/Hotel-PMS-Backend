@@ -14,12 +14,12 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 48 |
-| Partial | 17 |
+| Verified demo | 49 |
+| Partial | 16 |
 | Not implemented | 0 |
 | Total | 65 |
 
-All requirements now have an implementation path, but the product is **not yet production-complete against all approved requirements** because 17 remain partial. Most workflows are available for evaluation, while several operational screens still use React state and seeded data.
+All requirements now have an implementation path, but the product is **not yet production-complete against all approved requirements** because 16 remain partial. Most workflows are available for evaluation, while several operational screens still use React state and seeded data.
 
 ## Requirement-by-requirement traceability
 
@@ -73,7 +73,7 @@ All requirements now have an implementation path, but the product is **not yet p
 | FR-TIM-001 | Verified demo | Separate time events, live clock, complete manual shift, corrections, breaks, and configured overtime logic exist. |
 | FR-PAYR-001 | Verified demo | Pay periods, payday, hourly/piece/total compensation, and gross-pay calculations exist. |
 | FR-PAYR-002 | Verified demo | Paid state/date/method and optional correction note exist. |
-| FR-EXP-001 | Partial | Expense and recurrence records now persist; receipt file bytes still need secure object storage. |
+| FR-EXP-001 | Verified demo | Expense and recurrence records persist, and optional receipts upload to tenant-prefixed private object storage. |
 | FR-CSH-001 | Verified demo | Employee-shift cash, opening amount, multiple drops, and retained float exist. |
 | FR-CSH-002 | Verified demo | Expected/count/over-short calculation and Other-expense note validation exist. |
 | FR-AUD-001 | Partial | Manual/scheduled UI and blockers exist; durable scheduler, locked business day transaction, and failure notification job are absent. |

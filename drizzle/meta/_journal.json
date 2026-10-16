@@ -71,6 +71,13 @@
       "when": 1792165658508,
       "tag": "0009_milky_mach_iv",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1792166756752,
+      "tag": "0010_tricky_wrecking_crew",
+      "breakpoints": true
     }
   ]
 }

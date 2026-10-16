@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { authorizePropertyAccess, hasEditConflict, hasPermission, selectPropertyMembership } from "./authorization";
+import { balancedLedgerLines, formatDocumentNumber } from "@/domain/rules/accounting";
 
 describe("role authorization", () => {
   test("owner and manager can manage every feature", () => {
@@ -48,4 +49,10 @@ test("tenant selection never falls through to another hotel", () => {
 test("optimistic versions detect a second employee's stale edit", () => {
   expect(hasEditConflict(4, 3)).toBe(true);
   expect(hasEditConflict(4, 4)).toBe(false);
+});
+
+test("shared document formatting and ledger postings are deterministic and balanced", () => {
+  expect(formatDocumentNumber("FOL", "YYYY-######", 42, new Date("2026-10-16T12:00:00Z"))).toBe("FOL-2026-000042");
+  const lines = balancedLedgerLines("Cash", "Room Revenue", 12500);
+  expect(lines.reduce((sum, line) => sum + line.debitCents - line.creditCents, 0)).toBe(0);
 });
