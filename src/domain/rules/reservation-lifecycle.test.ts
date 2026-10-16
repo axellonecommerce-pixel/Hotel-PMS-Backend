@@ -8,6 +8,7 @@ import {
   nightAuditBlockers,
   planRoomChargeMove,
   planNoShow,
+  planCancellation,
   remainingDepositCents,
   roomTypeAvailability,
 } from "./reservation-lifecycle";
@@ -95,4 +96,8 @@ test("No Show immediately releases every reserved room and optionally posts a fe
     releasedReservationRoomIds: ["room-stay-1", "room-stay-2"],
   });
   expect(planNoShow({ currentStatus: "Checked In", reservationRoomIds: ["room-stay-1"] })).toEqual({ allowed: false, reason: "NOT_RESERVED" });
+});
+
+test("cancellation releases inventory and applies only the selected fee", () => {
+  expect(planCancellation({ currentStatus: "Reserved", requestedFeeCents: 5_000, reservationRoomIds: ["room-stay-1"] })).toEqual({ allowed: true, status: "Cancelled", feeCents: 5_000, releasedReservationRoomIds: ["room-stay-1"] });
 });

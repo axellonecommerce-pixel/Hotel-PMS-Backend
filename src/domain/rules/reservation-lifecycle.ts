@@ -136,3 +136,17 @@ export function planNoShow(input: {
     releasedReservationRoomIds: [...input.reservationRoomIds],
   };
 }
+
+export function planCancellation(input: {
+  currentStatus: string;
+  requestedFeeCents?: number;
+  reservationRoomIds: readonly string[];
+}) {
+  if (input.currentStatus !== "Reserved") return { allowed: false, reason: "NOT_RESERVED" as const };
+  return {
+    allowed: true,
+    status: "Cancelled" as const,
+    feeCents: Math.max(0, Math.round(input.requestedFeeCents ?? 0)),
+    releasedReservationRoomIds: [...input.reservationRoomIds],
+  };
+}
