@@ -119,3 +119,20 @@ export function nightAuditBlockers(input: {
   if (input.unresolvedOperationalIssueCount) blockers.push("OPERATIONAL_ISSUES");
   return blockers;
 }
+
+export function planNoShow(input: {
+  currentStatus: string;
+  requestedFeeCents?: number;
+  reservationRoomIds: readonly string[];
+}) {
+  if (input.currentStatus !== "Reserved") {
+    return { allowed: false, reason: "NOT_RESERVED" as const };
+  }
+  const feeCents = Math.max(0, Math.round(input.requestedFeeCents ?? 0));
+  return {
+    allowed: true,
+    status: "No Show" as const,
+    feeCents,
+    releasedReservationRoomIds: [...input.reservationRoomIds],
+  };
+}

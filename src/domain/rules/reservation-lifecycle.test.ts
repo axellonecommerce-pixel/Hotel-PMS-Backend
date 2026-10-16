@@ -7,6 +7,7 @@ import {
   createNightlyPostings,
   nightAuditBlockers,
   planRoomChargeMove,
+  planNoShow,
   remainingDepositCents,
   roomTypeAvailability,
 } from "./reservation-lifecycle";
@@ -84,4 +85,14 @@ test("Night Audit reports every blocking category", () => {
     openCashShiftCount: 1,
     unresolvedOperationalIssueCount: 0,
   })).toEqual(["UNPAID_DEPARTURES", "UNRESOLVED_DEPOSITS", "OPEN_CASH_SHIFTS"]);
+});
+
+test("No Show immediately releases every reserved room and optionally posts a fee", () => {
+  expect(planNoShow({ currentStatus: "Reserved", requestedFeeCents: 7_500, reservationRoomIds: ["room-stay-1", "room-stay-2"] })).toEqual({
+    allowed: true,
+    status: "No Show",
+    feeCents: 7_500,
+    releasedReservationRoomIds: ["room-stay-1", "room-stay-2"],
+  });
+  expect(planNoShow({ currentStatus: "Checked In", reservationRoomIds: ["room-stay-1"] })).toEqual({ allowed: false, reason: "NOT_RESERVED" });
 });
