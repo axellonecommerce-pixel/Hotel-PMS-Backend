@@ -95,7 +95,7 @@ erDiagram
 - `housekeeping_records`: room/date/service context, cleanliness status, assigned housekeeper, completed marker.
 - `maintenance_orders`: problem, priority, assigned worker, cost, rentable flag, status, dates.
 - `attachments`: property-scoped polymorphic metadata for maintenance photos/receipts, expense receipts, IDs, and logos.
-- `time_entries`: employee/date, manually editable clock in/out, unpaid break minutes, and correction note.
+- `time_entries`: employee/date, separately recorded or manually editable clock in/out and break start/end, derived unpaid break minutes, and correction note.
 - `payroll_periods`, `payroll_lines`, `piecework_items`, `payroll_payments`.
 - `vendors`, `expense_categories`, `expenses`, `recurring_expense_rules`.
 - `business_days`: property/date/status, opened/closed times; unique property/date.

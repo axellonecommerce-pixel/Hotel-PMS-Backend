@@ -410,6 +410,8 @@ export const timeEntries = sqliteTable(
     employeeId: text("employee_id").notNull().references(() => employees.id),
     clockInAt: text("clock_in_at").notNull(),
     clockOutAt: text("clock_out_at"),
+    breakStartAt: text("break_start_at"),
+    breakEndAt: text("break_end_at"),
     breakMinutes: integer("break_minutes").notNull(),
     status: text("status").notNull(),
     editReason: text("edit_reason"),

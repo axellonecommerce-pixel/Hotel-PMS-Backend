@@ -98,7 +98,7 @@ The first release is employee-only. It supports many hotels, but one owner accou
 
 ### 3.9 Time, payroll, expenses, and cash
 
-- **FR-TIM-001:** One clock-in/out period per housekeeper per day. Staff can use the live time clock or manually enter and correct the work date, clock-in time, clock-out time, and unpaid break minutes. Only the recorded break duration is deducted. Overtime/double-time rules follow the hotel's configured jurisdiction.
+- **FR-TIM-001:** One clock-in/out period per housekeeper per day. Staff can record clock-in, break start/end, and clock-out as separate events, use the live time clock, or enter the completed shift at once. Staff can correct the work date and times. Only the recorded break duration is deducted. Overtime/double-time rules follow the hotel's configured jurisdiction.
 - **FR-PAYR-001:** Hotels configure weekly/biweekly/semi-monthly or custom pay periods and payday. Employees may be hourly, quantity × fixed rate, or description + total amount. The PMS calculates hours and gross pay only.
 - **FR-PAYR-002:** Payroll records show paid status, date, and method. Owner/manager/accountant can correct time; correction note is optional.
 - **FR-EXP-001:** Hotels configure categories, vendors, recurring expenses, payment method, and optional receipt.

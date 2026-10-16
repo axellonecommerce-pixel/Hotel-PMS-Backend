@@ -136,9 +136,12 @@ flowchart TD
   H --> I[Manager/front desk marks clean]
   J[Open employee time clock] --> K{Use live clock?}
   K -->|Yes| L[Clock housekeeper in and out]
-  K -->|No| M[Enter work date, clock in, clock out and break minutes]
+  K -->|No| M{Enter complete shift?}
+  M -->|Yes| P[Enter work date, clock in, clock out and break minutes]
+  M -->|No| Q[Add clock in, break start/end and clock out separately]
   L --> N[Calculate paid hours and overtime]
-  M --> N
+  P --> N
+  Q --> N
   N --> O[Edit the time entry if a correction is needed]
 ```
 

@@ -581,6 +581,8 @@ export const timeEntries = pgTable("time_entries", {
   workDate: date("work_date").notNull(),
   clockInAt: timestamp("clock_in_at", { withTimezone: true }).notNull(),
   clockOutAt: timestamp("clock_out_at", { withTimezone: true }),
+  breakStartAt: timestamp("break_start_at", { withTimezone: true }),
+  breakEndAt: timestamp("break_end_at", { withTimezone: true }),
   lunchTaken: boolean("lunch_taken").notNull().default(false),
   breakMinutes: integer("break_minutes").notNull().default(0),
   correctionNote: text("correction_note"),
