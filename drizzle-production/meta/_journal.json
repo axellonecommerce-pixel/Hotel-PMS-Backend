@@ -22,6 +22,20 @@
       "when": 1792130856504,
       "tag": "0002_cultured_wonder_man",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792131295318,
+      "tag": "0003_new_hawkeye",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792132254433,
+      "tag": "0004_lowly_angel",
+      "breakpoints": true
     }
   ]
 }

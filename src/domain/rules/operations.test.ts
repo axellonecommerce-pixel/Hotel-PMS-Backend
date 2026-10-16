@@ -54,13 +54,24 @@ describe("guest merge", () => {
 });
 
 describe("payroll and hotel performance", () => {
-  test("deducts lunch only when recorded and splits configured overtime", () => {
+  test("deducts a manually entered break and splits configured overtime", () => {
     const clockIn = new Date("2026-10-15T08:00:00-07:00");
     const clockOut = new Date("2026-10-15T21:00:00-07:00");
-    expect(calculatePaidMinutes(clockIn, clockOut, true, {
+    expect(calculatePaidMinutes(clockIn, clockOut, 30, {
       dailyOvertimeAfterMinutes: 8 * 60,
       dailyDoubleTimeAfterMinutes: 12 * 60,
     })).toEqual({ paidMinutes: 750, regularMinutes: 480, overtimeMinutes: 240, doubleTimeMinutes: 30 });
+  });
+
+  test("supports a custom break duration and prevents a negative paid shift", () => {
+    const clockIn = new Date("2026-10-15T08:00:00-07:00");
+    const clockOut = new Date("2026-10-15T12:00:00-07:00");
+    expect(calculatePaidMinutes(clockIn, clockOut, 45, {
+      dailyOvertimeAfterMinutes: 8 * 60,
+    })).toEqual({ paidMinutes: 195, regularMinutes: 195, overtimeMinutes: 0, doubleTimeMinutes: 0 });
+    expect(calculatePaidMinutes(clockIn, clockOut, 300, {
+      dailyOvertimeAfterMinutes: 8 * 60,
+    }).paidMinutes).toBe(0);
   });
 
   test("counts zero-rate rooms as sold and reports both inventory bases", () => {

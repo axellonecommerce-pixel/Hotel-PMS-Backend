@@ -102,6 +102,7 @@ export const guests = sqliteTable(
     notes: text("notes"),
     dnrCode: text("dnr_code"),
     dnrRemarks: text("dnr_remarks"),
+    roomPreferences: text("room_preferences"),
     archivedAt: text("archived_at"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -265,6 +266,22 @@ export const guestVehicles = sqliteTable(
     updatedAt: updatedAt(),
   },
   (table) => [index("guest_vehicles_guest_idx").on(table.guestId)],
+);
+
+export const roomMoves = sqliteTable(
+  "room_moves",
+  {
+    id: id("id"),
+    propertyId: text("property_id").notNull().references(() => properties.id),
+    reservationRoomId: text("reservation_room_id").notNull().references(() => reservationRooms.id),
+    fromRoomId: text("from_room_id").notNull().references(() => rooms.id),
+    toRoomId: text("to_room_id").notNull().references(() => rooms.id),
+    rateDecision: text("rate_decision").notNull(),
+    remark: text("remark").notNull(),
+    movedByEmployeeId: text("moved_by_employee_id").references(() => employees.id),
+    movedAt: text("moved_at").notNull(),
+  },
+  (table) => [index("room_moves_reservation_room_idx").on(table.reservationRoomId)],
 );
 
 export const guestPaymentSources = sqliteTable(

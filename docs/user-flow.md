@@ -134,6 +134,12 @@ flowchart TD
   F --> G[Room becomes dirty]
   G --> H[Assign one housekeeper]
   H --> I[Manager/front desk marks clean]
+  J[Open employee time clock] --> K{Use live clock?}
+  K -->|Yes| L[Clock housekeeper in and out]
+  K -->|No| M[Enter work date, clock in, clock out and break minutes]
+  L --> N[Calculate paid hours and overtime]
+  M --> N
+  N --> O[Edit the time entry if a correction is needed]
 ```
 
 ## 8. Night Audit

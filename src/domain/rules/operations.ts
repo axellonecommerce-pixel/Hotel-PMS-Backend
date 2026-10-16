@@ -78,11 +78,14 @@ export type PayrollPolicy = {
 export function calculatePaidMinutes(
   clockIn: Date,
   clockOut: Date,
-  lunchTaken: boolean,
+  breakMinutes: number,
   policy: PayrollPolicy,
 ) {
   const elapsedMinutes = Math.max(0, Math.floor((clockOut.getTime() - clockIn.getTime()) / 60_000));
-  const paidMinutes = Math.max(0, elapsedMinutes - (lunchTaken ? 30 : 0));
+  const normalizedBreakMinutes = Number.isFinite(breakMinutes)
+    ? Math.max(0, Math.floor(breakMinutes))
+    : 0;
+  const paidMinutes = Math.max(0, elapsedMinutes - normalizedBreakMinutes);
   const doubleThreshold = policy.dailyDoubleTimeAfterMinutes ?? Number.POSITIVE_INFINITY;
   const regularMinutes = Math.min(paidMinutes, policy.dailyOvertimeAfterMinutes);
   const overtimeMinutes = Math.max(

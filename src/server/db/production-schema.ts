@@ -113,6 +113,7 @@ export const guests = pgTable("guests", {
   guestStatus: text("guest_status").notNull().default("active"),
   remarks: text("remarks"),
   dnrReason: text("dnr_reason"),
+  roomPreferences: jsonb("room_preferences"),
   archivedAt: timestamp("archived_at", { withTimezone: true }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
@@ -153,6 +154,18 @@ export const guestPaymentSources = pgTable("guest_payment_sources", {
   externalReference: text("external_reference"),
   createdAt: createdAt(),
 }, (table) => [index("guest_payment_source_guest").on(table.guestId)]);
+
+export const guestVehicles = pgTable("guest_vehicles", {
+  id: id(),
+  propertyId: propertyId(),
+  guestId: uuid("guest_id").notNull().references(() => guests.id),
+  plate: text("plate").notNull(),
+  make: text("make"),
+  color: text("color"),
+  year: text("year"),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, (table) => [index("guest_vehicle_guest").on(table.guestId)]);
 
 export const companies = pgTable("companies", {
   id: id(),
@@ -569,6 +582,7 @@ export const timeEntries = pgTable("time_entries", {
   clockInAt: timestamp("clock_in_at", { withTimezone: true }).notNull(),
   clockOutAt: timestamp("clock_out_at", { withTimezone: true }),
   lunchTaken: boolean("lunch_taken").notNull().default(false),
+  breakMinutes: integer("break_minutes").notNull().default(0),
   correctionNote: text("correction_note"),
 }, (table) => [uniqueIndex("time_entries_employee_date").on(table.employeeId, table.workDate)]);
 
