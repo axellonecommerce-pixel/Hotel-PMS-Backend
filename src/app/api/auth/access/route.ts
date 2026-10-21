@@ -2,6 +2,7 @@ import {
   propertyAccessResponse,
   requirePropertySession,
 } from "@/server/auth/property-session";
+import { requirePlatformAdmin } from "@/server/auth/platform-admin";
 
 /**
  * Verifies that a Supabase identity still belongs to an active motel. This is
@@ -12,10 +13,18 @@ export async function GET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reports.view");
     return Response.json({
+      access: "property",
       propertyId: session.propertyId,
       role: session.role,
     });
-  } catch (error) {
-    return propertyAccessResponse(error);
+  } catch (propertyError) {
+    // Platform administrators do not belong to a motel. Check that separate,
+    // explicitly configured role before rejecting the Supabase session.
+    try {
+      const admin = await requirePlatformAdmin(request);
+      return Response.json({ access: "platform", email: admin.email });
+    } catch {
+      return propertyAccessResponse(propertyError);
+    }
   }
 }
