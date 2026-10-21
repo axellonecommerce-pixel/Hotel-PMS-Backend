@@ -10,6 +10,7 @@ export type PlatformMotelInput = {
   timezone: string;
   ownerName: string;
   ownerEmail: string;
+  ownerPassword?: string;
   planName: string;
   billingCycle: "monthly" | "quarterly" | "yearly" | "custom";
   amountCents: number;
@@ -57,8 +58,8 @@ async function deleteOwnerAuthUser(id: string) {
 }
 
 export async function provisionPlatformMotel(input: PlatformMotelInput) {
-  const temporaryPassword = generateTemporaryPassword();
-  const ownerAuthUserId = await createOwnerAuthUser(input, temporaryPassword);
+  const temporaryPassword = input.ownerPassword ? null : generateTemporaryPassword();
+  const ownerAuthUserId = await createOwnerAuthUser(input, input.ownerPassword ?? temporaryPassword!);
   const propertyId = crypto.randomUUID();
   const membershipId = crypto.randomUUID();
   const employeeId = crypto.randomUUID();

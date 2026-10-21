@@ -7,7 +7,7 @@ import { provisionPlatformMotel } from "@/server/provisioning/platform-motel";
 const motelSchema = z.object({
   name: z.string().trim().min(1), addressLine1: z.string().trim().min(1), city: z.string().trim().min(1), region: z.string().trim().min(1),
   postalCode: z.string().trim().min(1), phone: z.string().trim().min(1), timezone: z.string().trim().min(1),
-  ownerName: z.string().trim().min(1), ownerEmail: z.string().trim().email(), planName: z.string().trim().min(1),
+  ownerName: z.string().trim().min(1), ownerEmail: z.string().trim().email(), ownerPassword: z.string().min(10).max(128).optional(), planName: z.string().trim().min(1),
   billingCycle: z.enum(["monthly", "quarterly", "yearly", "custom"]), amountCents: z.number().int().nonnegative(),
   startsOn: z.string().date(), expiresOn: z.string().date(), status: z.enum(["trial", "active", "past_due", "suspended", "cancelled"]), notes: z.string().trim().max(2000).optional(),
 }).refine((data) => data.expiresOn >= data.startsOn, { message: "Expiry must be on or after the start date.", path: ["expiresOn"] });
