@@ -1,10 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 function allowedOrigin(request: NextRequest) {
-  const origin = request.headers.get("origin");
+  const origin = request.headers.get("origin")?.replace(/\/$/, "");
   const allowed = (process.env.PMS_FRONTEND_ORIGINS ?? "http://localhost:4000")
     .split(",")
-    .map((value) => value.trim())
+    // Browsers send Origin without a trailing slash, while hosting dashboards
+    // commonly save URLs with one. Normalize both sides so a legitimate
+    // Netlify frontend is not rejected by CORS before it can save settings.
+    .map((value) => value.trim().replace(/\/$/, ""))
     .filter(Boolean);
   return origin && allowed.includes(origin) ? origin : null;
 }
