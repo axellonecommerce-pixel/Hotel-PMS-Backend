@@ -5,6 +5,7 @@
   "scripts": {
     "typecheck": "NODE_OPTIONS=--max-old-space-size=1024 tsc --noEmit",
     "test": "bun test",
+    "test:rls": "bun --env-file=.env.local scripts/verify-rls.ts",
     "db:generate": "drizzle-kit generate",
     "db:generate:production": "drizzle-kit generate --config drizzle.production.config.ts",
     "db:migrate": "mkdir -p data && drizzle-kit migrate",
@@ -15,6 +16,7 @@
     "better-sqlite3": "^13.0.3",
     "drizzle-orm": "^0.45.3",
     "next": "16.3.3",
+    "postgres": "^3.4.9",
     "zod": "^4.1.12"
   },
   "devDependencies": {

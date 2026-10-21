@@ -50,6 +50,20 @@
       "when": 1792165664686,
       "tag": "0006_large_banshee",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792168958730,
+      "tag": "0007_tranquil_bruce_banner",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792169047008,
+      "tag": "0008_worthless_jamie_braddock",
+      "breakpoints": true
     }
   ]
 }

@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 
 import { db } from "@/server/db/client";
 import { propertyMemberships } from "@/server/db/schema";
+import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import {
   authorizePropertyAccess,
   roles,
@@ -54,9 +55,15 @@ async function verifiedAuthUserId(request: Request) {
 export async function requirePropertySession(request: Request, permission: Permission): Promise<PropertySession> {
   const authUserId = await verifiedAuthUserId(request);
   const requestedPropertyId = request.headers.get("x-property-id");
-  const memberships = await db.query.propertyMemberships.findMany({
-    where: and(eq(propertyMemberships.authUserId, authUserId), eq(propertyMemberships.active, true)),
-  });
+  const memberships = hasProductionDatabase()
+    ? await productionSql()<Array<{ propertyId: string; role: string; active: boolean }>>`
+        select property_id as "propertyId", role, active
+        from property_memberships
+        where auth_user_id = ${authUserId}::uuid and active = true
+      `
+    : await db.query.propertyMemberships.findMany({
+        where: and(eq(propertyMemberships.authUserId, authUserId), eq(propertyMemberships.active, true)),
+      });
   const membership = selectPropertyMembership(memberships, requestedPropertyId);
   if (!membership || !isRole(membership.role)) {
     throw new PropertyAccessError(403, requestedPropertyId ? "You do not have access to this hotel." : "Select an authorized hotel.");

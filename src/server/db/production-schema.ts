@@ -172,6 +172,7 @@ export const companies = pgTable("companies", {
   propertyId: propertyId(),
   name: text("name").notNull(),
   billingAddress: jsonb("billing_address").notNull(),
+  paymentTermsDays: integer("payment_terms_days").notNull().default(30),
   status: text("status").notNull().default("active"),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
@@ -752,3 +753,19 @@ export const changeEvents = pgTable("change_events", {
   payload: jsonb("payload").notNull().default({}),
   occurredAt: createdAt(),
 }, (table) => [index("change_events_property_time").on(table.propertyId, table.occurredAt)]);
+
+export const ledgerEntries = pgTable("ledger_entries", {
+  id: id(),
+  propertyId: propertyId(),
+  businessDate: date("business_date").notNull(),
+  account: text("account").notNull(),
+  debitCents: integer("debit_cents").notNull().default(0),
+  creditCents: integer("credit_cents").notNull().default(0),
+  resourceType: text("resource_type").notNull(),
+  resourceId: uuid("resource_id").notNull(),
+  description: text("description").notNull(),
+  createdAt: createdAt(),
+}, (table) => [
+  index("ledger_entries_property_date").on(table.propertyId, table.businessDate),
+  index("ledger_entries_resource").on(table.propertyId, table.resourceType, table.resourceId),
+]);

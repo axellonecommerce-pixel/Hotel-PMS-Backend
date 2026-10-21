@@ -1,6 +1,6 @@
 function storageConfig() {
   const url = process.env.SUPABASE_URL?.replace(/\/$/, "");
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const key = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
   const bucket = process.env.PMS_PRIVATE_BUCKET ?? "hotel-private";
   if (!url || !key) throw new Error("Private file storage is not configured.");
   return { url, key, bucket };
@@ -12,6 +12,24 @@ export async function uploadPrivateFile(storageKey: string, file: File) {
     method: "POST", headers: { Authorization: `Bearer ${config.key}`, apikey: config.key, "Content-Type": file.type || "application/octet-stream", "x-upsert": "false" }, body: file,
   });
   if (!response.ok) throw new Error("Private file upload failed.");
+}
+
+export async function uploadPrivateBytes(storageKey: string, bytes: Uint8Array, mimeType: string) {
+  const config = storageConfig();
+  const body = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const response = await fetch(`${config.url}/storage/v1/object/${config.bucket}/${storageKey}`, {
+    method: "POST", headers: { Authorization: `Bearer ${config.key}`, apikey: config.key, "Content-Type": mimeType, "x-upsert": "true" }, body,
+  });
+  if (!response.ok) throw new Error("Private backup file restore failed.");
+}
+
+export async function downloadPrivateBytes(storageKey: string) {
+  const config = storageConfig();
+  const response = await fetch(`${config.url}/storage/v1/object/authenticated/${config.bucket}/${storageKey}`, {
+    headers: { Authorization: `Bearer ${config.key}`, apikey: config.key }, cache: "no-store",
+  });
+  if (!response.ok) throw new Error("Private backup file download failed.");
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 export async function signedPrivateFileUrl(storageKey: string) {

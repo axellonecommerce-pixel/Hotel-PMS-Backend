@@ -22,7 +22,12 @@ bun run db:seed
 
 ## Authentication and tenancy
 
-Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. Every operational API resolves the signed-in user to an active `property_memberships` row. If the employee belongs to more than one hotel, send `X-Property-Id`; the server rejects hotels outside that user's memberships.
+Set `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, and the server-only
+`SUPABASE_SECRET_KEY`. The legacy `SUPABASE_SERVICE_ROLE_KEY` name remains
+supported for existing deployments. Every operational API resolves the
+signed-in user to an active `property_memberships` row. If the employee belongs
+to more than one hotel, send `X-Property-Id`; the server rejects hotels outside
+that user's memberships.
 
 For local development only, set `PMS_DEMO_AUTH_ENABLED=true`, `PMS_DEMO_AUTH_TOKEN`, and `PMS_DEMO_AUTH_USER_ID`. Production never accepts the demo path.
 
