@@ -1,0 +1,96 @@
+import { productionSql } from "@/server/db/production";
+
+export type PlatformMotelInput = {
+  name: string;
+  addressLine1: string;
+  city: string;
+  region: string;
+  postalCode: string;
+  phone: string;
+  timezone: string;
+  ownerName: string;
+  ownerEmail: string;
+  planName: string;
+  billingCycle: "monthly" | "quarterly" | "yearly" | "custom";
+  amountCents: number;
+  startsOn: string;
+  expiresOn: string;
+  status: "trial" | "active" | "past_due" | "suspended" | "cancelled";
+  notes?: string;
+};
+
+const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%";
+
+export function generateTemporaryPassword() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+}
+
+async function createOwnerAuthUser(input: PlatformMotelInput, password: string) {
+  const baseUrl = process.env.SUPABASE_URL?.replace(/\/$/, "");
+  const secret = process.env.SUPABASE_SECRET_KEY;
+  if (!baseUrl || !secret) throw new Error("Supabase administrator access is not configured.");
+  const response = await fetch(`${baseUrl}/auth/v1/admin/users`, {
+    method: "POST",
+    headers: { apikey: secret, authorization: `Bearer ${secret}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      email: input.ownerEmail,
+      password,
+      email_confirm: true,
+      user_metadata: { full_name: input.ownerName, motel_name: input.name },
+    }),
+  });
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({})) as { msg?: string; message?: string };
+    throw new Error(result.msg ?? result.message ?? "The owner account could not be created.");
+  }
+  const result = await response.json() as { id?: string; user?: { id?: string } };
+  const id = result.id ?? result.user?.id;
+  if (!id) throw new Error("The owner account did not return an ID.");
+  return id;
+}
+
+async function deleteOwnerAuthUser(id: string) {
+  const baseUrl = process.env.SUPABASE_URL?.replace(/\/$/, "");
+  const secret = process.env.SUPABASE_SECRET_KEY;
+  if (baseUrl && secret) await fetch(`${baseUrl}/auth/v1/admin/users/${id}`, { method: "DELETE", headers: { apikey: secret, authorization: `Bearer ${secret}` } });
+}
+
+export async function provisionPlatformMotel(input: PlatformMotelInput) {
+  const temporaryPassword = generateTemporaryPassword();
+  const ownerAuthUserId = await createOwnerAuthUser(input, temporaryPassword);
+  const propertyId = crypto.randomUUID();
+  const membershipId = crypto.randomUUID();
+  const employeeId = crypto.randomUUID();
+  try {
+    await productionSql().begin(async (tx) => {
+      await tx`
+        insert into properties (id,name,address_line_1,city,region,postal_code,phone,timezone,status)
+        values (${propertyId}::uuid,${input.name},${input.addressLine1},${input.city},${input.region},${input.postalCode},${input.phone},${input.timezone},'active')
+      `;
+      await tx`
+        insert into property_memberships (id,property_id,auth_user_id,role,active)
+        values (${membershipId}::uuid,${propertyId}::uuid,${ownerAuthUserId}::uuid,'owner',true)
+      `;
+      await tx`
+        insert into employees (id,property_id,membership_id,name,email,job_role,pay_method,active)
+        values (${employeeId}::uuid,${propertyId}::uuid,${membershipId}::uuid,${input.ownerName},${input.ownerEmail},'Owner/Admin','hourly',true)
+      `;
+      await tx`
+        insert into property_settings (property_id,key,value)
+        values
+          (${propertyId}::uuid,'currency','{"code":"USD","country":"US"}'::jsonb),
+          (${propertyId}::uuid,'invoice','{"prefix":"FOL","nextNumber":1,"annualReset":false,"paymentTermsDays":30}'::jsonb),
+          (${propertyId}::uuid,'tax','{"percentage":0}'::jsonb)
+      `;
+      await tx`
+        insert into platform_subscriptions (property_id,plan_name,billing_cycle,amount_cents,starts_on,expires_on,status,notes)
+        values (${propertyId}::uuid,${input.planName},${input.billingCycle},${input.amountCents},${input.startsOn}::date,${input.expiresOn}::date,${input.status},${input.notes ?? null})
+      `;
+    });
+  } catch (error) {
+    await deleteOwnerAuthUser(ownerAuthUserId);
+    throw error;
+  }
+  return { propertyId, ownerEmail: input.ownerEmail, temporaryPassword };
+}

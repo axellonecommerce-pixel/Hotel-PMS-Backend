@@ -36,3 +36,18 @@ For local development only, set `PMS_DEMO_AUTH_ENABLED=true`, `PMS_DEMO_AUTH_TOK
 Set a strong `PMS_PROVISIONING_KEY`, then call `POST /api/admin/properties` with `X-PMS-Provisioning-Key`. The payload contains hotel contact/timezone details plus the existing Supabase owner's user ID and name. Provisioning transactionally creates the property, owner membership, owner employee, and starting settings.
 
 Set `PMS_FRONTEND_ORIGINS` to the comma-separated frontend origins allowed to call the API. Reservation clients subscribe to `GET /api/events`; writes use a required expected version and return `409 EDIT_CONFLICT` instead of overwriting a newer edit.
+
+## Platform Admin
+
+The central motel and subscription console is available at the frontend route
+`/platform`. It creates the motel, its owner email/password login, and its
+subscription in one action. Add `PMS_PLATFORM_ADMIN_EMAILS` in Vercel as a
+comma-separated list of the email addresses allowed to use this console.
+These addresses must already be Supabase Auth users. The console intentionally
+uses the server-only Supabase secret to create owner accounts; never place that
+secret in frontend environment variables.
+
+Apply `drizzle-production/0009_platform_subscriptions.sql` in the Supabase SQL
+Editor before using the console. It creates the current subscription and manual
+subscription-payment tables. Card charging is deliberately not implemented:
+payments can be recorded manually until a payment processor is selected.
