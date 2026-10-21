@@ -1,4 +1,5 @@
 import { productionSql } from "@/server/db/production";
+import { purgeArchivedMotelsForOwnerEmail } from "./motel-purge";
 
 export type PlatformMotelInput = {
   name: string;
@@ -103,6 +104,9 @@ async function deleteOwnerAuthUser(id: string) {
 }
 
 export async function provisionPlatformMotel(input: PlatformMotelInput) {
+  // Earlier releases archived deleted motels. Clear a matching legacy archive
+  // first, so its old Supabase user cannot block the same owner email.
+  await purgeArchivedMotelsForOwnerEmail(input.ownerEmail);
   const temporaryPassword = input.ownerPassword ? null : generateTemporaryPassword();
   const ownerAuthUserId = await createOwnerAuthUser(input, input.ownerPassword ?? temporaryPassword!);
   const propertyId = crypto.randomUUID();
