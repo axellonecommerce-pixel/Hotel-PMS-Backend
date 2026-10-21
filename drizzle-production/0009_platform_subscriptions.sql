@@ -26,3 +26,7 @@ CREATE TABLE "platform_subscription_payments" (
 );
 --> statement-breakpoint
 CREATE INDEX "platform_subscription_payments_property_idx" ON "platform_subscription_payments" ("property_id", "received_on" DESC);
+--> statement-breakpoint
+ALTER TABLE "platform_subscriptions" ENABLE ROW LEVEL SECURITY;
+--> statement-breakpoint
+ALTER TABLE "platform_subscription_payments" ENABLE ROW LEVEL SECURITY;
