@@ -32,6 +32,7 @@ export async function GET(request: Request) {
       left join lateral (
         select sum(amount_cents)::int as "paymentTotalCents" from platform_subscription_payments where property_id=p.id
       ) payments on true
+      where p.status <> 'deleted'
       order by s.expires_on asc nulls last,p.name asc
     `;
     const today = new Date().toISOString().slice(0, 10);

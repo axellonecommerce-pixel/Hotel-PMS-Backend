@@ -59,8 +59,9 @@ export async function requirePropertySession(request: Request, permission: Permi
   const memberships = hasProductionDatabase()
     ? await productionSql()<Array<{ propertyId: string; role: string; active: boolean }>>`
         select property_id as "propertyId", role, active
-        from property_memberships
-        where auth_user_id = ${authUserId}::uuid and active = true
+        from property_memberships m
+        join properties p on p.id=m.property_id
+        where m.auth_user_id = ${authUserId}::uuid and m.active = true and p.status <> 'deleted'
       `
     : await db.query.propertyMemberships.findMany({
         where: and(eq(propertyMemberships.authUserId, authUserId), eq(propertyMemberships.active, true)),

@@ -30,3 +30,22 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
     return Response.json({ updated: true });
   } catch (error) { return platformAdminAccessResponse(error); }
 }
+
+// Archive instead of physically cascading through years of reservations and
+// accounting records. The motel disappears from the platform and loses access,
+// while the administrator can still recover records if deletion was accidental.
+export async function DELETE(request: Request, { params }: { params: Promise<{ propertyId: string }> }) {
+  try {
+    await requirePlatformAdmin(request);
+    if (!hasProductionDatabase()) return Response.json({ error: "The Platform Admin requires the production database." }, { status: 503 });
+    const { propertyId } = await params;
+    if (!z.string().uuid().safeParse(propertyId).success) return Response.json({ error: "Invalid motel." }, { status: 400 });
+    const result = await productionSql()<Array<{ id: string }>>`
+      update properties set status='deleted',updated_at=now() where id=${propertyId}::uuid and status <> 'deleted' returning id
+    `;
+    if (!result.length) return Response.json({ error: "That motel was not found or is already deleted." }, { status: 404 });
+    await productionSql()`update property_memberships set active=false,updated_at=now() where property_id=${propertyId}::uuid`;
+    await productionSql()`update platform_subscriptions set status='cancelled',updated_at=now() where property_id=${propertyId}::uuid`;
+    return Response.json({ deleted: true });
+  } catch (error) { return platformAdminAccessResponse(error); }
+}
