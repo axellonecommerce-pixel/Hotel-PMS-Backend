@@ -10,15 +10,38 @@ import { initialApplicationSettings } from "@/server/provisioning/platform-motel
 
 const settingsSchema = z.record(z.string(), z.unknown());
 
+function parseStoredSettings(value: unknown) {
+  if (typeof value !== "string") return value;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reports.view");
     if (hasProductionDatabase()) {
-      const [record] = await productionSql()<Array<{ value: Record<string, unknown> }>>`
+      const [record] = await productionSql()<Array<{ value: unknown }>>`
         select value from property_settings
         where property_id=${session.propertyId}::uuid and key='application_settings'
       `;
-      if (record?.value) return Response.json({ settings: record.value });
+      const storedSettings = parseStoredSettings(record?.value);
+      if (storedSettings) {
+        // Versions released before this repair wrote JSON as a quoted JSONB
+        // string. Read it safely and repair it in place so a property never
+        // falls back to the generic "New Property" workspace again.
+        if (typeof record?.value === "string") {
+          await productionSql()`
+            update property_settings
+            set value=${productionSql().json(JSON.parse(JSON.stringify(storedSettings)))},updated_at=now()
+            where property_id=${session.propertyId}::uuid and key='application_settings'
+          `;
+        }
+        return Response.json({ settings: storedSettings });
+      }
 
       // Properties created before application_settings was introduced already
       // have their identity fields in the properties table. Turn those details
@@ -55,7 +78,7 @@ export async function GET(request: Request) {
       }, property.ownerId ?? session.authUserId);
       await productionSql()`
         insert into property_settings (property_id,key,value)
-        values (${session.propertyId}::uuid,'application_settings',${JSON.stringify(settings)}::jsonb)
+        values (${session.propertyId}::uuid,'application_settings',${productionSql().json(settings)})
         on conflict (property_id,key) do nothing
       `;
       return Response.json({ settings });
@@ -79,7 +102,7 @@ export async function PUT(request: Request) {
       await productionSql().begin(async (tx) => {
         await tx`
           insert into property_settings (property_id,key,value,updated_at)
-          values (${session.propertyId}::uuid,'application_settings',${JSON.stringify(parsed.data)}::jsonb,${now})
+          values (${session.propertyId}::uuid,'application_settings',${tx.json(JSON.parse(JSON.stringify(parsed.data)))},${now})
           on conflict (property_id,key) do update set value=excluded.value,updated_at=excluded.updated_at
         `;
         await tx`

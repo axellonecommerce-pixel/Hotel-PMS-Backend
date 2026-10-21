@@ -245,7 +245,7 @@ export async function provisionPlatformMotel(input: PlatformMotelInput) {
           (${propertyId}::uuid,'currency','{"code":"USD","country":"US"}'::jsonb),
           (${propertyId}::uuid,'invoice','{"prefix":"FOL","nextNumber":1,"annualReset":false,"paymentTermsDays":30}'::jsonb),
           (${propertyId}::uuid,'tax','{"percentage":0}'::jsonb),
-          (${propertyId}::uuid,'application_settings',${JSON.stringify(applicationSettings)}::jsonb)
+          (${propertyId}::uuid,'application_settings',${tx.json(applicationSettings)})
       `;
       await tx`
         insert into platform_subscriptions (property_id,plan_name,billing_cycle,amount_cents,starts_on,expires_on,status,notes)
