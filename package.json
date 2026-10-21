@@ -17,11 +17,15 @@
     "drizzle-orm": "^0.45.3",
     "next": "16.3.3",
     "postgres": "^3.4.9",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
     "zod": "^4.1.12"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
     "@types/bun": "^1.4.2",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
     "drizzle-kit": "^0.31.11",
     "tsx": "^4.23.15",
     "typescript": "^5"
