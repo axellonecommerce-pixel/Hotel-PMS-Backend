@@ -110,7 +110,8 @@ async function createOwnerAuthUser(
   password: string,
 ) {
   const baseUrl = process.env.SUPABASE_URL?.replace(/\/$/, "");
-  const secret = process.env.SUPABASE_SECRET_KEY;
+  const secret =
+    process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!baseUrl || !secret)
     throw new Error("Supabase administrator access is not configured.");
   const response = await fetch(`${baseUrl}/auth/v1/admin/users`, {
@@ -199,7 +200,8 @@ async function findAuthUserByEmail(
 
 async function deleteOwnerAuthUser(id: string) {
   const baseUrl = process.env.SUPABASE_URL?.replace(/\/$/, "");
-  const secret = process.env.SUPABASE_SECRET_KEY;
+  const secret =
+    process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (baseUrl && secret)
     await fetch(`${baseUrl}/auth/v1/admin/users/${id}`, {
       method: "DELETE",

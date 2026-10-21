@@ -111,12 +111,14 @@ export async function POST(request: Request) {
       );
     if (
       error instanceof Error &&
-      /Supabase administrator access/i.test(error.message)
+      /Supabase administrator access|invalid api key|invalid jwt|not allowed/i.test(
+        error.message,
+      )
     ) {
       return Response.json(
         {
           error:
-            "Motel creation is not configured: add SUPABASE_SECRET_KEY to the backend environment.",
+            "Motel creation is not configured: add a valid SUPABASE_SECRET_KEY (or legacy SUPABASE_SERVICE_ROLE_KEY) to the backend environment.",
         },
         { status: 503 },
       );

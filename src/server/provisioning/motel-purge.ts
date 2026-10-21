@@ -4,8 +4,10 @@ type AuthUser = { authUserId: string };
 
 function supabaseAdminConfig() {
   const baseUrl = process.env.SUPABASE_URL?.replace(/\/$/, "");
-  const secret = process.env.SUPABASE_SECRET_KEY;
-  if (!baseUrl || !secret) throw new Error("Supabase administrator access is not configured.");
+  const secret =
+    process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!baseUrl || !secret)
+    throw new Error("Supabase administrator access is not configured.");
   return { baseUrl, secret };
 }
 
@@ -16,8 +18,13 @@ async function deleteAuthUser(authUserId: string) {
     headers: { apikey: secret, authorization: `Bearer ${secret}` },
   });
   if (!response.ok && response.status !== 404) {
-    const result = await response.json().catch(() => ({})) as { msg?: string; message?: string };
-    throw new Error(result.msg ?? result.message ?? "A motel login could not be removed.");
+    const result = (await response.json().catch(() => ({}))) as {
+      msg?: string;
+      message?: string;
+    };
+    throw new Error(
+      result.msg ?? result.message ?? "A motel login could not be removed.",
+    );
   }
 }
 
@@ -39,7 +46,8 @@ export async function purgeMotel(propertyId: string) {
     const [remaining] = await productionSql()<Array<{ count: number }>>`
       select count(*)::int as count from property_memberships where auth_user_id=${member.authUserId}::uuid
     `;
-    if (!remaining || remaining.count === 0) await deleteAuthUser(member.authUserId);
+    if (!remaining || remaining.count === 0)
+      await deleteAuthUser(member.authUserId);
   }
   return true;
 }
