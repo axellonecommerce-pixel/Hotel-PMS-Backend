@@ -3,6 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/server/db/client";
 import { propertyMemberships } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { requirePlatformAdmin } from "./platform-admin";
 import {
   authorizePropertyAccess,
   roles,
@@ -64,7 +65,17 @@ export async function requirePropertySession(request: Request, permission: Permi
     : await db.query.propertyMemberships.findMany({
         where: and(eq(propertyMemberships.authUserId, authUserId), eq(propertyMemberships.active, true)),
       });
-  const membership = selectPropertyMembership(memberships, requestedPropertyId);
+  let membership = selectPropertyMembership(memberships, requestedPropertyId);
+  // A designated Platform Admin may inspect a selected property after
+  // provisioning it. Normal users still need an active property membership.
+  if (!membership && requestedPropertyId) {
+    try {
+      await requirePlatformAdmin(request);
+      membership = { propertyId: requestedPropertyId, role: "owner", active: true };
+    } catch {
+      // Keep the ordinary access-denied response below for non-admin users.
+    }
+  }
   if (!membership || !isRole(membership.role)) {
     throw new PropertyAccessError(403, requestedPropertyId ? "You do not have access to this hotel." : "Select an authorized hotel.");
   }
