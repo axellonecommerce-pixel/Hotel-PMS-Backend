@@ -107,13 +107,13 @@ export type AppSettings = {
 
 export const defaultSettings: AppSettings = {
   property: {
-    name: "Sun Star Inn",
-    addressLine1: "839 W. Pacheco Blvd.",
-    city: "Los Banos",
-    state: "CA",
-    postalCode: "93635",
-    phone: "(209) 826-3805",
-    roomCount: 42,
+    name: "New Property",
+    addressLine1: "",
+    city: "",
+    state: "",
+    postalCode: "",
+    phone: "",
+    roomCount: 0,
     checkInTime: "3:00 PM",
     checkoutTime: "11:00 AM",
   },
@@ -175,22 +175,16 @@ export const defaultSettings: AppSettings = {
     trackRoomsCleaned: true,
   },
   invoice: {
-    prefix: "SSI",
-    numberFormat: "SSI-YYYY-####",
-    nextInvoiceNumber: 7,
+    prefix: "INV",
+    numberFormat: "INV-YYYY-####",
+    nextInvoiceNumber: 1,
     defaultDueDays: 30,
   },
   tax: {
     percentage: 10,
     label: "Transient Occupancy Tax",
   },
-  users: [
-    { id: "user-owner", name: "Owner Admin", role: "Owner/Admin", status: "Active" },
-    { id: "user-maria", name: "Maria Rodriguez", role: "Manager", status: "Active" },
-    { id: "user-ana", name: "Ana Flores", role: "Front Desk", status: "Active" },
-    { id: "user-lucia", name: "Lucia Gomez", role: "Housekeeper", status: "Active" },
-    { id: "user-daniel", name: "Daniel Ruiz", role: "Housekeeper", status: "Active" },
-  ],
+  users: [],
 };
 
 export function formatInvoiceNumber(
