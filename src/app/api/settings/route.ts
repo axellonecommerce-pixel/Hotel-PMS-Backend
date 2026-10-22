@@ -1,4 +1,5 @@
 import { and, eq } from "drizzle-orm";
+import type { TransactionSql } from "postgres";
 import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
@@ -7,6 +8,33 @@ import { propertySettings } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { recordChange } from "@/server/realtime/change-events";
 import { initialApplicationSettings } from "@/server/provisioning/platform-motel";
+
+type ConfiguredRoomType = { id?: string; name?: string; shortLabel?: string; maxOccupancy?: number; baseRateCents?: number; active?: boolean; sortOrder?: number };
+type ConfiguredRoom = { number?: string; roomTypeId?: string; floor?: number; buildingId?: string; housekeepingStatus?: string; serviceStatus?: string; smokingAllowed?: boolean; mapColumn?: number; mapRow?: number; mapWidth?: number; mapHeight?: number };
+
+async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: string, value: Record<string, unknown>) {
+  const configuredTypes = Array.isArray(value.roomTypes) ? value.roomTypes as ConfiguredRoomType[] : [];
+  const configuredRooms = Array.isArray(value.rooms) ? value.rooms as ConfiguredRoom[] : [];
+  const typeIds = new Map<string, string>();
+  for (const [index, configured] of configuredTypes.entries()) {
+    if (!configured.id || !configured.name?.trim()) continue;
+    const [roomType] = await tx<Array<{ id: string }>>`
+      insert into room_types (property_id,name,short_label,max_occupancy,base_rate_cents,active,sort_order)
+      values (${propertyId}::uuid,${configured.name.trim()},${configured.shortLabel?.trim() || configured.name.trim()},${Math.max(1, configured.maxOccupancy ?? 1)},${Math.max(0, configured.baseRateCents ?? 0)},${configured.active !== false},${configured.sortOrder ?? index})
+      on conflict (property_id,name) do update set short_label=excluded.short_label,max_occupancy=excluded.max_occupancy,base_rate_cents=excluded.base_rate_cents,active=excluded.active,sort_order=excluded.sort_order,updated_at=now()
+      returning id
+    `;
+    typeIds.set(configured.id, roomType.id);
+  }
+  for (const room of configuredRooms) {
+    if (!room.number?.trim() || !room.roomTypeId || !typeIds.has(room.roomTypeId)) continue;
+    await tx`
+      insert into rooms (property_id,room_type_id,number,floor,section,cleanliness_status,service_status,smoking_allowed,active,map_data)
+      values (${propertyId}::uuid,${typeIds.get(room.roomTypeId)!}::uuid,${room.number.trim()},${String(room.floor ?? 1)},${room.buildingId || null},${room.housekeepingStatus || "clean"},${room.serviceStatus === "non-rentable" ? "non-rentable" : "rentable"},${Boolean(room.smokingAllowed)},true,${tx.json({ mapColumn: room.mapColumn, mapRow: room.mapRow, mapWidth: room.mapWidth, mapHeight: room.mapHeight })})
+      on conflict (property_id,number) do update set room_type_id=excluded.room_type_id,floor=excluded.floor,section=excluded.section,cleanliness_status=excluded.cleanliness_status,service_status=excluded.service_status,smoking_allowed=excluded.smoking_allowed,map_data=excluded.map_data,updated_at=now()
+    `;
+  }
+}
 
 const settingsSchema = z.record(z.string(), z.unknown());
 
@@ -105,6 +133,7 @@ export async function PUT(request: Request) {
           values (${session.propertyId}::uuid,'application_settings',${tx.json(JSON.parse(JSON.stringify(parsed.data)))},${now})
           on conflict (property_id,key) do update set value=excluded.value,updated_at=excluded.updated_at
         `;
+        await synchronizeConfiguredInventory(tx, session.propertyId, parsed.data);
         await tx`
           insert into change_events (property_id,actor_auth_user_id,entity_type,entity_id,action,entity_version,payload)
           values (${session.propertyId}::uuid,${session.authUserId}::uuid,'settings',${session.propertyId}::uuid,'updated',${Math.floor(Date.now() / 1000)},'{}'::jsonb)
