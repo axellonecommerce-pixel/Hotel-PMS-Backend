@@ -205,6 +205,11 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
         select 1 from reservation_rooms rr join reservations rs on rs.id=rr.reservation_id
         where rr.room_id=r.id and rr.status in ('reserved','checked_in') and rs.status in ('reserved','checked_in')
           and rs.arrival_date < ${payload.checkoutDate}::date and rs.departure_date > ${payload.checkInDate}::date
+      ) and not exists (
+        select 1 from maintenance_orders mo
+        where mo.room_id=r.id and mo.rentable=false and mo.status not in ('resolved','cancelled')
+          and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockFrom')::date else null end < ${payload.checkoutDate}::date
+          and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockTo')::date else null end >= ${payload.checkInDate}::date
       ) order by r.number for update
   `;
   const selectedRooms = payload.roomNumbers.length
