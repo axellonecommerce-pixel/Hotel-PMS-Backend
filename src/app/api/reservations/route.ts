@@ -20,6 +20,30 @@ import type { PropertySession } from "@/server/auth/authorization";
 export async function GET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
+    if (hasProductionDatabase()) {
+      const records = await productionSql()<Array<{
+        id: string; version: number; firstName: string; lastName: string; phone: string | null; room: string | null;
+        checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null;
+        taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number;
+      }>>`
+        select r.id,r.version,g.first_name as "firstName",g.last_name as "lastName",g.phone,
+          rr.room_number as room,r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
+          bs.name as source,r.status,r.tax_rate_basis_points as "taxRateBasisPoints",r.tax_exempt as "taxExempt",
+          coalesce((case when r.notes like '{%' then r.notes::jsonb->>'adults' end)::int,1) as adults,coalesce((case when r.notes like '{%' then r.notes::jsonb->>'children' end)::int,0) as children,
+          coalesce((case when r.notes like '{%' then r.notes::jsonb->>'petCount' end)::int,0) as "petCount",coalesce((case when r.notes like '{%' then r.notes::jsonb->>'servicePetCount' end)::int,0) as "servicePetCount",
+          coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rrx on rrx.id=nr.reservation_room_id where rrx.reservation_id=r.id),0)::int as "roomRentCents"
+        from reservations r
+        join guests g on g.id=r.main_guest_id
+        left join booking_sources bs on bs.id=r.booking_source_id
+        left join lateral (select coalesce(room.number,'Unassigned') as room_number from reservation_rooms rrx left join rooms room on room.id=rrx.room_id where rrx.reservation_id=r.id order by rrx.created_at limit 1) rr on true
+        where r.property_id=${session.propertyId}::uuid order by r.created_at desc
+      `;
+      return Response.json({ reservations: records.map((record) => {
+        const nights = Math.max(1, Math.round((new Date(`${record.checkoutDate}T12:00:00Z`).getTime() - new Date(`${record.checkInDate}T12:00:00Z`).getTime()) / 86_400_000));
+        const taxCents = record.taxExempt ? 0 : Math.round(record.roomRentCents * record.taxRateBasisPoints / 10_000);
+        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: false, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: "Credit", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.roomRentCents + taxCents, status: record.status === "reserved" ? "Reserved" : record.status === "checked_in" ? "Checked In" : record.status, rateCode: undefined, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+      }) });
+    }
     const records = await db.query.reservations.findMany({
       where: eq(reservations.propertyId, session.propertyId),
       orderBy: (table, { desc }) => [desc(table.createdAt)],
@@ -209,7 +233,7 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
   const nights = Math.round((new Date(`${payload.checkoutDate}T12:00:00Z`).getTime() - new Date(`${payload.checkInDate}T12:00:00Z`).getTime()) / 86_400_000);
   if (payload.nightlyRatesCents.length !== nights) throw new ReservationRequestError("Enter one nightly rate for every night of the stay.");
   const confirmationNumber = `PMS-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900 + 100)}`;
-  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${payload.otaPaymentStatus || null}) returning id`;
+  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${payload.otaPaymentStatus || null},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount })}::text) returning id`;
   const reservationRoomIds: string[] = [];
   for (let index = 0; index < payload.roomCount; index += 1) {
     const [reservationRoom] = await tx<Array<{ id: string }>>`insert into reservation_rooms (property_id,reservation_id,room_type_id,room_id,status) values (${session.propertyId}::uuid,${reservation.id}::uuid,${roomType.id}::uuid,${selectedRooms[index]?.id || null}::uuid,'reserved') returning id`;
