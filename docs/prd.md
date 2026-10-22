@@ -1,6 +1,6 @@
 # Hotel PMS — Product Requirements Document
 
-Status: Draft for owner review  
+Status: **Approved** — owner approval recorded in `docs/approval.md`.
 Version: 1.0  
 Product name: Hotel PMS (working name)
 

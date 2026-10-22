@@ -1,6 +1,6 @@
 # Hotel PMS — Target Database Schema
 
-Status: Proposed target. Current SQLite/Drizzle schema is a prototype and requires migrations after approval.
+Status: **Approved target schema** — owner approval is recorded in `docs/approval.md`; production migrations remain subject to the rules in `docs/rules.md`.
 
 ## 1. Modeling rules
 

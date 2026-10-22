@@ -1,6 +1,6 @@
 # Hotel PMS — UI/UX Design System
 
-Status: Proposed for approval. No visual implementation should begin until approved.
+Status: **Approved** — owner approval recorded in `docs/approval.md`.
 
 ## 1. Design direction
 

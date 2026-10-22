@@ -1,6 +1,6 @@
 # Hotel PMS — User Flows
 
-Status: Draft for owner review. These diagrams describe required behavior, not current implementation.
+Status: **Approved** — owner approval recorded in `docs/approval.md`. These diagrams describe required behavior, not current implementation.
 
 ## 1. Reservation to checkout
 

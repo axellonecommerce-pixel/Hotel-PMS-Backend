@@ -1,6 +1,6 @@
 # Hotel PMS — Technical Requirements and Architecture
 
-Status: Proposed; requires owner approval before cloud setup or implementation.
+Status: **Approved** — owner approval recorded in `docs/approval.md`.
 
 ## 1. Architecture goals
 
