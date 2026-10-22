@@ -130,6 +130,30 @@ class ReservationRequestError extends Error {
 }
 
 type ReservationPayload = z.infer<typeof payloadSchema>;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+type StoredRoomType = { id: string; name: string; shortLabel?: string; maxOccupancy?: number; baseRateCents?: number; active?: boolean };
+type StoredRoom = { number: string; roomTypeId: string; floor?: number; buildingId?: string; smokingAllowed?: boolean; serviceStatus?: string; housekeepingStatus?: string; mapColumn?: number; mapRow?: number; mapWidth?: number; mapHeight?: number };
+
+async function productionRoomTypeForSettingsId(tx: TransactionSql, propertyId: string, roomTypeId: string) {
+  if (uuidPattern.test(roomTypeId)) {
+    const [existing] = await tx<Array<{ id: string; baseRateCents: number; active: boolean }>>`select id,base_rate_cents as "baseRateCents",active from room_types where id=${roomTypeId}::uuid and property_id=${propertyId}::uuid for update`;
+    if (existing) return existing;
+  }
+  const [settingsRecord] = await tx<Array<{ value: { roomTypes?: StoredRoomType[]; rooms?: StoredRoom[] } | string }>>`select value from property_settings where property_id=${propertyId}::uuid and key='application_settings' for update`;
+  const settings = typeof settingsRecord?.value === "string" ? JSON.parse(settingsRecord.value) as { roomTypes?: StoredRoomType[]; rooms?: StoredRoom[] } : settingsRecord?.value;
+  const configuredType = settings?.roomTypes?.find((type) => type.id === roomTypeId);
+  if (!configuredType) throw new ReservationRequestError("The selected room type is no longer configured.", 409);
+  let [roomType] = await tx<Array<{ id: string; baseRateCents: number; active: boolean }>>`select id,base_rate_cents as "baseRateCents",active from room_types where property_id=${propertyId}::uuid and name=${configuredType.name} for update`;
+  if (!roomType) {
+    [roomType] = await tx<Array<{ id: string; baseRateCents: number; active: boolean }>>`insert into room_types (property_id,name,short_label,max_occupancy,base_rate_cents,active,sort_order) values (${propertyId}::uuid,${configuredType.name},${configuredType.shortLabel || configuredType.name},${configuredType.maxOccupancy ?? 1},${configuredType.baseRateCents ?? 0},${configuredType.active !== false},0) returning id,base_rate_cents as "baseRateCents",active`;
+  }
+  const configuredRooms = settings?.rooms?.filter((room) => room.roomTypeId === configuredType.id) ?? [];
+  for (const room of configuredRooms) {
+    await tx`insert into rooms (property_id,room_type_id,number,floor,section,cleanliness_status,service_status,smoking_allowed,active,map_data) values (${propertyId}::uuid,${roomType.id}::uuid,${room.number},${String(room.floor ?? 1)},${room.buildingId || null},${room.housekeepingStatus || 'clean'},${room.serviceStatus === 'non-rentable' ? 'non-rentable' : 'rentable'},${Boolean(room.smokingAllowed)},true,${tx.json({ mapColumn: room.mapColumn, mapRow: room.mapRow, mapWidth: room.mapWidth, mapHeight: room.mapHeight })}) on conflict (property_id,number) do update set room_type_id=excluded.room_type_id,floor=excluded.floor,section=excluded.section,cleanliness_status=excluded.cleanliness_status,service_status=excluded.service_status,smoking_allowed=excluded.smoking_allowed,map_data=excluded.map_data,updated_at=now()`;
+  }
+  return roomType;
+}
 
 async function createProductionReservation(request: Request, session: PropertySession) {
   const parsed = payloadSchema.safeParse(await request.json());
@@ -147,10 +171,7 @@ async function createProductionReservation(request: Request, session: PropertySe
 }
 
 async function createProductionReservationTransaction(tx: TransactionSql, session: PropertySession, payload: ReservationPayload) {
-  const [roomType] = await tx<Array<{ id: string; baseRateCents: number; active: boolean }>>`
-    select id, base_rate_cents as "baseRateCents", active from room_types
-    where id=${payload.roomTypeId}::uuid and property_id=${session.propertyId}::uuid for update
-  `;
+  const roomType = await productionRoomTypeForSettingsId(tx, session.propertyId, payload.roomTypeId);
   if (!roomType?.active) throw new ReservationRequestError("Select an active room type.", 409);
   const roomsForType = await tx<Array<{ id: string; number: string }>>`
     select r.id, r.number from rooms r
