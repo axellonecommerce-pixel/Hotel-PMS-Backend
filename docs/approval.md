@@ -1,6 +1,6 @@
 # Hotel PMS approval record
 
-Status: **Awaiting owner approval**  
+Status: **Approved**
 Scope: Multi-hotel Hotel PMS v1
 
 This record is the approval gate required by `docs/rules.md`. It does not
@@ -37,11 +37,11 @@ Approve only if the following are accepted:
 
 | Field | Value |
 |---|---|
-| Owner approval | Pending |
-| Approved by | — |
-| Approval date | — |
-| Approved document versions | — |
-| Approved exceptions / notes | — |
+| Owner approval | Approved |
+| Approved by | Project owner |
+| Approval date | October 21, 2026 |
+| Approved document versions | Current repository versions of PRD, TRD, user flow, design system, schema, rules, and this approval record |
+| Approved exceptions / notes | Approval was provided in writing. The implementation-status record remains authoritative for evidence and any remaining migration work. |
 
 To approve, the owner must explicitly confirm all six documents and this
 record in writing. Any requirement change after approval requires a new
