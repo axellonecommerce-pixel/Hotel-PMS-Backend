@@ -11,10 +11,12 @@ import { initialApplicationSettings } from "@/server/provisioning/platform-motel
 
 type ConfiguredRoomType = { id?: string; name?: string; shortLabel?: string; maxOccupancy?: number; baseRateCents?: number; active?: boolean; sortOrder?: number };
 type ConfiguredRoom = { number?: string; roomTypeId?: string; floor?: number; buildingId?: string; housekeepingStatus?: string; serviceStatus?: string; smokingAllowed?: boolean; mapColumn?: number; mapRow?: number; mapWidth?: number; mapHeight?: number };
+type ConfiguredEmployee = { name?: string; role?: string; hourlyRateCents?: number; status?: string };
 
 async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: string, value: Record<string, unknown>) {
   const configuredTypes = Array.isArray(value.roomTypes) ? value.roomTypes as ConfiguredRoomType[] : [];
   const configuredRooms = Array.isArray(value.rooms) ? value.rooms as ConfiguredRoom[] : [];
+  const configuredEmployees = Array.isArray(value.employees) ? value.employees as ConfiguredEmployee[] : [];
   const typeIds = new Map<string, string>();
   for (const [index, configured] of configuredTypes.entries()) {
     if (!configured.id || !configured.name?.trim()) continue;
@@ -33,6 +35,15 @@ async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: st
       values (${propertyId}::uuid,${typeIds.get(room.roomTypeId)!}::uuid,${room.number.trim()},${String(room.floor ?? 1)},${room.buildingId || null},${room.housekeepingStatus || "clean"},${room.serviceStatus === "non-rentable" ? "non-rentable" : "rentable"},${Boolean(room.smokingAllowed)},true,${tx.json({ mapColumn: room.mapColumn, mapRow: room.mapRow, mapWidth: room.mapWidth, mapHeight: room.mapHeight })})
       on conflict (property_id,number) do update set room_type_id=excluded.room_type_id,floor=excluded.floor,section=excluded.section,cleanliness_status=excluded.cleanliness_status,service_status=excluded.service_status,smoking_allowed=excluded.smoking_allowed,map_data=excluded.map_data,updated_at=now()
     `;
+  }
+  // Settings-created employees do not necessarily have login memberships, but
+  // they are still operational staff and must exist as relational records for
+  // housekeeping, maintenance, payroll, and time workflows.
+  for (const employee of configuredEmployees) {
+    if (!employee.name?.trim() || !employee.role?.trim()) continue;
+    const [existing] = await tx<Array<{ id: string }>>`select id from employees where property_id=${propertyId}::uuid and lower(name)=lower(${employee.name.trim()}) limit 1`;
+    if (existing) await tx`update employees set job_role=${employee.role.trim()},hourly_rate_cents=${Math.max(0, employee.hourlyRateCents ?? 0)},active=${employee.status !== "Inactive"},updated_at=now() where id=${existing.id}::uuid`;
+    else await tx`insert into employees (property_id,name,job_role,pay_method,hourly_rate_cents,active) values (${propertyId}::uuid,${employee.name.trim()},${employee.role.trim()},'hourly',${Math.max(0, employee.hourlyRateCents ?? 0)},${employee.status !== "Inactive"})`;
   }
 }
 
