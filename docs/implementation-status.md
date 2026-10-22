@@ -29,7 +29,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 |---|---|---|
 | FR-TEN-001 | Verified demo | Protected product-team provisioning API transactionally creates the hotel, owner membership/employee, and starting settings. |
 | FR-TEN-002 | Verified demo | APIs derive hotel scope from the authenticated user's active membership and reject cross-hotel access. |
-| FR-TEN-003 | Verified demo | The full hotel configuration is loaded and saved through a tenant-scoped settings API; each save also transactionally synchronizes configured room types and rooms into the relational production inventory used by operations. |
+| FR-TEN-003 | Verified demo | The full hotel configuration is loaded and saved through a tenant-scoped settings API; each save also transactionally synchronizes configured room types, rooms, and operational employees into relational production records used by workflows. |
 | FR-TEN-004 | Verified demo | USD/US defaults are used and production schema includes currency/country-ready fields. |
 | FR-GST-001 | Verified demo | Multi-guest data, ID fields, remarks, DNR, and payment-source UI/domain models exist. |
 | FR-GST-002 | Verified production path | Guest ID images use the private Supabase bucket, identity metadata is durable, the daily worker warns seven days before expiry, deletes at one year, and writes a retention tombstone so backups cannot restore an expired image. |
