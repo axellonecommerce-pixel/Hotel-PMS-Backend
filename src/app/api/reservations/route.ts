@@ -1,6 +1,7 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import type { TransactionSql } from "postgres";
 
 import { db } from "@/server/db/client";
 import { calculateCommissionCents } from "@/domain/rules/commission";
@@ -8,6 +9,8 @@ import { calculateTaxCents } from "@/domain/rules/tax";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { bookingChannels, companies, guests, reservationCharges, reservationRooms, reservations, rooms, roomTypes } from "@/server/db/schema";
 import { recordChange } from "@/server/realtime/change-events";
+import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import type { PropertySession } from "@/server/auth/authorization";
 
 /**
  * The operational UI needs a real property-scoped read model after refresh.
@@ -122,6 +125,85 @@ function normalizePhone(phone: string) {
   return phone.replace(/\D/g, "");
 }
 
+class ReservationRequestError extends Error {
+  constructor(message: string, readonly status = 400) { super(message); }
+}
+
+type ReservationPayload = z.infer<typeof payloadSchema>;
+
+async function createProductionReservation(request: Request, session: PropertySession) {
+  const parsed = payloadSchema.safeParse(await request.json());
+  if (!parsed.success) return Response.json({ error: "Required guest and stay details are missing." }, { status: 400 });
+  const payload = parsed.data;
+  if (payload.checkoutDate <= payload.checkInDate) return Response.json({ error: "Check-out must be after check-in." }, { status: 400 });
+  try {
+    const result = await productionSql().begin(async (tx) => createProductionReservationTransaction(tx, session, payload));
+    return Response.json(result, { status: 201 });
+  } catch (error) {
+    if (error instanceof ReservationRequestError) return Response.json({ error: error.message }, { status: error.status });
+    console.error("Production reservation creation failed", { propertyId: session.propertyId, error });
+    return Response.json({ error: "Reservation could not be created. Please verify the room and guest details, then try again." }, { status: 500 });
+  }
+}
+
+async function createProductionReservationTransaction(tx: TransactionSql, session: PropertySession, payload: ReservationPayload) {
+  const [roomType] = await tx<Array<{ id: string; baseRateCents: number; active: boolean }>>`
+    select id, base_rate_cents as "baseRateCents", active from room_types
+    where id=${payload.roomTypeId}::uuid and property_id=${session.propertyId}::uuid for update
+  `;
+  if (!roomType?.active) throw new ReservationRequestError("Select an active room type.", 409);
+  const roomsForType = await tx<Array<{ id: string; number: string }>>`
+    select r.id, r.number from rooms r
+    where r.property_id=${session.propertyId}::uuid and r.room_type_id=${roomType.id}::uuid
+      and r.active=true and r.service_status='rentable'
+      and not exists (
+        select 1 from reservation_rooms rr join reservations rs on rs.id=rr.reservation_id
+        where rr.room_id=r.id and rr.status in ('reserved','checked_in') and rs.status in ('reserved','checked_in')
+          and rs.arrival_date < ${payload.checkoutDate}::date and rs.departure_date > ${payload.checkInDate}::date
+      ) order by r.number for update
+  `;
+  const selectedRooms = payload.roomNumbers.length
+    ? payload.roomNumbers.map((number) => roomsForType.find((room) => room.number === number))
+    : [];
+  if (selectedRooms.some((room) => !room) || payload.roomNumbers.length > payload.roomCount) throw new ReservationRequestError("One or more selected rooms are not rentable.", 409);
+  if (roomsForType.length < payload.roomCount) throw new ReservationRequestError("That room type no longer has enough inventory for those dates.", 409);
+  if (payload.companyId) {
+    const [company] = await tx<Array<{ id: string; status: string }>>`select id,status from companies where id=${payload.companyId}::uuid and property_id=${session.propertyId}::uuid`;
+    if (!company || company.status !== "active") throw new ReservationRequestError("Select an active company for Direct Bill.");
+  }
+  const normalizedId = normalizeId(payload.idNumber);
+  const [identity] = await tx<Array<{ guestId: string; guestStatus: string }>>`
+    select gi.guest_id as "guestId",g.guest_status as "guestStatus" from guest_identities gi join guests g on g.id=gi.guest_id
+    where gi.property_id=${session.propertyId}::uuid and gi.normalized_id_number=${normalizedId} and gi.deleted_at is null for update
+  `;
+  if (identity?.guestStatus === "do_not_rent" && !payload.dnrOverrideReason) throw new ReservationRequestError("Enter a reason to override the Do Not Rent warning.", 403);
+  let guestId = identity?.guestId;
+  const address = { addressLine1: payload.addressLine1 ?? "", city: payload.city ?? "", state: payload.state ?? "", postalCode: payload.postalCode ?? "", country: payload.country ?? "", countryCode: payload.countryCode };
+  if (guestId) await tx`update guests set first_name=${payload.firstName},last_name=${payload.lastName},phone=${normalizePhone(payload.phone)},email=${payload.email || null},address=${tx.json(address)},updated_at=now() where id=${guestId}::uuid`;
+  else {
+    const [guest] = await tx<Array<{ id: string }>>`insert into guests (property_id,first_name,last_name,phone,email,address,guest_status) values (${session.propertyId}::uuid,${payload.firstName},${payload.lastName},${normalizePhone(payload.phone)},${payload.email || null},${tx.json(address)},'active') returning id`;
+    guestId = guest.id;
+    await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.idType},${payload.idNumber},${normalizedId},now()+interval '1 year')`;
+  }
+  const nights = Math.round((new Date(`${payload.checkoutDate}T12:00:00Z`).getTime() - new Date(`${payload.checkInDate}T12:00:00Z`).getTime()) / 86_400_000);
+  if (payload.nightlyRatesCents.length !== nights) throw new ReservationRequestError("Enter one nightly rate for every night of the stay.");
+  const confirmationNumber = `PMS-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900 + 100)}`;
+  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${payload.otaPaymentStatus || null}) returning id`;
+  const reservationRoomIds: string[] = [];
+  for (let index = 0; index < payload.roomCount; index += 1) {
+    const [reservationRoom] = await tx<Array<{ id: string }>>`insert into reservation_rooms (property_id,reservation_id,room_type_id,room_id,status) values (${session.propertyId}::uuid,${reservation.id}::uuid,${roomType.id}::uuid,${selectedRooms[index]?.id || null}::uuid,'reserved') returning id`;
+    reservationRoomIds.push(reservationRoom.id);
+  }
+  for (const reservationRoomId of reservationRoomIds) for (let night = 0; night < nights; night += 1) {
+    const date = new Date(`${payload.checkInDate}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + night);
+    const rate = payload.nightlyRatesCents[night];
+    await tx`insert into nightly_rates (property_id,reservation_room_id,stay_date,base_rate_cents,discount_cents,final_rate_cents) values (${session.propertyId}::uuid,${reservationRoomId}::uuid,${date.toISOString().slice(0, 10)}::date,${rate},0,${rate})`;
+  }
+  const roomRentCents = payload.nightlyRatesCents.reduce((sum, rate) => sum + rate, 0) * payload.roomCount;
+  const taxCents = payload.taxExempt ? 0 : calculateTaxCents(roomRentCents, payload.taxRatePercentage / 100);
+  return { guestId, reservationId: reservation.id, groupReservation: payload.roomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents: 0, totalCents: roomRentCents + taxCents, version: 1 };
+}
+
 export async function POST(request: Request) {
   let session;
   try {
@@ -129,6 +211,7 @@ export async function POST(request: Request) {
   } catch (error) {
     return propertyAccessResponse(error);
   }
+  if (hasProductionDatabase()) return createProductionReservation(request, session);
   const { propertyId } = session;
   try {
   const parsed = payloadSchema.safeParse(await request.json());
