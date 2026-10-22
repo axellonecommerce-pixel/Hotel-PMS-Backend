@@ -9,6 +9,72 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { bookingChannels, companies, guests, reservationCharges, reservationRooms, reservations, rooms, roomTypes } from "@/server/db/schema";
 import { recordChange } from "@/server/realtime/change-events";
 
+/**
+ * The operational UI needs a real property-scoped read model after refresh.
+ * This intentionally returns the compact list shape used by the front desk;
+ * details remain loaded by the reservation workspace as that API expands.
+ */
+export async function GET(request: Request) {
+  try {
+    const session = await requirePropertySession(request, "reservations.manage");
+    const records = await db.query.reservations.findMany({
+      where: eq(reservations.propertyId, session.propertyId),
+      orderBy: (table, { desc }) => [desc(table.createdAt)],
+    });
+    const guestIds = records.map((record) => record.guestId);
+    const roomIds = records.flatMap((record) => (record.roomId ? [record.roomId] : []));
+    const [reservationGuests, reservationRooms] = await Promise.all([
+      guestIds.length
+        ? db.query.guests.findMany({ where: inArray(guests.id, guestIds) })
+        : Promise.resolve([]),
+      roomIds.length
+        ? db.query.rooms.findMany({ where: inArray(rooms.id, roomIds) })
+        : Promise.resolve([]),
+    ]);
+    const guestsById = new Map(reservationGuests.map((guest) => [guest.id, guest]));
+    const roomsById = new Map(reservationRooms.map((room) => [room.id, room]));
+    return Response.json({
+      reservations: records.map((record) => {
+        const guest = guestsById.get(record.guestId);
+        const room = record.roomId ? roomsById.get(record.roomId) : undefined;
+        const nights = Math.max(1, Math.round((new Date(`${record.departureDate}T12:00:00Z`).getTime() - new Date(`${record.arrivalDate}T12:00:00Z`).getTime()) / 86_400_000));
+        const roomRentCents = record.roomRateCents * nights;
+        const taxCents = Math.round(roomRentCents * record.taxRateBasisPoints / 10_000);
+        return {
+          id: record.id,
+          version: record.version,
+          firstName: guest?.firstName ?? "Unknown",
+          lastName: guest?.lastName ?? "Guest",
+          phone: guest?.phone ?? "",
+          room: room?.number ?? "Unassigned",
+          groupReservation: false,
+          checkInDate: record.arrivalDate,
+          checkoutDate: record.departureDate,
+          checkInTime: "3:00 PM",
+          nights,
+          source: record.source,
+          paymentType: record.paymentArrangement,
+          roomRentCents,
+          taxCents: record.taxExempt ? 0 : taxCents,
+          totalCents: roomRentCents + (record.taxExempt ? 0 : taxCents),
+          balanceCents: roomRentCents + (record.taxExempt ? 0 : taxCents),
+          status: record.status,
+          rateCode: record.rateCode ?? undefined,
+          taxRatePercentage: record.taxRateBasisPoints / 100,
+          taxExempt: record.taxExempt,
+          notes: record.notes ?? undefined,
+          adults: record.adultCount,
+          children: record.childCount,
+          petCount: record.petCount,
+          servicePetCount: record.servicePetCount,
+        };
+      }),
+    });
+  } catch (error) {
+    return propertyAccessResponse(error);
+  }
+}
+
 const payloadSchema = z.object({
   idType: z.enum(["US Driver License", "Passport", "Other"]),
   idNumber: z.string().trim().min(1),
