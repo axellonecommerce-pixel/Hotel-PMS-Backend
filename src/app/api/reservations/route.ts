@@ -130,6 +130,7 @@ export async function POST(request: Request) {
     return propertyAccessResponse(error);
   }
   const { propertyId } = session;
+  try {
   const parsed = payloadSchema.safeParse(await request.json());
   if (!parsed.success) {
     return NextResponse.json({ error: "Required guest and stay details are missing.", issues: parsed.error.flatten() }, { status: 400 });
@@ -309,36 +310,42 @@ export async function POST(request: Request) {
     }))).run();
   });
 
-  recordChange({
-    propertyId,
-    actorAuthUserId: session.authUserId,
-    entityType: "reservation",
-    entityId: reservationId,
-    action: "created",
-    entityVersion: 1,
-    payload: {
-      reservation: {
-        id: reservationId,
-        version: 1,
-        firstName: payload.firstName,
-        lastName: payload.lastName,
-        phone: payload.phone,
-        room: payload.roomNumbers[0] ?? "Unassigned",
-        groupReservation: payload.roomCount > 1,
-        checkInDate: payload.checkInDate,
-        checkoutDate: payload.checkoutDate,
-        checkInTime: "3:00 PM",
-        nights,
-        source: payload.source,
-        paymentType: payload.companyId ? "Direct Bill" : "Credit",
-        roomRentCents,
-        taxCents,
-        totalCents: roomRentCents + taxCents,
-        balanceCents: roomRentCents + taxCents,
-        status: "Reserved",
+  // Change notifications must never turn a committed reservation into a
+  // failed browser request. The reservation transaction above is authoritative.
+  try {
+    recordChange({
+      propertyId,
+      actorAuthUserId: session.authUserId,
+      entityType: "reservation",
+      entityId: reservationId,
+      action: "created",
+      entityVersion: 1,
+      payload: {
+        reservation: {
+          id: reservationId,
+          version: 1,
+          firstName: payload.firstName,
+          lastName: payload.lastName,
+          phone: payload.phone,
+          room: payload.roomNumbers[0] ?? "Unassigned",
+          groupReservation: payload.roomCount > 1,
+          checkInDate: payload.checkInDate,
+          checkoutDate: payload.checkoutDate,
+          checkInTime: "3:00 PM",
+          nights,
+          source: payload.source,
+          paymentType: payload.companyId ? "Direct Bill" : "Credit",
+          roomRentCents,
+          taxCents,
+          totalCents: roomRentCents + taxCents,
+          balanceCents: roomRentCents + taxCents,
+          status: "Reserved",
+        },
       },
-    },
-  });
+    });
+  } catch (error) {
+    console.error("Reservation change event failed", { propertyId, reservationId, error });
+  }
 
   return NextResponse.json({
     guestId,
@@ -351,6 +358,12 @@ export async function POST(request: Request) {
     totalCents: roomRentCents + taxCents,
     version: 1,
   }, { status: 201 });
+  } catch (error) {
+    // Do not let an unhandled database or JSON parsing error become an empty
+    // Vercel response. The client can now explain that the request failed.
+    console.error("Reservation creation failed", { propertyId, error });
+    return NextResponse.json({ error: "Reservation could not be created. Please verify the room and guest details, then try again." }, { status: 500 });
+  }
 }
 
 const updateSchema = z.object({
