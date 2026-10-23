@@ -31,6 +31,8 @@ const editSchema = z.object({
   taxOverrideReason: z.string().trim().min(1).optional(),
 });
 
+const deleteSchema = z.object({ chargeId: z.string().uuid() });
+
 type ChargeContext = {
   reservationId: string;
   taxRateBasisPoints: number;
@@ -176,11 +178,62 @@ export async function PATCH(request: Request) {
         description: `${description} tax adjustment`, debitAccount: taxDifference > 0 ? "Guest Receivable" : "Tax Payable",
         creditAccount: taxDifference > 0 ? "Tax Payable" : "Guest Receivable", amountCents: Math.abs(taxDifference),
       });
-      return { id: current.id, description, amountCents, taxCents: nextTax, totalCents: amountCents + nextTax };
+      const [balance] = await tx<Array<{ balanceCents: number }>>`
+        select (
+          coalesce((select sum(c.amount_cents + coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios all_folios on all_folios.id=c.folio_id where all_folios.reservation_id=${current.reservationId}::uuid and c.status='posted'),0)
+          - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios all_folios on all_folios.id=pa.folio_id where all_folios.reservation_id=${current.reservationId}::uuid),0)
+        )::int as "balanceCents"
+      `;
+      return { id: current.id, description, amountCents, taxCents: nextTax, totalCents: amountCents + nextTax, balanceCents: balance?.balanceCents ?? amountCents + nextTax };
     });
     return Response.json({ charge: updated });
   } catch (error) {
     if (error instanceof Error && /charge|tax/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    return propertyAccessResponse(error);
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const session = await requirePropertySession(request, "folios.manage");
+    const parsed = deleteSchema.safeParse(await request.json());
+    if (!parsed.success) return Response.json({ error: "A valid charge is required." }, { status: 400 });
+    const result = await productionSql().begin(async (tx) => {
+      const [current] = await tx<Array<ChargeContext & { id: string; description: string; amountCents: number; serviceDate: string; taxCents: number }>>`
+        select c.id, c.description, c.amount_cents as "amountCents", c.service_date::text as "serviceDate",
+          coalesce(ctax.amount_cents, 0) as "taxCents", r.id as "reservationId",
+          r.tax_rate_basis_points as "taxRateBasisPoints", r.tax_exempt as "taxExempt",
+          c.type as "typeName", coalesce(def.revenue_category, 'misc') as "revenueCategory", c.taxable
+        from charges c
+        join folios f on f.id = c.folio_id
+        join reservations r on r.id = f.reservation_id
+        left join charge_taxes ctax on ctax.charge_id = c.id
+        left join charge_types def on def.property_id = c.property_id and def.name = c.type
+        where c.id = ${parsed.data.chargeId}::uuid and c.property_id = ${session.propertyId}::uuid
+          and c.status = 'posted' and c.type <> 'Room Rent'
+        for update of c
+      `;
+      if (!current) throw new Error("Charge not found or cannot be removed.");
+      await tx`update charges set status='void', updated_at=now() where id=${current.id}::uuid`;
+      await postProductionLedger(tx, {
+        propertyId: session.propertyId, businessDate: current.serviceDate, resourceType: "charge-void", resourceId: current.id,
+        description: `${current.description} void`, debitAccount: revenueAccount(current), creditAccount: "Guest Receivable", amountCents: current.amountCents,
+      });
+      if (current.taxCents > 0) await postProductionLedger(tx, {
+        propertyId: session.propertyId, businessDate: current.serviceDate, resourceType: "charge-tax-void", resourceId: current.id,
+        description: `${current.description} tax void`, debitAccount: "Tax Payable", creditAccount: "Guest Receivable", amountCents: current.taxCents,
+      });
+      const [balance] = await tx<Array<{ balanceCents: number }>>`
+        select (
+          coalesce((select sum(c.amount_cents + coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios all_folios on all_folios.id=c.folio_id where all_folios.reservation_id=${current.reservationId}::uuid and c.status='posted'),0)
+          - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios all_folios on all_folios.id=pa.folio_id where all_folios.reservation_id=${current.reservationId}::uuid),0)
+        )::int as "balanceCents"
+      `;
+      return { balanceCents: balance?.balanceCents ?? 0 };
+    });
+    return Response.json(result);
+  } catch (error) {
+    if (error instanceof Error && /charge/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
