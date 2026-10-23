@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 22 |
-| Verified production path | 43 |
+| Verified demo | 21 |
+| Verified production path | 44 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -35,7 +35,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-GST-002 | Verified production path | Guest ID images use the private Supabase bucket, identity metadata is durable, the daily worker warns seven days before expiry, deletes at one year, and writes a retention tombstone so backups cannot restore an expired image. |
 | FR-GST-003 | Verified production path | Guest CSV import validates required ID type and number, then transactionally creates or merges tenant-scoped guest and identity records by normalized ID number. |
 | FR-GST-004 | Verified demo | Matching-ID merge and payment-source deduplication behavior is implemented in the guest domain/context. |
-| FR-GST-005 | Verified demo | DNR warning, reasoned override, and remark display exist. |
+| FR-GST-005 | Verified production path | Reservation creation locks the identified guest, requires a reason before overriding Do Not Rent status, and durably records the property-scoped reservation/guest/reason in `dnr_overrides`. |
 | FR-GST-006 | Verified production path | Extra guests are created or reused as tenant-scoped guest profiles, then durably attached through `reservation_guests`. Reservation reads, realtime refresh, and printed stay documents reload the persisted guest list after a browser refresh. |
 | FR-RES-001 | Verified production path | The tenant-scoped Availability API reads configured active room types and rate rules, durable rentable rooms, overlapping reservations, and maintenance blocks to return every room type (including zero inventory) with authoritative rates, tax, and bookable room numbers. Reservation creation repeats the overlap and rentable-room check inside its PostgreSQL transaction. |
 | FR-RES-002 | Verified demo | Multi-room/group reservation state and combined folio behavior exist. |

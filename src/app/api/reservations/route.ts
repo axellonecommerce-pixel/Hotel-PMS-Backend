@@ -314,6 +314,13 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
   const confirmationNumber = `PMS-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900 + 100)}`;
   const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${payload.otaPaymentStatus || null},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: payload.source })}::text) returning id`;
   await tx`insert into reservation_guests (property_id,reservation_id,guest_id,"primary") values (${session.propertyId}::uuid,${reservation.id}::uuid,${guestId}::uuid,true) on conflict (reservation_id,guest_id) do update set "primary"=true`;
+  if (identity?.guestStatus === "do_not_rent" && payload.dnrOverrideReason) {
+    // Keep the reason with the specific stay. A guest profile may later be
+    // changed, but the approval decision for this reservation must remain an
+    // immutable operational record.
+    await tx`insert into dnr_overrides (property_id,reservation_id,guest_id,reason)
+      values (${session.propertyId}::uuid,${reservation.id}::uuid,${guestId}::uuid,${payload.dnrOverrideReason})`;
+  }
   const reservationRoomsCreated: Array<{ id: string; roomNumber: number }> = [];
   for (let index = 0; index < payload.roomCount; index += 1) {
     const [reservationRoom] = await tx<Array<{ id: string }>>`insert into reservation_rooms (property_id,reservation_id,room_type_id,room_id,status) values (${session.propertyId}::uuid,${reservation.id}::uuid,${roomType.id}::uuid,${selectedRooms[index]?.id || null}::uuid,'reserved') returning id`;
