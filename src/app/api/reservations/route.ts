@@ -5,6 +5,7 @@ import type { TransactionSql } from "postgres";
 
 import { db } from "@/server/db/client";
 import { calculateCommissionCents } from "@/domain/rules/commission";
+import { canUseRateCode } from "@/domain/rules/rate-code";
 import { calculateTaxCents } from "@/domain/rules/tax";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { bookingChannels, companies, guests, reservationCharges, reservationRooms, reservations, rooms, roomTypes } from "@/server/db/schema";
@@ -206,12 +207,9 @@ async function validateProductionRateCode(tx: TransactionSql, propertyId: string
   // Legacy properties may not have created configurable rate codes yet. RACK
   // is the only safe fallback in that state; every configured rate code must
   // be active and must belong to this property.
-  if (!rateCodes.length) {
-    if (rateCodeName !== "RACK") throw new ReservationRequestError("The selected rate code is no longer configured.", 409);
-    return;
+  if (!canUseRateCode(rateCodeName, rateCodes)) {
+    throw new ReservationRequestError(rateCodes.length ? "Select an active rate code." : "The selected rate code is no longer configured.", 409);
   }
-  const rateCode = rateCodes.find((candidate) => candidate.name === rateCodeName);
-  if (!rateCode || rateCode.active === false) throw new ReservationRequestError("Select an active rate code.", 409);
 }
 
 async function createProductionReservation(request: Request, session: PropertySession) {

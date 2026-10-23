@@ -91,7 +91,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | NFR-UX-002 | Verified production path | Playwright plus axe-core now checks representative dashboards, operational boards, companies, settings, and reservation workspace views for serious/critical WCAG issues; skip-link and reduced-motion behavior are also exercised. |
 | NFR-RT-001 | Verified demo | Tenant-scoped server-sent events update reservation clients without refresh; versioned writes return a conflict instead of overwriting a newer edit. |
 | NFR-SEC-001 | Verified production path | API property scope comes from the authenticated production membership. All 62 public Supabase tables have RLS, and the live rollback-only isolation test proves Hotel A cannot read Hotel B property/company records. |
-| NFR-QA-001 | Verified production path | The release checks include 28 domain/authorization tests, a live RLS integration check, TypeScript checks, and 49 browser tests spanning phone, tablet portrait/landscape, desktop, keyboard navigation, accessibility, and horizontal overflow. |
+| NFR-QA-001 | Verified production path | The release checks include 29 domain/authorization tests, a live RLS integration check, TypeScript checks, and 49 browser tests spanning phone, tablet portrait/landscape, desktop, keyboard navigation, accessibility, and horizontal overflow. |
 
 ## Next production migration gates
 
