@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { postProductionLedger } from "@/server/finance/production-finance";
 
 const requestSchema = z.object({
   expectedVersion: z.number().int().positive(),
@@ -74,6 +75,19 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
           where property_id=${session.propertyId}::uuid order by business_date desc limit 1
         `;
         const effectiveDate = businessDay?.date ?? new Date().toISOString().slice(0, 10);
+        // Capture the existing folio amounts before changing them. A room move
+        // must adjust the accounting ledger by the same difference as the
+        // visible charge, otherwise Revenue and the guest folio diverge.
+        const affectedCharges = await tx<Array<{ id: string; serviceDate: string; amountCents: number; taxCents: number }>>`
+          select c.id,c.service_date::text as "serviceDate",c.amount_cents as "amountCents",
+            coalesce(ct.amount_cents,0)::int as "taxCents"
+          from charges c
+          left join charge_taxes ct on ct.charge_id=c.id
+          where c.property_id=${session.propertyId}::uuid
+            and c.reservation_room_id=${reservationRoom.id}::uuid
+            and c.type='Room Rent' and c.service_date>=${effectiveDate}::date and c.status='posted'
+          for update of c
+        `;
         await tx`
           update nightly_rates set base_rate_cents=${destination.baseRateCents},discount_cents=0,final_rate_cents=${destination.baseRateCents}
           where reservation_room_id=${reservationRoom.id}::uuid and stay_date>=${effectiveDate}::date
@@ -89,6 +103,33 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
             where ct.charge_id=c.id and c.reservation_room_id=${reservationRoom.id}::uuid
               and c.type='Room Rent' and c.service_date>=${effectiveDate}::date and c.status='posted'
           `;
+        }
+        for (const charge of affectedCharges) {
+          const roomRentDifference = destination.baseRateCents - charge.amountCents;
+          if (roomRentDifference !== 0) await postProductionLedger(tx, {
+            propertyId: session.propertyId,
+            businessDate: charge.serviceDate,
+            resourceType: "room-move-rate-adjustment",
+            resourceId: charge.id,
+            description: `Room move rate adjustment · ${charge.serviceDate}`,
+            debitAccount: roomRentDifference > 0 ? "Guest Receivable" : "Room Revenue",
+            creditAccount: roomRentDifference > 0 ? "Room Revenue" : "Guest Receivable",
+            amountCents: Math.abs(roomRentDifference),
+          });
+          if (!reservation.taxExempt) {
+            const nextTaxCents = Math.round(destination.baseRateCents * reservation.taxRateBasisPoints / 10_000);
+            const taxDifference = nextTaxCents - charge.taxCents;
+            if (taxDifference !== 0) await postProductionLedger(tx, {
+              propertyId: session.propertyId,
+              businessDate: charge.serviceDate,
+              resourceType: "room-move-tax-adjustment",
+              resourceId: charge.id,
+              description: `Room move tax adjustment · ${charge.serviceDate}`,
+              debitAccount: taxDifference > 0 ? "Guest Receivable" : "Tax Payable",
+              creditAccount: taxDifference > 0 ? "Tax Payable" : "Guest Receivable",
+              amountCents: Math.abs(taxDifference),
+            });
+          }
         }
       }
       await tx`
