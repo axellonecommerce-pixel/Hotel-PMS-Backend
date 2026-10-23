@@ -63,6 +63,7 @@ export async function GET(request: Request) {
           insert into payroll_entries (property_id,pay_period_id,employee_id,calculation_type,regular_minutes,overtime_minutes,rate_cents,description,gross_pay_cents,paid)
           values (${session.propertyId}::uuid,${period.id}::uuid,${employee.id}::uuid,'hourly',${minutes.minutes},0,${rate},'{"adjustmentCents":0,"status":"Pending"}',${gross},false)
           on conflict (pay_period_id,employee_id) do update set regular_minutes=excluded.regular_minutes,rate_cents=excluded.rate_cents,gross_pay_cents=excluded.gross_pay_cents,updated_at=now()
+          where payroll_entries.paid=false
         `;
       }
       const entries = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; hourlyRateCents: number | null; description: string | null; paid: boolean; periodId: string }>>`
@@ -87,12 +88,16 @@ export async function PATCH(request: Request) {
     const parsed = updateSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Payroll update is invalid." }, { status: 400 });
     if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
-    const [current] = await productionSql()<Array<{ description: string | null; paid: boolean }>>`select description,paid from payroll_entries where id=${parsed.data.id}::uuid and property_id=${session.propertyId}::uuid for update`;
-    if (!current) return Response.json({ error: "Payroll entry not found." }, { status: 404 });
-    const meta = parseDescription(current.description);
-    const status = parsed.data.status ?? (current.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending");
-    const adjustmentCents = parsed.data.adjustmentCents ?? meta.adjustmentCents ?? 0;
-    await productionSql()`update payroll_entries set paid=${status === "Paid"},paid_on=case when ${status === "Paid"} then current_date else null end,description=${productionSql().json({ adjustmentCents, status })}::text,updated_at=now() where id=${parsed.data.id}::uuid and property_id=${session.propertyId}::uuid`;
+    const updated = await productionSql().begin(async (tx) => {
+      const [current] = await tx<Array<{ description: string | null; paid: boolean }>>`select description,paid from payroll_entries where id=${parsed.data.id}::uuid and property_id=${session.propertyId}::uuid for update`;
+      if (!current) return false;
+      const meta = parseDescription(current.description);
+      const status = parsed.data.status ?? (current.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending");
+      const adjustmentCents = parsed.data.adjustmentCents ?? meta.adjustmentCents ?? 0;
+      await tx`update payroll_entries set paid=${status === "Paid"},paid_on=case when ${status === "Paid"} then current_date else null end,description=${tx.json({ adjustmentCents, status })}::text,updated_at=now() where id=${parsed.data.id}::uuid and property_id=${session.propertyId}::uuid`;
+      return true;
+    });
+    if (!updated) return Response.json({ error: "Payroll entry not found." }, { status: 404 });
     return Response.json({ updated: true });
   } catch (error) { return propertyAccessResponse(error); }
 }
