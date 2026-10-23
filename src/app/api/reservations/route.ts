@@ -27,7 +27,7 @@ export async function GET(request: Request) {
       const records = await productionSql()<Array<{
         id: string; version: number; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null;
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null; otaPaymentStatus: string | null;
-        taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number;
+        taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; commissionBasisPoints: number; commissionCents: number;
         reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; status: string }>;
         extraGuests: Array<{ id: string; name: string; driverLicenseNumber: string | null }>;
       }>>`
@@ -35,10 +35,11 @@ export async function GET(request: Request) {
           rr.room_number as room,r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
           coalesce(bs.name,case when r.notes like '{%' then r.notes::jsonb->>'source' end,'Direct') as source,
           case when r.notes like '{%' then r.notes::jsonb->>'rateCode' end as "rateCode",
-          r.status,r.ota_payment_status as "otaPaymentStatus",r.tax_rate_basis_points as "taxRateBasisPoints",r.tax_exempt as "taxExempt",
+          r.status,r.ota_payment_status as "otaPaymentStatus",r.tax_rate_basis_points as "taxRateBasisPoints",r.tax_exempt as "taxExempt",coalesce(bs.commission_basis_points,0)::int as "commissionBasisPoints",
           coalesce((case when r.notes like '{%' then r.notes::jsonb->>'adults' end)::int,1) as adults,coalesce((case when r.notes like '{%' then r.notes::jsonb->>'children' end)::int,0) as children,
           coalesce((case when r.notes like '{%' then r.notes::jsonb->>'petCount' end)::int,0) as "petCount",coalesce((case when r.notes like '{%' then r.notes::jsonb->>'servicePetCount' end)::int,0) as "servicePetCount",
           coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rrx on rrx.id=nr.reservation_room_id where rrx.reservation_id=r.id),0)::int as "roomRentCents",
+          coalesce((select sum(le.debit_cents) from ledger_entries le where le.property_id=r.property_id and le.resource_type='ota-commission' and le.resource_id=r.id),0)::int as "commissionCents",
           (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)
             - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=r.id),0))::int as "balanceCents",
           coalesce((select json_agg(json_build_object('id',rrx.id,'roomNumber',room.number,'roomTypeId',rrx.room_type_id,'status',rrx.status) order by rrx.created_at)
@@ -68,7 +69,8 @@ export async function GET(request: Request) {
         const otaPaymentStatus = record.otaPaymentStatus === "Guest Pays Hotel" || record.otaPaymentStatus === "Paid Online" || record.otaPaymentStatus === "Virtual Card Pending"
           ? record.otaPaymentStatus
           : undefined;
-        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+        const commissionCents = record.commissionCents || calculateCommissionCents(record.roomRentCents, record.commissionBasisPoints / 100);
+        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
     }
     const records = await db.query.reservations.findMany({
@@ -346,14 +348,15 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
   if (serverNightlyRatesCents.some((rate, index) => rate !== payload.nightlyRatesCents[index])) {
     throw new ReservationRequestError("Promotion pricing changed. Review the nightly rates and try again.", 409);
   }
-  // Store the selected source as a first-class record. Reports can now group
-  // new reservations by source without having to parse the reservation note.
-  const [bookingSource] = await tx<Array<{ id: string }>>`
-    insert into booking_sources (property_id,name,type,commission_basis_points,active)
-    values (${session.propertyId}::uuid,${payload.source},${payload.source === "Direct" ? "direct" : "other"},0,true)
-    on conflict (property_id,name) do update set active=true
-    returning id
+  // Booking sources are configured in Settings. Resolve the active record
+  // here rather than recreating it with a zero commission on every booking.
+  const [bookingSource] = await tx<Array<{ id: string; type: string; commissionBasisPoints: number }>>`
+    select id,type,commission_basis_points as "commissionBasisPoints"
+    from booking_sources
+    where property_id=${session.propertyId}::uuid and name=${payload.source} and active=true
+    for update
   `;
+  if (!bookingSource) throw new ReservationRequestError("Select an active booking source configured in Settings.", 409);
   const confirmationNumber = `PMS-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900 + 100)}`;
   const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${payload.otaPaymentStatus || null},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: payload.source })}::text) returning id`;
   for (const [appliedOrder, promotionId] of payload.promotionIds.entries()) {
@@ -422,7 +425,18 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
   }
   const roomRentCents = payload.nightlyRatesCents.reduce((sum, rate) => sum + rate, 0) * payload.roomCount;
   const taxCents = payload.taxExempt ? 0 : calculateTaxCents(roomRentCents, payload.taxRatePercentage / 100);
-  return { guestId, reservationId: reservation.id, groupReservation: payload.roomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents: 0, totalCents: roomRentCents + taxCents, version: 1 };
+  const commissionCents = calculateCommissionCents(roomRentCents, bookingSource.commissionBasisPoints / 100);
+  if (commissionCents > 0) await postProductionLedger(tx, {
+    propertyId: session.propertyId,
+    businessDate: payload.checkInDate,
+    resourceType: "ota-commission",
+    resourceId: reservation.id,
+    description: `Booking-source commission · ${payload.source}`,
+    debitAccount: "OTA Commission Expense",
+    creditAccount: "Commission Payable",
+    amountCents: commissionCents,
+  });
+  return { guestId, reservationId: reservation.id, groupReservation: payload.roomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents, totalCents: roomRentCents + taxCents, version: 1 };
 }
 
 export async function POST(request: Request) {

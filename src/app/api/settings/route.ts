@@ -13,6 +13,7 @@ type ConfiguredRoomType = { id?: string; name?: string; shortLabel?: string; max
 type ConfiguredRoom = { number?: string; roomTypeId?: string; floor?: number; buildingId?: string; housekeepingStatus?: string; serviceStatus?: string; smokingAllowed?: boolean; mapColumn?: number; mapRow?: number; mapWidth?: number; mapHeight?: number };
 type ConfiguredEmployee = { name?: string; role?: string; hourlyRateCents?: number; status?: string };
 type ConfiguredPromotion = { id?: string; name?: string; discountType?: "Percentage" | "Fixed Amount"; discountValue?: number; roomTypeIds?: string[]; startDate?: string; endDate?: string; active?: boolean };
+type ConfiguredBookingChannel = { name?: string; type?: "Direct" | "OTA" | "Company"; commissionPercent?: number; active?: boolean };
 
 type LiveRoomState = { number: string; cleanlinessStatus: string; serviceStatus: string };
 
@@ -45,8 +46,32 @@ async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: st
   const configuredRooms = Array.isArray(value.rooms) ? value.rooms as ConfiguredRoom[] : [];
   const configuredEmployees = Array.isArray(value.employees) ? value.employees as ConfiguredEmployee[] : [];
   const configuredPromotions = Array.isArray(value.promotions) ? value.promotions as ConfiguredPromotion[] : [];
+  const configuredBookingChannels = Array.isArray(value.bookingChannels) ? value.bookingChannels as ConfiguredBookingChannel[] : [];
   const typeIds = new Map<string, string>();
   const synchronizedPromotionIds = new Set<string>();
+  const synchronizedBookingSourceIds = new Set<string>();
+  for (const configured of configuredBookingChannels) {
+    if (!configured.name?.trim()) continue;
+    const commissionBasisPoints = Math.round(Math.max(0, Math.min(100, configured.commissionPercent ?? 0)) * 100);
+    const [bookingSource] = await tx<Array<{ id: string }>>`
+      insert into booking_sources (property_id,name,type,commission_basis_points,active)
+      values (${propertyId}::uuid,${configured.name.trim()},${configured.type?.toLowerCase() || "other"},${commissionBasisPoints},${configured.active !== false})
+      on conflict (property_id,name) do update set type=excluded.type,commission_basis_points=excluded.commission_basis_points,active=excluded.active
+      returning id
+    `;
+    synchronizedBookingSourceIds.add(bookingSource.id);
+  }
+  // Historical reservations refer to their source, so removed sources are
+  // deactivated instead of deleted. A source cannot be selected for a new
+  // reservation once it is no longer configured in Settings.
+  if (configuredBookingChannels.length) {
+    const storedSources = await tx<Array<{ id: string }>>`select id from booking_sources where property_id=${propertyId}::uuid and active=true for update`;
+    for (const source of storedSources) {
+      if (!synchronizedBookingSourceIds.has(source.id)) {
+        await tx`update booking_sources set active=false where id=${source.id}::uuid and property_id=${propertyId}::uuid`;
+      }
+    }
+  }
   for (const [index, configured] of configuredTypes.entries()) {
     if (!configured.id || !configured.name?.trim()) continue;
     const [roomType] = await tx<Array<{ id: string }>>`
