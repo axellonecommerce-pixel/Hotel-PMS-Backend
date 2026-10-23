@@ -15,7 +15,7 @@ const entrySchema = z.object({
   correctionNote: z.string().trim().max(1_000).optional(),
 });
 
-type EntryRow = { id: string; workDate: string; employeeName: string; clockIn: string; clockOut: string | null; breakStart: string | null; breakEnd: string | null; breakMinutes: number; hourlyRateCents: number | null };
+type EntryRow = { id: string; workDate: string; employeeName: string; clockIn: string; clockOut: string | null; breakStart: string | null; breakEnd: string | null; breakMinutes: number; hourlyRateCents: number | null; roomsCleaned: number };
 
 async function listEntries(propertyId: string) {
   return productionSql()<EntryRow[]>`
@@ -24,7 +24,8 @@ async function listEntries(propertyId: string) {
       case when te.clock_out_at is null then null else to_char(te.clock_out_at at time zone 'America/Los_Angeles','HH24:MI') end as "clockOut",
       case when te.break_start_at is null then null else to_char(te.break_start_at at time zone 'America/Los_Angeles','HH24:MI') end as "breakStart",
       case when te.break_end_at is null then null else to_char(te.break_end_at at time zone 'America/Los_Angeles','HH24:MI') end as "breakEnd",
-      te.break_minutes as "breakMinutes",e.hourly_rate_cents as "hourlyRateCents"
+      te.break_minutes as "breakMinutes",e.hourly_rate_cents as "hourlyRateCents",
+      coalesce((select count(*) from housekeeping_records h where h.property_id=te.property_id and h.housekeeper_employee_id=te.employee_id and h.service_date=te.work_date and h.assignment_status='completed'),0)::int as "roomsCleaned"
     from time_entries te join employees e on e.id=te.employee_id
     where te.property_id=${propertyId}::uuid
     order by te.work_date desc,te.clock_in_at desc
@@ -70,7 +71,8 @@ export async function POST(request: Request) {
           case when clock_out_at is null then null else to_char(clock_out_at at time zone 'America/Los_Angeles','HH24:MI') end as "clockOut",
           case when break_start_at is null then null else to_char(break_start_at at time zone 'America/Los_Angeles','HH24:MI') end as "breakStart",
           case when break_end_at is null then null else to_char(break_end_at at time zone 'America/Los_Angeles','HH24:MI') end as "breakEnd",
-          break_minutes as "breakMinutes",(select hourly_rate_cents from employees where id=employee_id) as "hourlyRateCents"
+          break_minutes as "breakMinutes",(select hourly_rate_cents from employees where id=employee_id) as "hourlyRateCents",
+          coalesce((select count(*) from housekeeping_records h where h.property_id=time_entries.property_id and h.housekeeper_employee_id=time_entries.employee_id and h.service_date=time_entries.work_date and h.assignment_status='completed'),0)::int as "roomsCleaned"
       `;
       return saved;
     });

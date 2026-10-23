@@ -16,7 +16,7 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 | Status | Count |
 |---|---:|
 | Verified demo | 45 |
-| Verified production path | 26 |
+| Verified production path | 29 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -67,9 +67,9 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-COM-002 | Verified demo | Checked-out Guest/Stay items can be marked Sent and moved to Invoices. |
 | FR-COM-003 | Verified production path | The daily worker marks eligible invoices overdue and creates a persisted reminder notification every seven days until payment. |
 | FR-COM-004 | Verified demo | One payment can allocate across invoices with partial allocation and company credit. |
-| FR-HSK-001 | Verified demo | All-room board, separate cleanliness/assignment, assign/unassign, and mark-clean flows exist. |
-| FR-HSK-002 | Verified demo | Arrival/checkout/stayover context and productivity calculations exist. |
-| FR-HSK-003 | Verified demo | Smoking designation/icon appears in Housekeeping and Floor Map. |
+| FR-HSK-001 | Verified production path | The all-room board loads and writes tenant-scoped housekeeping records; assignment, cleaning progress, and cleanliness update both the service record and physical room state. |
+| FR-HSK-002 | Verified production path | Arrival, checkout, and stayover context are derived from persisted reservation/room data. Employee cleaning productivity is counted from completed tenant housekeeping records and reloads with time entries. |
+| FR-HSK-003 | Verified production path | Smoking configuration persists with each room and the shared room presentation renders its smoking designation in Housekeeping and the Floor Map. |
 | FR-MNT-001 | Verified production path | Tenant-scoped PostgreSQL work orders persist the room, issue, priority, worker, cost, notes, service dates, and rentable/non-rentable period; reservations exclude overlapping non-rentable periods. Images and PDF receipts are uploaded to tenant-scoped private storage after the work order receives its durable ID. |
 | FR-MNT-002 | Verified production path | Completion, extension, and explicit make-available actions are tenant-scoped persisted API operations. Completing work does not reopen inventory; making available explicitly resolves the block and the client marks the room dirty. |
 | FR-TIM-001 | Verified production path | Housekeeping time clock and manual correction forms now load and upsert tenant-scoped PostgreSQL time entries. The server validates active motel staff, work date/times, break ordering, and one entry per employee per date. |
@@ -97,8 +97,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 
 The original 16 partial requirements are closed. Before a real hotel launch, the remaining demo-backed workflows should be migrated in this order:
 
-1. Replace the remaining React-state/seeded-data housekeeping productivity path with its PostgreSQL equivalent.
-2. Provision the first hotel owner, relational room types/rooms, business day, taxes, and charge types.
-3. Link and deploy the backend, add its URL to the frontend environment, then deploy the frontend.
-4. Run the same release suite against the deployed URLs with the first real hotel account.
+1. Provision the first hotel owner, relational room types/rooms, business day, taxes, and charge types.
+2. Link and deploy the backend, add its URL to the frontend environment, then deploy the frontend.
+3. Run the same release suite against the deployed URLs with the first real hotel account.
 
