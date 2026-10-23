@@ -56,7 +56,7 @@ export async function GET(request: Request) {
         where r.property_id=${session.propertyId}::uuid order by r.created_at desc
       `;
       return Response.json({ reservations: records.map((record) => {
-        const nights = Math.max(1, Math.round((new Date(`${record.checkoutDate}T12:00:00Z`).getTime() - new Date(`${record.checkInDate}T12:00:00Z`).getTime()) / 86_400_000));
+        const nights = Math.max(0, Math.round((new Date(`${record.checkoutDate}T12:00:00Z`).getTime() - new Date(`${record.checkInDate}T12:00:00Z`).getTime()) / 86_400_000));
         const taxCents = record.taxExempt ? 0 : Math.round(record.roomRentCents * record.taxRateBasisPoints / 10_000);
         const status = record.status === "reserved" ? "Reserved" : record.status === "checked_in" ? "Checked In" : record.status === "checked_out" ? "Checked Out" : record.status === "no_show" ? "No Show" : record.status === "cancelled" ? "Cancelled" : record.status;
         const roomStatus = (value: string) => value === "reserved" ? "Reserved" : value === "checked_in" ? "Checked In" : value === "checked_out" ? "Checked Out" : value === "no_show" ? "No Show" : "Cancelled";
@@ -93,7 +93,7 @@ export async function GET(request: Request) {
       reservations: records.map((record) => {
         const guest = guestsById.get(record.guestId);
         const room = record.roomId ? roomsById.get(record.roomId) : undefined;
-        const nights = Math.max(1, Math.round((new Date(`${record.departureDate}T12:00:00Z`).getTime() - new Date(`${record.arrivalDate}T12:00:00Z`).getTime()) / 86_400_000));
+        const nights = Math.max(0, Math.round((new Date(`${record.departureDate}T12:00:00Z`).getTime() - new Date(`${record.arrivalDate}T12:00:00Z`).getTime()) / 86_400_000));
         const roomRentCents = record.roomRateCents * nights;
         const taxCents = Math.round(roomRentCents * record.taxRateBasisPoints / 10_000);
         return {
@@ -268,7 +268,7 @@ async function createProductionReservation(request: Request, session: PropertySe
   const parsed = payloadSchema.safeParse(await request.json());
   if (!parsed.success) return Response.json({ error: "Required guest and stay details are missing." }, { status: 400 });
   const payload = parsed.data;
-  if (payload.checkoutDate <= payload.checkInDate) return Response.json({ error: "Check-out must be after check-in." }, { status: 400 });
+  if (payload.checkoutDate < payload.checkInDate) return Response.json({ error: "Check-out cannot be before check-in." }, { status: 400 });
   if (payload.taxExempt && (!payload.taxExemptionReason || !payload.taxExemptionCertificate)) {
     return Response.json({ error: "Tax-exempt stays require a reason and certificate number." }, { status: 400 });
   }
@@ -733,7 +733,7 @@ async function updateProductionReservation(
 
       const nextArrival = changes.arrivalDate ?? current.arrivalDate;
       const nextDeparture = changes.departureDate ?? current.departureDate;
-      if (nextDeparture <= nextArrival) throw new ReservationRequestError("Check-out must be after check-in.");
+      if (nextDeparture < nextArrival) throw new ReservationRequestError("Check-out cannot be before check-in.");
 
       if (changes.departureDate && changes.departureDate !== current.departureDate) {
         const roomRows = await tx<Array<{ id: string; folioId: string | null }>>`
@@ -846,8 +846,8 @@ export async function PATCH(request: Request) {
   const parsed = updateSchema.safeParse(await request.json());
   if (!parsed.success) return Response.json({ error: "The reservation update is invalid.", issues: parsed.error.flatten() }, { status: 400 });
   const { id, expectedVersion, ...changes } = parsed.data;
-  if (changes.arrivalDate && changes.departureDate && changes.departureDate <= changes.arrivalDate) {
-    return Response.json({ error: "Check-out must be after check-in." }, { status: 400 });
+  if (changes.arrivalDate && changes.departureDate && changes.departureDate < changes.arrivalDate) {
+    return Response.json({ error: "Check-out cannot be before check-in." }, { status: 400 });
   }
   if (hasProductionDatabase()) return updateProductionReservation(session, id, expectedVersion, changes);
   const now = new Date().toISOString();

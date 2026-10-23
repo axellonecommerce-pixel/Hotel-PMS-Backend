@@ -10,7 +10,9 @@ const paymentSchema = z.object({
   // production folio is resolved server-side from the tenant reservation.
   folioId: z.string().trim().min(1),
   amountCents: z.number().int().positive(),
-  method: z.string().trim().min(1).max(100),
+  method: z.string().trim().min(1).max(100).refine((value) => value !== "Select a payment method", {
+    message: "Select a payment method.",
+  }),
   note: z.string().trim().max(2_000).optional(),
   last4: z.string().trim().regex(/^\d{4}$/).optional(),
   reference: z.string().trim().max(200).optional(),
