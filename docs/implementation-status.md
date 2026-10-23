@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 15 |
-| Verified production path | 50 |
+| Verified demo | 14 |
+| Verified production path | 51 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -61,7 +61,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-PAY-001 | Verified production path | Tenant-scoped payment operations persist collection, allocation, deletion, and refund records; the server rejects a collection greater than the authoritative folio balance. |
 | FR-PAY-002 | Verified production path | Saved payment-source metadata persists through the tenant-scoped guest API and accepts only a label, an optional four-digit masked suffix, and an optional processor reference; the PMS never asks staff to enter a full card number or CVV. |
 | FR-PAY-003 | Verified production path | Refunds are durable records, reduce the allocated folio amount, and cannot exceed the unrefunded payment; deletion removes the tenant-owned payment, allocation, and refund records together. |
-| FR-PAY-004 | Verified demo | BAD DEBT checkout settlement and loss representation exist. |
+| FR-PAY-004 | Verified production path | BAD DEBT is a tenant-scoped, reason-required settlement on an in-house folio. It creates an immutable payment allocation and balanced Bad Debt Expense / Guest Receivable ledger posting, cannot be refunded or deleted, and is excluded from payment collections reporting. |
 | FR-DEP-001 | Verified production path | Tenant-scoped security deposits and immutable hold/charge/release transactions now persist through the reservation workspace. The server prevents duplicate holds, caps deductions/releases at the held balance, and checkout continues to require every held deposit be settled. |
 | FR-COM-001 | Verified production path | Company CRUD, payment terms, contacts, statuses, and per-room-type negotiated rates are editable in the UI and stored through tenant-scoped PostgreSQL APIs. Primary-contact SQL safely quotes the database column name, so creation, listing, and editing work on PostgreSQL. |
 | FR-COM-002 | Verified production path | Company invoice data is tenant-scoped and durable. Checkout creates a draft invoice, and the Companies workflow reads it from PostgreSQL and records its sent state and timestamp through the production API. |
