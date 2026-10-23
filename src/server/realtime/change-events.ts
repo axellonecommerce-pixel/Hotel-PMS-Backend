@@ -30,18 +30,30 @@ export type StreamChangeEvent = {
  * opaque (`s:<integer>` locally, timestamp/UUID in production) so browsers
  * never depend on a database-specific identifier type. */
 export async function recordChange(input: ChangeInput) {
-  if (hasProductionDatabase()) {
-    await productionSql()`
-      insert into change_events (property_id,actor_auth_user_id,entity_type,entity_id,action,entity_version,payload)
-      values (${input.propertyId}::uuid,${input.actorAuthUserId}::uuid,${input.entityType},${input.entityId}::uuid,${input.action},${input.entityVersion},${JSON.stringify(input.payload ?? {})}::jsonb)
-    `;
-    return;
+  try {
+    if (hasProductionDatabase()) {
+      await productionSql()`
+        insert into change_events (property_id,actor_auth_user_id,entity_type,entity_id,action,entity_version,payload)
+        values (${input.propertyId}::uuid,${input.actorAuthUserId}::uuid,${input.entityType},${input.entityId}::uuid,${input.action},${input.entityVersion},${JSON.stringify(input.payload ?? {})}::jsonb)
+      `;
+      return;
+    }
+    db.insert(changeEvents).values({
+      ...input,
+      payloadJson: JSON.stringify(input.payload ?? {}),
+      occurredAt: new Date().toISOString(),
+    }).run();
+  } catch (error) {
+    // Change events keep other browser tabs fresh; they are not the source
+    // of truth. A delivery outage must not turn an already-committed write
+    // into an apparent operation failure for the person who made the change.
+    console.error("Realtime change event could not be recorded", {
+      propertyId: input.propertyId,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      error,
+    });
   }
-  db.insert(changeEvents).values({
-    ...input,
-    payloadJson: JSON.stringify(input.payload ?? {}),
-    occurredAt: new Date().toISOString(),
-  }).run();
 }
 
 export async function changesAfter(propertyId: string, cursor: string): Promise<StreamChangeEvent[]> {

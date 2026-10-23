@@ -222,7 +222,14 @@ async function createProductionReservation(request: Request, session: PropertySe
   }
   try {
     const result = await productionSql().begin(async (tx) => createProductionReservationTransaction(tx, session, payload));
-    await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "reservation", entityId: result.reservationId, action: "created", entityVersion: result.version, payload: {} });
+    // A reservation is already durable once the transaction commits. Realtime
+    // refresh is a best-effort notification and must never make the client
+    // believe that a successfully-created reservation failed.
+    try {
+      await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "reservation", entityId: result.reservationId, action: "created", entityVersion: result.version, payload: {} });
+    } catch (error) {
+      console.error("Reservation change event failed", { propertyId: session.propertyId, reservationId: result.reservationId, error });
+    }
     return Response.json(result, { status: 201 });
   } catch (error) {
     if (error instanceof ReservationRequestError) return Response.json({ error: error.message }, { status: error.status });
