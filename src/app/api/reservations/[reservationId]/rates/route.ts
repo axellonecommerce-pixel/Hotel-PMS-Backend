@@ -10,7 +10,7 @@ const updateSchema = z.object({
   taxOverrideReason: z.string().trim().min(1).max(500).optional(),
 }).superRefine((value, context) => {
   if (value.roomRentCents === undefined && value.taxCents === undefined) context.addIssue({ code: "custom", message: "Enter a room rent or tax amount." });
-  if (value.taxCents !== undefined && value.roomRentCents === undefined && !value.taxOverrideReason) {
+  if (value.taxCents !== undefined && !value.taxOverrideReason) {
     context.addIssue({ code: "custom", message: "A reason is required when tax is changed manually." });
   }
 });

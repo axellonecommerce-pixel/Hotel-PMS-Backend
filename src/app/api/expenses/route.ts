@@ -108,7 +108,7 @@ export async function POST(request: Request) {
     };
     db.insert(expenses).values(record).run();
     const client = { id: record.id, ...parsed.data, recurring: parsed.data.recurring ?? false, enteredBy: "Hotel Staff" };
-    recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "expense", entityId: record.id, action: "created", entityVersion: 1, payload: { expense: client } });
+    await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "expense", entityId: record.id, action: "created", entityVersion: 1, payload: { expense: client } });
     return Response.json({ expense: client }, { status: 201 });
   } catch (error) { return propertyAccessResponse(error); }
 }

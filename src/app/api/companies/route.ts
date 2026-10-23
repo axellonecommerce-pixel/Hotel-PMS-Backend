@@ -61,12 +61,13 @@ export async function POST(request: Request) {
         await tx`insert into company_contacts (property_id,company_id,name,email,phone,"primary") values (${session.propertyId}::uuid,${created.id}::uuid,${parsed.data.contactPerson},${parsed.data.email},${parsed.data.phone},true)`;
         return { id: created.id, ...parsed.data, currentBalanceCents: 0, openInvoices: 0, negotiatedRates: [] };
       });
+      await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "company", entityId: company.id, action: "created", entityVersion: 1, payload: {} });
       return Response.json({ company }, { status: 201 });
     }
     const now = new Date().toISOString();
     const record = { id: `company-${crypto.randomUUID()}`, propertyId: session.propertyId, ...parsed.data, createdAt: now, updatedAt: now };
     db.insert(companies).values(record).run();
-    recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "company", entityId: record.id, action: "created", entityVersion: 1, payload: { company: { ...record, currentBalanceCents: 0, openInvoices: 0 } } });
+    await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "company", entityId: record.id, action: "created", entityVersion: 1, payload: { company: { ...record, currentBalanceCents: 0, openInvoices: 0 } } });
     return Response.json({ company: { ...record, currentBalanceCents: 0, openInvoices: 0 } }, { status: 201 });
   } catch (error) {
     return propertyAccessResponse(error);
@@ -100,11 +101,12 @@ export async function PATCH(request: Request) {
         return { id, ...changes };
       });
       if (!result) return Response.json({ error: "Company not found." }, { status: 404 });
+      await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "company", entityId: id, action: "updated", entityVersion: Math.floor(Date.now() / 1000), payload: {} });
       return Response.json(result);
     }
     const result = db.update(companies).set({ ...changes, updatedAt: new Date().toISOString() }).where(and(eq(companies.id, id), eq(companies.propertyId, session.propertyId))).run();
     if (!result.changes) return Response.json({ error: "Company not found." }, { status: 404 });
-    recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "company", entityId: id, action: "updated", entityVersion: Date.now(), payload: { changes } });
+    await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "company", entityId: id, action: "updated", entityVersion: Date.now(), payload: { changes } });
     return Response.json({ id, ...changes });
   } catch (error) {
     return propertyAccessResponse(error);

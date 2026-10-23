@@ -162,7 +162,7 @@ export async function PUT(request: Request) {
       target: [propertySettings.propertyId, propertySettings.key],
       set: { value: JSON.stringify(parsed.data), updatedAt: now },
     }).run();
-    recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "settings", entityId: session.propertyId, action: "updated", entityVersion: Date.now(), payload: {} });
+    await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "settings", entityId: session.propertyId, action: "updated", entityVersion: Date.now(), payload: {} });
     return Response.json({ settings: parsed.data, savedAt: now });
   } catch (error) {
     return propertyAccessResponse(error);

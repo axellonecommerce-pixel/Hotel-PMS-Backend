@@ -222,6 +222,7 @@ async function createProductionReservation(request: Request, session: PropertySe
   }
   try {
     const result = await productionSql().begin(async (tx) => createProductionReservationTransaction(tx, session, payload));
+    await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "reservation", entityId: result.reservationId, action: "created", entityVersion: result.version, payload: {} });
     return Response.json(result, { status: 201 });
   } catch (error) {
     if (error instanceof ReservationRequestError) return Response.json({ error: error.message }, { status: error.status });
@@ -533,7 +534,7 @@ export async function POST(request: Request) {
   // Change notifications must never turn a committed reservation into a
   // failed browser request. The reservation transaction above is authoritative.
   try {
-    recordChange({
+    await recordChange({
       propertyId,
       actorAuthUserId: session.authUserId,
       entityType: "reservation",
@@ -711,6 +712,7 @@ async function updateProductionReservation(
     });
     if (outcome.kind === "not-found") return Response.json({ error: "Reservation not found.", code: "NOT_FOUND" }, { status: 404 });
     if (outcome.kind === "conflict") return Response.json({ error: "Another employee changed this reservation. Review the latest version before saving.", code: "EDIT_CONFLICT", currentVersion: outcome.currentVersion }, { status: 409 });
+    await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "reservation", entityId: id, action: "updated", entityVersion: outcome.version, payload: {} });
     return Response.json({ id, version: outcome.version, ...changes });
   } catch (error) {
     if (error instanceof ReservationRequestError) return Response.json({ error: error.message }, { status: error.status });
@@ -757,7 +759,7 @@ export async function PATCH(request: Request) {
       current,
     }, { status: current ? 409 : 404 });
   }
-  recordChange({
+  await recordChange({
     propertyId: session.propertyId,
     actorAuthUserId: session.authUserId,
     entityType: "reservation",
