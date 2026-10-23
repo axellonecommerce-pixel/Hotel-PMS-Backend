@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 32 |
-| Verified production path | 33 |
+| Verified demo | 31 |
+| Verified production path | 34 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -82,7 +82,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-REV-001 | Verified production path | PostgreSQL ledger entries enforce balanced debit/credit posting for room revenue, tax, charge edits, and expenses; financial writes and ledger lines share the same transaction. |
 | FR-REV-002 | Verified production path | The Revenue screen reads tenant-scoped daily room, tax, and miscellaneous revenue from immutable PostgreSQL ledger credits; its ADR, occupancy, and RevPAR calculations use that durable total. |
 | FR-RPT-001 | Verified demo | Custom range, print, PDF/Excel export, comparison, and report detail controls exist. |
-| FR-RPT-002 | Verified demo | Standard reports and tenant-scoped saved custom report definitions are connected to backend APIs. |
+| FR-RPT-002 | Verified production path | Standard reports and tenant-scoped saved custom report definitions are connected to backend APIs; production saves are durably stored in the property settings record with duplicate-name protection. |
 | FR-NOT-001 | Verified production path | Tenant- and role-scoped notifications persist in PostgreSQL, support read/resolve controls, and are produced by scheduled ID-retention, invoice-reminder, and Night Audit workflows. |
 | FR-SRC-001 | Verified demo | Global search covers guests, reservations, rooms, companies, folios, and invoices. |
 | FR-BKP-001 | Verified production path | The server produces a complete tenant snapshot with durable tables and private file bytes while removing expired/deleted ID-image keys. |
