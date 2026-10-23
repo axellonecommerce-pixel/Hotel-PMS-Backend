@@ -16,7 +16,7 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 | Status | Count |
 |---|---:|
 | Verified demo | 45 |
-| Verified production path | 22 |
+| Verified production path | 23 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -62,7 +62,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-PAY-002 | Verified demo | Optional card metadata is supported without full card/CVV persistence. |
 | FR-PAY-003 | Verified production path | Refunds are durable records, reduce the allocated folio amount, and cannot exceed the unrefunded payment; deletion removes the tenant-owned payment, allocation, and refund records together. |
 | FR-PAY-004 | Verified demo | BAD DEBT checkout settlement and loss representation exist. |
-| FR-DEP-001 | Verified demo | Per-room cash/card deposits, deductions, reasons, partial release, and folio display choice exist. |
+| FR-DEP-001 | Verified production path | Tenant-scoped security deposits and immutable hold/charge/release transactions now persist through the reservation workspace. The server prevents duplicate holds, caps deductions/releases at the held balance, and checkout continues to require every held deposit be settled. |
 | FR-COM-001 | Verified production path | Company CRUD, payment terms, contacts, statuses, and per-room-type negotiated rates are editable in the UI and stored through tenant-scoped PostgreSQL APIs. |
 | FR-COM-002 | Verified demo | Checked-out Guest/Stay items can be marked Sent and moved to Invoices. |
 | FR-COM-003 | Verified production path | The daily worker marks eligible invoices overdue and creates a persisted reminder notification every seven days until payment. |
@@ -97,7 +97,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 
 The original 16 partial requirements are closed. Before a real hotel launch, the remaining demo-backed workflows should be migrated in this order:
 
-1. Replace remaining React-state/seeded-data paths for deposits, housekeeping, time, and payroll with their PostgreSQL equivalents.
+1. Replace remaining React-state/seeded-data paths for housekeeping, time, and payroll with their PostgreSQL equivalents.
 2. Provision the first hotel owner, relational room types/rooms, business day, taxes, and charge types.
 3. Link and deploy the backend, add its URL to the frontend environment, then deploy the frontend.
 4. Run the same release suite against the deployed URLs with the first real hotel account.
