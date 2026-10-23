@@ -34,6 +34,10 @@ export async function POST(request: Request) {
       if (selectedRooms.length !== input.reservationRoomIds.length || selectedRooms.some((room) => room.status !== "checked_in")) {
         throw new Error("Only checked-in rooms can be checked out.");
       }
+      const [reservationRoomCount] = await tx<Array<{ count: number }>>`
+        select count(*)::int as count from reservation_rooms
+        where reservation_id=${reservation.id}::uuid and property_id=${session.propertyId}::uuid
+      `;
 
       const unresolved = await tx<Array<{ reservationRoomId: string; remainingCents: number }>>`
         select d.reservation_room_id as "reservationRoomId",
@@ -46,26 +50,71 @@ export async function POST(request: Request) {
       `;
       if (unresolved.length) throw new Error("Release or charge every room deposit before checkout.");
 
+      const [groupFolio] = await tx<Array<{ id: string }>>`
+        select id from folios
+        where reservation_id=${reservation.id}::uuid and reservation_room_id is null
+        order by created_at limit 1 for update
+      `;
+      const checkingOutEntireGroup = selectedRooms.length === reservationRoomCount.count;
       const folioIds: string[] = [];
-      for (const room of selectedRooms) {
-        let [folio] = await tx<Array<{ id: string }>>`
-          select id from folios
-          where reservation_id=${reservation.id}::uuid and reservation_room_id=${room.id}::uuid
-          order by created_at limit 1 for update
-        `;
-        if (!folio) {
-          const number = await allocateProductionDocumentNumber(tx, session.propertyId);
-          [folio] = await tx<Array<{ id: string }>>`
-            insert into folios (property_id,reservation_id,reservation_room_id,number,name,status)
-            values (${session.propertyId}::uuid,${reservation.id}::uuid,${room.id}::uuid,${number},'General Folio','open')
-            returning id
+      if (groupFolio && checkingOutEntireGroup) {
+        // An entire group checks out on its original combined folio. Do not
+        // manufacture room folios or disturb its single payment history.
+        folioIds.push(groupFolio.id);
+      } else {
+        const splitFolios: Array<{ roomId: string; folioId: string }> = [];
+        for (const room of selectedRooms) {
+          let [folio] = await tx<Array<{ id: string }>>`
+            select id from folios
+            where reservation_id=${reservation.id}::uuid and reservation_room_id=${room.id}::uuid
+            order by created_at limit 1 for update
+          `;
+          if (!folio) {
+            const number = await allocateProductionDocumentNumber(tx, session.propertyId);
+            [folio] = await tx<Array<{ id: string }>>`
+              insert into folios (property_id,reservation_id,reservation_room_id,number,name,status)
+              values (${session.propertyId}::uuid,${reservation.id}::uuid,${room.id}::uuid,${number},'General Folio','open')
+              returning id
+            `;
+          }
+          folioIds.push(folio.id);
+          splitFolios.push({ roomId: room.id, folioId: folio.id });
+          await tx`
+            update charges set folio_id=${folio.id}::uuid, updated_at=now()
+            where property_id=${session.propertyId}::uuid and reservation_room_id=${room.id}::uuid
           `;
         }
-        folioIds.push(folio.id);
-        await tx`
-          update charges set folio_id=${folio.id}::uuid, updated_at=now()
-          where property_id=${session.propertyId}::uuid and reservation_room_id=${room.id}::uuid
-        `;
+
+        // When a pre-paid group checks out one room, carry enough of the
+        // shared payment to that room's new folio to settle its room rent,
+        // tax, and extras. This preserves the total payment amount, makes the
+        // departing folio independently auditable, and leaves all remaining
+        // funds on the group folio. Company groups intentionally skip this:
+        // their charges are billed together after the last checkout.
+        if (groupFolio && !reservation.companyId) {
+          const allocations = await tx<Array<{ id: string; paymentId: string; amountCents: number }>>`
+            select id,payment_id as "paymentId",amount_cents as "amountCents"
+            from payment_allocations where folio_id=${groupFolio.id}::uuid
+            order by created_at,id for update
+          `;
+          for (const destination of splitFolios) {
+            const [chargeTotal] = await tx<Array<{ amountCents: number }>>`
+              select coalesce(sum(c.amount_cents + coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)),0)::int as "amountCents"
+              from charges c where c.folio_id=${destination.folioId}::uuid and c.status='posted'
+            `;
+            let remainingToTransfer = chargeTotal?.amountCents ?? 0;
+            for (const allocation of allocations) {
+              if (remainingToTransfer <= 0 || allocation.amountCents <= 0) continue;
+              const transferCents = Math.min(remainingToTransfer, allocation.amountCents);
+              await tx`insert into payment_allocations (property_id,payment_id,folio_id,amount_cents)
+                values (${session.propertyId}::uuid,${allocation.paymentId}::uuid,${destination.folioId}::uuid,${transferCents})`;
+              allocation.amountCents -= transferCents;
+              remainingToTransfer -= transferCents;
+              if (allocation.amountCents === 0) await tx`delete from payment_allocations where id=${allocation.id}::uuid`;
+              else await tx`update payment_allocations set amount_cents=${allocation.amountCents} where id=${allocation.id}::uuid`;
+            }
+          }
+        }
       }
 
       const balances = await tx<Array<{ folioId: string; balanceCents: number }>>`

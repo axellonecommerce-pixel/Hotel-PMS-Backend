@@ -15,13 +15,13 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 13 |
-| Verified production path | 52 |
+| Verified demo | 10 |
+| Verified production path | 55 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
 
-The 16 items that were partial in the October 16 audit now have durable implementation paths. This closes the recorded requirement gaps, but it does **not** turn every earlier “Verified demo” workflow into a production workflow: several operational screens still use React state and seeded data and must be migrated before a full live launch.
+The items that were partial in the October 16 audit now have durable implementation paths. This closes the recorded requirement gaps, but it does **not** turn every earlier “Verified demo” workflow into a production workflow: several operational screens still use React state and seeded data and must be migrated before a full live launch.
 
 ## Requirement-by-requirement traceability
 
@@ -38,7 +38,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-GST-005 | Verified production path | Reservation creation locks the identified guest, requires a reason before overriding Do Not Rent status, and durably records the property-scoped reservation/guest/reason in `dnr_overrides`. |
 | FR-GST-006 | Verified production path | Extra guests are created or reused as tenant-scoped guest profiles, then durably attached through `reservation_guests`. They can be removed from a stay without deleting the reusable guest profile. Reservation reads, realtime refresh, and printed stay documents reload the persisted guest list after a browser refresh. |
 | FR-RES-001 | Verified production path | The tenant-scoped Availability API reads configured active room types and rate rules, durable rentable rooms, overlapping reservations, and maintenance blocks to return every room type (including zero inventory) with authoritative rates, tax, and bookable room numbers. Reservation creation repeats the overlap and rentable-room check inside its PostgreSQL transaction. |
-| FR-RES-002 | Verified demo | Multi-room/group reservation state and combined folio behavior exist. |
+| FR-RES-002 | Verified production path | Group reservations begin with one tenant-scoped combined folio. An entire group keeps that folio at checkout; partial non-company checkout creates a room folio, moves the room's charges and linked tax, and transfers enough of the shared payment allocation to settle the departing room while leaving the remaining allocation on the group folio. |
 | FR-RES-003 | Verified production path | Individual and bulk room checkout controls call the tenant checkout transaction for their selected checked-in rooms; it locks the room assignments, preserves room-attributed charges, marks physical rooms dirty, and publishes a reservation refresh event. |
 | FR-RES-004 | Verified production path | The checkout API locks the reservation and selected rooms, validates deposits and balances, creates room folios with locked numbering, moves each room’s charges and linked tax, checks out rooms, and marks physical rooms dirty in one transaction. |
 | FR-RES-005 | Verified production path | Company group checkout waits for every room, then transactionally creates exactly one draft company invoice containing all group folio charges and tax. |

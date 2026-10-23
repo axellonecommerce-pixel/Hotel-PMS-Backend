@@ -28,7 +28,7 @@ export async function GET(request: Request) {
     const sql = productionSql();
     const invoices = await sql<Array<Record<string, unknown>>>`
       select i.id, i.company_id as "companyId", i.number as "invoiceNumber",
-        i.created_at::date::text as "invoiceDate", i.due_date::text as "dueDate", i.status,
+        i.created_at::date::text as "invoiceDate", i.sent_at::text as "sentAt", i.due_date::text as "dueDate", i.status,
         coalesce((select sum(il.amount_cents) from invoice_lines il where il.invoice_id=i.id),0)::int as "totalCents",
         coalesce((select sum(ipa.amount_cents) from invoice_payment_allocations ipa where ipa.invoice_id=i.id),0)::int as "paymentsCreditsCents",
         r.id as "reservationId", concat(g.first_name, ' ', g.last_name) as "guestName"
@@ -70,14 +70,17 @@ export async function PATCH(request: Request) {
     const session = await requirePropertySession(request, "companies.manage");
     const parsed = sendInvoiceSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Invoice action is invalid." }, { status: 400 });
-    const [invoice] = await productionSql()<Array<{ id: string; status: string }>>`
-      update invoices set status='sent', sent_at=coalesce(sent_at,now()), updated_at=now()
-      where id=${parsed.data.invoiceId}::uuid and property_id=${session.propertyId}::uuid and status='draft'
-      returning id,status
+    const [invoice] = await productionSql()<Array<{ id: string; status: string; sentAt: string }>>`
+      update invoices
+      set status=case when status='draft' then 'sent' else status end,
+        sent_at=now(), updated_at=now()
+      where id=${parsed.data.invoiceId}::uuid and property_id=${session.propertyId}::uuid
+        and status in ('draft','sent','partially_paid','paid','overdue')
+      returning id,status,sent_at::text as "sentAt"
     `;
-    if (!invoice) return Response.json({ error: "Only a current draft invoice can be sent." }, { status: 409 });
-    await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "invoice", entityId: invoice.id, action: "updated", entityVersion: Math.floor(Date.now() / 1000), payload: { status: "sent" } });
-    return Response.json({ invoice: { id: invoice.id, status: invoiceStatus(invoice.status) } });
+    if (!invoice) return Response.json({ error: "Only a current, non-void invoice can be sent." }, { status: 409 });
+    await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "invoice", entityId: invoice.id, action: "updated", entityVersion: Math.floor(Date.now() / 1000), payload: { status: invoice.status, sentAt: invoice.sentAt } });
+    return Response.json({ invoice: { id: invoice.id, status: invoiceStatus(invoice.status), sentAt: invoice.sentAt } });
   } catch (error) {
     return propertyAccessResponse(error);
   }

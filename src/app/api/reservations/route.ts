@@ -375,13 +375,31 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
     const [reservationRoom] = await tx<Array<{ id: string }>>`insert into reservation_rooms (property_id,reservation_id,room_type_id,room_id,status) values (${session.propertyId}::uuid,${reservation.id}::uuid,${roomType.id}::uuid,${selectedRooms[index]?.id || null}::uuid,'reserved') returning id`;
     reservationRoomsCreated.push({ id: reservationRoom.id, roomNumber: index + 1 });
   }
-  for (const reservationRoom of reservationRoomsCreated) {
+  // A group starts with one shared folio. This is important: it lets the
+  // front desk collect one payment for the complete stay, while checkout can
+  // later split a departing room into its own folio. Single-room stays keep
+  // their room-specific folio as before.
+  let sharedGroupFolioId: string | null = null;
+  if (payload.roomCount > 1) {
     const folioNumber = await allocateProductionDocumentNumber(tx, session.propertyId);
     const [folio] = await tx<Array<{ id: string }>>`
       insert into folios (property_id,reservation_id,reservation_room_id,number,name,status)
-      values (${session.propertyId}::uuid,${reservation.id}::uuid,${reservationRoom.id}::uuid,${folioNumber},'Room & Tax Folio','open')
+      values (${session.propertyId}::uuid,${reservation.id}::uuid,null,${folioNumber},'Group Folio','open')
       returning id
     `;
+    sharedGroupFolioId = folio.id;
+  }
+  for (const reservationRoom of reservationRoomsCreated) {
+    let folioId = sharedGroupFolioId;
+    if (!folioId) {
+      const folioNumber = await allocateProductionDocumentNumber(tx, session.propertyId);
+      const [folio] = await tx<Array<{ id: string }>>`
+        insert into folios (property_id,reservation_id,reservation_room_id,number,name,status)
+        values (${session.propertyId}::uuid,${reservation.id}::uuid,${reservationRoom.id}::uuid,${folioNumber},'Room & Tax Folio','open')
+        returning id
+      `;
+      folioId = folio.id;
+    }
     for (let night = 0; night < nights; night += 1) {
       const date = new Date(`${payload.checkInDate}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + night);
       const stayDate = date.toISOString().slice(0, 10);
@@ -390,7 +408,7 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
       await tx`insert into nightly_rates (property_id,reservation_room_id,stay_date,base_rate_cents,discount_cents,final_rate_cents) values (${session.propertyId}::uuid,${reservationRoom.id}::uuid,${stayDate}::date,${baseRate},${baseRate - rate},${rate})`;
       const [charge] = await tx<Array<{ id: string }>>`
         insert into charges (property_id,folio_id,reservation_room_id,type,description,service_date,amount_cents,taxable,status)
-        values (${session.propertyId}::uuid,${folio.id}::uuid,${reservationRoom.id}::uuid,'Room Rent',${`Room ${reservationRoom.roomNumber} · ${stayDate}`},${stayDate}::date,${rate},${!payload.taxExempt},'posted')
+        values (${session.propertyId}::uuid,${folioId}::uuid,${reservationRoom.id}::uuid,'Room Rent',${`Room ${selectedRooms[reservationRoom.roomNumber - 1]?.number ?? reservationRoom.roomNumber} · ${stayDate}`},${stayDate}::date,${rate},${!payload.taxExempt},'posted')
         returning id
       `;
       // Initial room rent is a financial posting just like a manually added

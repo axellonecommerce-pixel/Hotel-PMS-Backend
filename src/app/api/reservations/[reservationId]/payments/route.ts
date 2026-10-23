@@ -20,7 +20,7 @@ const paymentSchema = z.object({
   }
 });
 
-const refundSchema = z.object({ paymentId: z.string().uuid(), amountCents: z.number().int().positive() });
+const refundSchema = z.object({ paymentId: z.string().uuid(), folioId: z.string().uuid(), amountCents: z.number().int().positive() });
 const deleteSchema = z.object({ paymentId: z.string().uuid() });
 
 function routeParams(context: { params: Promise<{ reservationId: string }> }) {
@@ -100,11 +100,13 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
         select p.id,p.method,p.amount_cents as "amountCents",pa.folio_id as "folioId",pa.amount_cents as "allocatedCents",
           coalesce((select sum(r.amount_cents) from refunds r where r.payment_id=p.id),0)::int as "refundedCents"
         from payments p join payment_allocations pa on pa.payment_id=p.id
-        where p.id=${parsed.data.paymentId}::uuid and p.reservation_id=${reservationId}::uuid and p.property_id=${session.propertyId}::uuid for update
+        where p.id=${parsed.data.paymentId}::uuid and pa.folio_id=${parsed.data.folioId}::uuid
+          and p.reservation_id=${reservationId}::uuid and p.property_id=${session.propertyId}::uuid for update
       `;
       if (!payment) throw new Error("Payment not found.");
       if (payment.method.toUpperCase() === "BAD DEBT") throw new Error("Bad debt entries cannot be refunded.");
       if (parsed.data.amountCents > payment.amountCents - payment.refundedCents) throw new Error("Refund cannot exceed the unrefunded payment amount.");
+      if (parsed.data.amountCents > payment.allocatedCents) throw new Error("Refund cannot exceed the payment allocated to this folio.");
       await tx`insert into refunds (property_id,payment_id,amount_cents,effective_date,reason) values (${session.propertyId}::uuid,${payment.id}::uuid,${parsed.data.amountCents},current_date,'Guest refund')`;
       await tx`update payment_allocations set amount_cents=${payment.allocatedCents - parsed.data.amountCents} where payment_id=${payment.id}::uuid and folio_id=${payment.folioId}::uuid`;
       return { paymentId: payment.id, refundedCents: payment.refundedCents + parsed.data.amountCents };
