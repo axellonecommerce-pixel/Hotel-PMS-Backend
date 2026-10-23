@@ -184,8 +184,21 @@ export async function PATCH(request: Request) {
         for (const source of input.savedPaymentSources) await tx`insert into guest_payment_sources (property_id,guest_id,method,label,last4,external_reference) values (${session.propertyId}::uuid,${input.guestId}::uuid,'card',${source.label},${source.last4 || null},${source.tokenReference || null})`;
       }
       if (input.remarkEntries !== undefined) {
-        await tx`delete from guest_remarks where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid`;
-        for (const remark of input.remarkEntries) await tx`insert into guest_remarks (property_id,guest_id,remark) values (${session.propertyId}::uuid,${input.guestId}::uuid,${remark.text})`;
+        // Remarks are a dated, append-only guest record. The client includes
+        // its full visible history when it saves a new remark, so insert only
+        // text not already present instead of replacing the history.
+        const existingRemarks = await tx<Array<{ text: string }>>`
+          select remark as text from guest_remarks
+          where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid
+          for update
+        `;
+        const knownTexts = new Set(existingRemarks.map((remark) => remark.text.trim()));
+        for (const remark of input.remarkEntries) {
+          const text = remark.text.trim();
+          if (!text || knownTexts.has(text)) continue;
+          await tx`insert into guest_remarks (property_id,guest_id,remark) values (${session.propertyId}::uuid,${input.guestId}::uuid,${text})`;
+          knownTexts.add(text);
+        }
       }
       if (input.idType !== undefined || input.driverLicenseNumber !== undefined) {
         // Preserve the history/audit trail rather than hard-deleting identity
