@@ -17,7 +17,7 @@ Status: **Approved** — owner approval recorded in `docs/approval.md`.
 | Database | Supabase PostgreSQL | Transactions, row-level security, backups, realtime support |
 | Authentication | Supabase Auth, email/password | Unique employee identity and hotel-scoped sessions |
 | File storage | Supabase Storage | Hotel logos, IDs, receipts, maintenance images, backup archives |
-| Hosting | Vercel for frontend/API | Good Next.js support and preview deployments |
+| Hosting | Netlify for the public Next.js frontend; Vercel for the Next.js API/backend | Matches the approved production topology. Netlify builds receive the public API origin, and Vercel restricts API CORS to the deployed Netlify origin. |
 | Validation | Zod at every external boundary | Runtime validation and consistent errors |
 | ORM/migrations | Drizzle ORM + reviewed SQL migrations | Already used; explicit schema history |
 | Tests | Vitest + React Testing Library + Playwright | Unit, component, and end-to-end coverage |
