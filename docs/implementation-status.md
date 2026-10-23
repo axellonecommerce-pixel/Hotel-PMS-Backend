@@ -80,7 +80,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-CSH-002 | Verified production path | The durable cash-drop API calculates expected cash from the saved drawer float and signed adjustment ledger, persists count/drop totals, derives over/short status, and requires a reason for shortages. |
 | FR-AUD-001 | Verified production path | Manual and scheduled Night Audit use an advisory lock and locked business-day row, store run results and blockers, close/open business days transactionally, and persist a failure notification. The current open business date is also exposed through a tenant-scoped read API for every operational screen. |
 | FR-REV-001 | Verified production path | PostgreSQL ledger entries enforce balanced debit/credit posting for room revenue, tax, charge edits, and expenses; financial writes and ledger lines share the same transaction. |
-| FR-REV-002 | Verified demo | Gross/net revenue, ADR, both occupancy measures, and both RevPAR measures are shown. |
+| FR-REV-002 | Verified production path | The Revenue screen reads tenant-scoped daily room, tax, and miscellaneous revenue from immutable PostgreSQL ledger credits; its ADR, occupancy, and RevPAR calculations use that durable total. |
 | FR-RPT-001 | Verified demo | Custom range, print, PDF/Excel export, comparison, and report detail controls exist. |
 | FR-RPT-002 | Verified demo | Standard reports and tenant-scoped saved custom report definitions are connected to backend APIs. |
 | FR-NOT-001 | Verified production path | Tenant- and role-scoped notifications persist in PostgreSQL, support read/resolve controls, and are produced by scheduled ID-retention, invoice-reminder, and Night Audit workflows. |
