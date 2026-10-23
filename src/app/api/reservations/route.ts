@@ -28,6 +28,7 @@ export async function GET(request: Request) {
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null;
         taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number;
         reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; status: string }>;
+        extraGuests: Array<{ id: string; name: string; driverLicenseNumber: string | null }>;
       }>>`
         select r.id,r.version,r.company_id as "companyId",g.first_name as "firstName",g.last_name as "lastName",g.phone,
           rr.room_number as room,r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
@@ -41,6 +42,11 @@ export async function GET(request: Request) {
             - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=r.id),0))::int as "balanceCents",
           coalesce((select json_agg(json_build_object('id',rrx.id,'roomNumber',room.number,'roomTypeId',rrx.room_type_id,'status',rrx.status) order by rrx.created_at)
             from reservation_rooms rrx left join rooms room on room.id=rrx.room_id where rrx.reservation_id=r.id),'[]'::json) as "reservationRooms"
+          ,coalesce((select json_agg(json_build_object('id',extra_guest.id,'name',concat(extra_guest.first_name,' ',extra_guest.last_name),'driverLicenseNumber',identity.id_number) order by reservation_guest.id)
+            from reservation_guests reservation_guest
+            join guests extra_guest on extra_guest.id=reservation_guest.guest_id
+            left join guest_identities identity on identity.guest_id=extra_guest.id and identity.deleted_at is null
+            where reservation_guest.reservation_id=r.id and reservation_guest."primary"=false),'[]'::json) as "extraGuests"
         from reservations r
         join guests g on g.id=r.main_guest_id
         left join booking_sources bs on bs.id=r.booking_source_id
@@ -53,7 +59,12 @@ export async function GET(request: Request) {
         const status = record.status === "reserved" ? "Reserved" : record.status === "checked_in" ? "Checked In" : record.status === "checked_out" ? "Checked Out" : record.status === "no_show" ? "No Show" : record.status === "cancelled" ? "Cancelled" : record.status;
         const roomStatus = (value: string) => value === "reserved" ? "Reserved" : value === "checked_in" ? "Checked In" : value === "checked_out" ? "Checked Out" : value === "no_show" ? "No Show" : "Cancelled";
         const reservationRooms = (record.reservationRooms ?? []).map((room) => ({ id: room.id, roomNumber: room.roomNumber ?? undefined, roomTypeId: room.roomTypeId, status: roomStatus(room.status), nightlyRatesCents: [] }));
-        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+        const extraGuests = (record.extraGuests ?? []).map((guest) => ({
+          id: guest.id,
+          name: guest.name,
+          driverLicenseNumber: guest.driverLicenseNumber ?? undefined,
+        }));
+        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
     }
     const records = await db.query.reservations.findMany({
@@ -302,6 +313,7 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
   `;
   const confirmationNumber = `PMS-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900 + 100)}`;
   const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${payload.otaPaymentStatus || null},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: payload.source })}::text) returning id`;
+  await tx`insert into reservation_guests (property_id,reservation_id,guest_id,"primary") values (${session.propertyId}::uuid,${reservation.id}::uuid,${guestId}::uuid,true) on conflict (reservation_id,guest_id) do update set "primary"=true`;
   const reservationRoomsCreated: Array<{ id: string; roomNumber: number }> = [];
   for (let index = 0; index < payload.roomCount; index += 1) {
     const [reservationRoom] = await tx<Array<{ id: string }>>`insert into reservation_rooms (property_id,reservation_id,room_type_id,room_id,status) values (${session.propertyId}::uuid,${reservation.id}::uuid,${roomType.id}::uuid,${selectedRooms[index]?.id || null}::uuid,'reserved') returning id`;
