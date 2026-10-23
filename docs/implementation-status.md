@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 44 |
-| Verified production path | 30 |
+| Verified demo | 34 |
+| Verified production path | 31 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -31,7 +31,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-TEN-002 | Verified demo | APIs derive hotel scope from the authenticated user's active membership and reject cross-hotel access. |
 | FR-TEN-003 | Verified demo | The full hotel configuration is loaded and saved through a tenant-scoped settings API; each save also transactionally synchronizes configured room types, rooms, and operational employees into relational production records used by workflows. |
 | FR-TEN-004 | Verified demo | USD/US defaults are used and production schema includes currency/country-ready fields. |
-| FR-GST-001 | Verified demo | Multi-guest data, ID fields, remarks, DNR, and payment-source UI/domain models exist. The guest directory now has a tenant-scoped PostgreSQL read/update API that persists direct profile/contact/address edits, fixed rates, notes, DNR state, vehicles, payment-source tokens, and guest remarks; multi-guest workflow coverage remains demo-backed. |
+| FR-GST-001 | Verified demo | Multi-guest data, ID fields, remarks, DNR, and payment-source UI/domain models exist. The guest directory now has a tenant-scoped PostgreSQL read/create/update API that persists manually entered profiles, contact/address edits, fixed rates, selectable guest status, notes, DNR state, vehicles, payment-source tokens, and guest remarks; multi-guest workflow coverage remains demo-backed. |
 | FR-GST-002 | Verified production path | Guest ID images use the private Supabase bucket, identity metadata is durable, the daily worker warns seven days before expiry, deletes at one year, and writes a retention tombstone so backups cannot restore an expired image. |
 | FR-GST-003 | Verified production path | Guest CSV import validates required ID type and number, then transactionally creates or merges tenant-scoped guest and identity records by normalized ID number. |
 | FR-GST-004 | Verified demo | Matching-ID merge and payment-source deduplication behavior is implemented in the guest domain/context. |
@@ -84,7 +84,6 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-RPT-001 | Verified demo | Custom range, print, PDF/Excel export, comparison, and report detail controls exist. |
 | FR-RPT-002 | Verified demo | Standard reports and tenant-scoped saved custom report definitions are connected to backend APIs. |
 | FR-NOT-001 | Verified production path | Tenant- and role-scoped notifications persist in PostgreSQL, support read/resolve controls, and are produced by scheduled ID-retention, invoice-reminder, and Night Audit workflows. |
-| FR-TSK-001 | Verified production path | Dashboard shift tasks load, create, and complete through a tenant-scoped PostgreSQL API; failed saves revert the optimistic client update instead of silently disappearing after refresh. |
 | FR-SRC-001 | Verified demo | Global search covers guests, reservations, rooms, companies, folios, and invoices. |
 | FR-BKP-001 | Verified production path | The server produces a complete tenant snapshot with durable tables and private file bytes while removing expired/deleted ID-image keys. |
 | FR-BKP-002 | Verified production path | Restore requires the typed hotel-specific confirmation, replaces tenant data in dependency order inside one PostgreSQL transaction, then restores private files. Owners and managers can also explicitly reset tenant operational data while retaining all property settings and configuration. |
