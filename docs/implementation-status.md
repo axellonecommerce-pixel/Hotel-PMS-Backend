@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 33 |
-| Verified production path | 32 |
+| Verified demo | 32 |
+| Verified production path | 33 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -43,7 +43,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-RES-004 | Verified production path | The checkout API locks the reservation and selected rooms, validates deposits and balances, creates room folios with locked numbering, moves each room’s charges and linked tax, checks out rooms, and marks physical rooms dirty in one transaction. |
 | FR-RES-005 | Verified production path | Company group checkout waits for every room, then transactionally creates exactly one draft company invoice containing all group folio charges and tax. |
 | FR-RES-006 | Verified production path | The room-move API locks the reservation and both room assignments, blocks non-rentable or occupied destinations, stores the move reason and rate decision, updates the active reservation room/type, and marks the vacated physical room dirty in one transaction. |
-| FR-RES-007 | Verified demo | Date-filtered Room Move report exists. |
+| FR-RES-007 | Verified production path | The Room Move Report reads tenant-scoped persisted moves by date range, including guest, old/new room, required reason, and the saved rate decision; its prior-period comparison uses the same API. |
 | FR-RES-008 | Verified demo | Early/late fees, cancellation, no-show, inventory release, and reinstatement controls exist. |
 | FR-RES-009 | Verified demo | OTA source and three payment-status choices exist. |
 | FR-RAT-001 | Verified demo | Same/different nightly rate entry and immediate planned postings exist. |
