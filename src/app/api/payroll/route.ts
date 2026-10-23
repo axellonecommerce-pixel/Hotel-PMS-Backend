@@ -49,8 +49,11 @@ export async function GET(request: Request) {
         on conflict (property_id,starts_on,ends_on) do update set scheduled_pay_date=excluded.scheduled_pay_date
         returning id,starts_on::text as start,ends_on::text as end,scheduled_pay_date::text as "payDate",status
       `;
-      const employees = await tx<Array<{ id: string; name: string; role: string; hourlyRateCents: number | null }>>`
-        select id,name,job_role as role,hourly_rate_cents as "hourlyRateCents" from employees where property_id=${session.propertyId}::uuid and active=true order by name
+      // Keep inactive employees in this response too. Their historical pay
+      // entries remain part of payroll and omitting them leaves the frontend
+      // with an entry whose employee cannot be resolved.
+      const employees = await tx<Array<{ id: string; name: string; role: string; hourlyRateCents: number | null; active: boolean }>>`
+        select id,name,job_role as role,hourly_rate_cents as "hourlyRateCents",active from employees where property_id=${session.propertyId}::uuid order by active desc,name
       `;
       for (const employee of employees) {
         const [minutes] = await tx<Array<{ minutes: number }>>`
@@ -76,7 +79,7 @@ export async function GET(request: Request) {
         where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id<>${period.id}::uuid order by pp.ends_on desc limit 100
       `;
       const mapEntry = (entry: typeof entries[number]) => { const meta = parseDescription(entry.description); return { id: entry.id, payrollPeriodId: entry.periodId, employeeId: entry.employeeId, regularMinutes: entry.regularMinutes, hourlyRateCents: entry.hourlyRateCents ?? 0, adjustmentCents: meta.adjustmentCents ?? 0, paymentStatus: entry.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending" }; };
-      return { period: { id: period.id, label: `${period.start} to ${period.end}`, startDate: period.start, endDate: period.end, payDate: period.payDate }, employees: employees.map((employee) => ({ ...employee, role: employee.role.toLowerCase() === 'housekeeper' ? 'Housekeeper' : employee.role.toLowerCase() === 'manager' || employee.role.toLowerCase() === 'owner' ? 'Manager' : 'Other Employee', status: 'Active' })), entries: entries.map(mapEntry), history: history.map((entry) => ({ ...mapEntry(entry), periodLabel: `${entry.startsOn} to ${entry.endsOn}` })) };
+      return { period: { id: period.id, label: `${period.start} to ${period.end}`, startDate: period.start, endDate: period.end, payDate: period.payDate }, employees: employees.map((employee) => ({ ...employee, role: employee.role.toLowerCase() === 'housekeeper' ? 'Housekeeper' : employee.role.toLowerCase() === 'manager' || employee.role.toLowerCase() === 'owner' ? 'Manager' : 'Other Employee', status: employee.active ? 'Active' : 'Inactive' })), entries: entries.map(mapEntry), history: history.map((entry) => ({ ...mapEntry(entry), periodLabel: `${entry.startsOn} to ${entry.endsOn}` })) };
     });
     return Response.json(result);
   } catch (error) { return propertyAccessResponse(error); }
