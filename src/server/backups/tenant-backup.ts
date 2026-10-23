@@ -88,6 +88,31 @@ export async function resetTenantOperationalData(tx: TransactionSql<Record<strin
     if (settingsTables.has(table)) continue;
     await tx.unsafe(`delete from "${table}" where property_id = $1`, [propertyId]);
   }
+
+  // Rooms and their map positions are setup data, but their service and
+  // cleanliness states are operational data. Resetting only the operational
+  // tables previously left an OOO/dirty room embedded in both the rooms table
+  // and the saved settings JSON, so the dashboard still showed stale counts.
+  await tx`update rooms set service_status='rentable', cleanliness_status='clean', updated_at=now() where property_id=${propertyId}::uuid`;
+  await tx`
+    update property_settings
+    set value=jsonb_set(
+      value,
+      '{rooms}',
+      coalesce((
+        select jsonb_agg(
+          jsonb_set(
+            jsonb_set(room, '{serviceStatus}', '"rentable"'::jsonb, true),
+            '{housekeepingStatus}', '"clean"'::jsonb, true
+          )
+        )
+        from jsonb_array_elements(coalesce(value->'rooms', '[]'::jsonb)) as room
+      ), '[]'::jsonb),
+      true
+    ),
+    updated_at=now()
+    where property_id=${propertyId}::uuid and key='application_settings'
+  `;
 }
 
 export async function restoreTenantFiles(backup: TenantBackup) {
