@@ -1,6 +1,82 @@
 import type { TransactionSql } from "postgres";
 
+import { postProductionLedger } from "@/server/finance/production-finance";
+
 type Tx = TransactionSql<Record<string, never>>;
+
+/**
+ * A no-show is a financial release, not only an operational status. Keep the
+ * original room-rent charges for audit, remove them from the active folio,
+ * and post the matching reversal before the business day is closed.
+ */
+async function releaseUnarrivedReservations(tx: Tx, propertyId: string, businessDate: string) {
+  const reservations = await tx<Array<{ id: string }>>`
+    select id from reservations
+    where property_id=${propertyId}::uuid and status='reserved'
+      and arrival_date=${businessDate}::date
+    for update
+  `;
+  for (const reservation of reservations) {
+    const rooms = await tx<Array<{ id: string }>>`
+      select id from reservation_rooms
+      where reservation_id=${reservation.id}::uuid and property_id=${propertyId}::uuid
+      for update
+    `;
+    const roomRentCharges = await tx<Array<{ id: string; serviceDate: string; amountCents: number; taxCents: number }>>`
+      select c.id,c.service_date::text as "serviceDate",c.amount_cents as "amountCents",
+        coalesce(ct.amount_cents,0)::int as "taxCents"
+      from charges c
+      join folios f on f.id=c.folio_id
+      left join charge_taxes ct on ct.charge_id=c.id
+      where f.reservation_id=${reservation.id}::uuid and c.property_id=${propertyId}::uuid
+        and c.type='Room Rent' and c.status='posted'
+      for update of c
+    `;
+    if (roomRentCharges.length) {
+      await tx`
+        update charges set status='voided',updated_at=now()
+        where id in ${tx(roomRentCharges.map((charge) => charge.id))}
+          and property_id=${propertyId}::uuid
+      `;
+    }
+    for (const charge of roomRentCharges) {
+      if (charge.amountCents > 0) await postProductionLedger(tx, {
+        propertyId,
+        businessDate,
+        resourceType: "night-audit-no-show",
+        resourceId: reservation.id,
+        description: `Night-audit no-show room-rent reversal · ${charge.serviceDate}`,
+        debitAccount: "Room Revenue",
+        creditAccount: "Guest Receivable",
+        amountCents: charge.amountCents,
+      });
+      if (charge.taxCents > 0) await postProductionLedger(tx, {
+        propertyId,
+        businessDate,
+        resourceType: "night-audit-no-show-tax",
+        resourceId: reservation.id,
+        description: `Night-audit no-show room-tax reversal · ${charge.serviceDate}`,
+        debitAccount: "Tax Payable",
+        creditAccount: "Guest Receivable",
+        amountCents: charge.taxCents,
+      });
+    }
+    if (rooms.length) await tx`
+      delete from nightly_rates
+      where property_id=${propertyId}::uuid
+        and reservation_room_id in ${tx(rooms.map((room) => room.id))}
+    `;
+    await tx`
+      update reservation_rooms set status='no_show',updated_at=now()
+      where reservation_id=${reservation.id}::uuid and property_id=${propertyId}::uuid
+    `;
+    await tx`
+      update reservations set status='no_show',version=version+1,updated_at=now()
+      where id=${reservation.id}::uuid and property_id=${propertyId}::uuid
+    `;
+  }
+  return reservations.length;
+}
 
 export async function runNightAudit(tx: Tx, input: { propertyId: string; trigger: "manual" | "scheduled"; employeeId?: string | null }) {
   await tx`select pg_advisory_xact_lock(hashtext(${`night-audit:${input.propertyId}`}))`;
@@ -52,19 +128,10 @@ export async function runNightAudit(tx: Tx, input: { propertyId: string; trigger
     return { runId: run.id, status: "failed" as const, businessDate: day.businessDate, blockers };
   }
   // Reservations that were due to arrive today but never checked in are
-  // closed as no-shows before the business day advances. They cannot appear
-  // as arrivals on the next business day or slip into departures.
-  await tx`
-    update reservations set status='no_show',updated_at=now()
-    where property_id=${input.propertyId}::uuid and status='reserved'
-      and arrival_date=${day.businessDate}::date
-  `;
-  await tx`
-    update reservation_rooms rr set status='no_show',updated_at=now()
-    from reservations r
-    where rr.reservation_id=r.id and r.property_id=${input.propertyId}::uuid
-      and r.status='no_show' and r.arrival_date=${day.businessDate}::date
-  `;
+  // closed as no-shows before the business day advances. Their rent and tax
+  // must be reversed at the same time so they do not remain in Revenue or a
+  // guest folio after disappearing from Arrivals.
+  await releaseUnarrivedReservations(tx, input.propertyId, day.businessDate);
   await tx`update business_days set status='closed',closed_at=now() where id=${day.id}::uuid`;
   await tx`
     insert into business_days (property_id,business_date,status,opened_at)
