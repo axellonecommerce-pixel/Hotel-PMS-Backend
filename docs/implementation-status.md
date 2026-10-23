@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 10 |
-| Verified production path | 55 |
+| Verified demo | 9 |
+| Verified production path | 56 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -54,7 +54,7 @@ The items that were partial in the October 16 audit now have durable implementat
 | FR-FOL-001 | Verified production path | A row-locked PostgreSQL allocator supplies the shared folio/invoice sequence and is used by checkout and the document-number API. |
 | FR-FOL-002 | Verified production path | Reservation folios are tenant-scoped database records. Extra folios, manual-charge moves, and each room's posted rent with its linked tax can be moved through row-locked server transactions. |
 | FR-FOL-003 | Verified production path | Tenant-scoped folio deletion locks the folio and rejects primary or financially active folios; empty secondary folios can be removed. |
-| FR-FOL-004 | Verified demo | Sent documents remain editable and resend updates sent state/date. |
+| FR-FOL-004 | Verified production path | Tenant-scoped invoice and folio send actions persist the latest `sent_at` timestamp. Charges remain editable after a document is sent, and every resend replaces that timestamp. |
 | FR-FOL-005 | Verified demo | Folio/invoice/registration print layouts include hotel, stay, guest, and breakdown details. |
 | FR-FOL-006 | Verified production path | Registration-rule edits create versioned records and each acceptance stores the exact rule version and immutable accepted content snapshot. |
 | FR-CHK-001 | Verified production path | Checkout rejects unsettled deposits and non-company folio balances, permits company direct-bill transfer, and updates checkout/dirty-room state atomically. |

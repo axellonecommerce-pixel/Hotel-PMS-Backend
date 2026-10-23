@@ -10,6 +10,10 @@ const moveRoomChargesSchema = z.object({
   folioId: z.string().uuid(),
   reservationRoomId: z.string().uuid(),
 });
+const markSentSchema = z.object({
+  action: z.literal("send"),
+  folioId: z.string().uuid(),
+});
 
 function routeParams(context: { params: Promise<{ reservationId: string }> }) {
   return context.params.then(({ reservationId }) => reservationId);
@@ -20,8 +24,8 @@ export async function GET(request: Request, context: { params: Promise<{ reserva
     const session = await requirePropertySession(request, "folios.manage");
     const reservationId = await routeParams(context);
     if (!z.string().uuid().safeParse(reservationId).success) return Response.json({ error: "A valid reservation is required." }, { status: 400 });
-    const folios = await productionSql()<Array<{ id: string; number: string; name: string; reservationRoomId: string | null }>>`
-      select id,number,name,reservation_room_id as "reservationRoomId"
+    const folios = await productionSql()<Array<{ id: string; number: string; name: string; reservationRoomId: string | null; sentAt: string | null }>>`
+      select id,number,name,reservation_room_id as "reservationRoomId",sent_at::text as "sentAt"
       from folios
       where property_id=${session.propertyId}::uuid and reservation_id=${reservationId}::uuid and status <> 'closed'
       order by reservation_room_id nulls last,created_at
@@ -106,8 +110,25 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const reservationId = await routeParams(context);
-    const parsed = moveRoomChargesSchema.safeParse(await request.json());
-    if (!z.string().uuid().safeParse(reservationId).success || !parsed.success) return Response.json({ error: "Room folio details are invalid." }, { status: 400 });
+    const body = await request.json();
+    const send = markSentSchema.safeParse(body);
+    if (!z.string().uuid().safeParse(reservationId).success) return Response.json({ error: "A valid reservation is required." }, { status: 400 });
+    if (send.success) {
+      const folio = await productionSql().begin(async (tx) => {
+        const [updated] = await tx<Array<{ id: string; sentAt: string }>>`
+          update folios
+          set sent_at=now(),updated_at=now()
+          where id=${send.data.folioId}::uuid and reservation_id=${reservationId}::uuid
+            and property_id=${session.propertyId}::uuid and status='open'
+          returning id,sent_at::text as "sentAt"
+        `;
+        if (!updated) throw new Error("The folio is unavailable.");
+        return updated;
+      });
+      return Response.json({ folio });
+    }
+    const parsed = moveRoomChargesSchema.safeParse(body);
+    if (!parsed.success) return Response.json({ error: "Room folio details are invalid." }, { status: 400 });
     const result = await productionSql().begin(async (tx) => {
       const [reservation] = await tx<Array<{ id: string }>>`
         select id from reservations
