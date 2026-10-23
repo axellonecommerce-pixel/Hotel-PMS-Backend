@@ -509,7 +509,93 @@ const updateSchema = z.object({
   notes: z.string().nullable().optional(),
   arrivalDate: z.string().optional(),
   departureDate: z.string().optional(),
+  extensionNightlyRateCents: z.number().int().nonnegative().optional(),
 });
+
+function productionReservationStatus(status: NonNullable<z.infer<typeof updateSchema>["status"]>) {
+  return status === "Reserved" ? "reserved" : status === "Checked In" ? "checked_in" : status === "Checked Out" ? "checked_out" : status === "No Show" ? "no_show" : "cancelled";
+}
+
+async function updateProductionReservation(
+  session: PropertySession,
+  id: string,
+  expectedVersion: number,
+  changes: Omit<z.infer<typeof updateSchema>, "id" | "expectedVersion">,
+) {
+  try {
+    const outcome = await productionSql().begin(async (tx) => {
+      const [current] = await tx<Array<{ id: string; version: number; arrivalDate: string; departureDate: string }>>`
+        select id,version,arrival_date::text as "arrivalDate",departure_date::text as "departureDate"
+        from reservations where id=${id}::uuid and property_id=${session.propertyId}::uuid for update
+      `;
+      if (!current) return { kind: "not-found" as const };
+      if (current.version !== expectedVersion) return { kind: "conflict" as const, currentVersion: current.version };
+
+      const nextArrival = changes.arrivalDate ?? current.arrivalDate;
+      const nextDeparture = changes.departureDate ?? current.departureDate;
+      if (nextDeparture <= nextArrival) throw new ReservationRequestError("Check-out must be after check-in.");
+
+      if (changes.departureDate && changes.departureDate !== current.departureDate) {
+        const roomRows = await tx<Array<{ id: string }>>`
+          select id from reservation_rooms
+          where reservation_id=${id}::uuid and property_id=${session.propertyId}::uuid for update
+        `;
+        if (changes.departureDate > current.departureDate) {
+          for (const roomRow of roomRows) {
+            const [lastRate] = await tx<Array<{ finalRateCents: number }>>`
+              select final_rate_cents as "finalRateCents" from nightly_rates
+              where reservation_room_id=${roomRow.id}::uuid
+              order by stay_date desc limit 1
+            `;
+            const nightlyRateCents = changes.extensionNightlyRateCents ?? lastRate?.finalRateCents ?? 0;
+            for (let stayDate = current.departureDate; stayDate < changes.departureDate;) {
+              await tx`
+                insert into nightly_rates (property_id,reservation_room_id,stay_date,base_rate_cents,discount_cents,final_rate_cents)
+                values (${session.propertyId}::uuid,${roomRow.id}::uuid,${stayDate}::date,${nightlyRateCents},0,${nightlyRateCents})
+                on conflict (reservation_room_id,stay_date) do update set base_rate_cents=excluded.base_rate_cents,discount_cents=excluded.discount_cents,final_rate_cents=excluded.final_rate_cents
+              `;
+              const next = new Date(`${stayDate}T12:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
+              stayDate = next.toISOString().slice(0, 10);
+            }
+          }
+        } else {
+          await tx`
+            delete from nightly_rates where reservation_room_id in (
+              select id from reservation_rooms where reservation_id=${id}::uuid
+            ) and stay_date >= ${changes.departureDate}::date
+          `;
+        }
+      }
+
+      const databaseStatus = changes.status ? productionReservationStatus(changes.status) : null;
+      if (databaseStatus) {
+        await tx`
+          update reservation_rooms set status=${databaseStatus},updated_at=now()
+          where reservation_id=${id}::uuid and property_id=${session.propertyId}::uuid
+            and status in ('reserved','checked_in')
+        `;
+      }
+      await tx`
+        update reservations set
+          arrival_date=${nextArrival}::date,
+          departure_date=${nextDeparture}::date,
+          status=coalesce(${databaseStatus},status),
+          notes=case when ${changes.notes !== undefined} then ${changes.notes ?? null} else notes end,
+          version=version+1,
+          updated_at=now()
+        where id=${id}::uuid and property_id=${session.propertyId}::uuid
+      `;
+      return { kind: "updated" as const, version: expectedVersion + 1 };
+    });
+    if (outcome.kind === "not-found") return Response.json({ error: "Reservation not found.", code: "NOT_FOUND" }, { status: 404 });
+    if (outcome.kind === "conflict") return Response.json({ error: "Another employee changed this reservation. Review the latest version before saving.", code: "EDIT_CONFLICT", currentVersion: outcome.currentVersion }, { status: 409 });
+    return Response.json({ id, version: outcome.version, ...changes });
+  } catch (error) {
+    if (error instanceof ReservationRequestError) return Response.json({ error: error.message }, { status: error.status });
+    console.error("Production reservation update failed", { propertyId: session.propertyId, id, error });
+    return Response.json({ error: "The reservation update could not be saved." }, { status: 500 });
+  }
+}
 
 export async function PATCH(request: Request) {
   let session;
@@ -524,6 +610,7 @@ export async function PATCH(request: Request) {
   if (changes.arrivalDate && changes.departureDate && changes.departureDate <= changes.arrivalDate) {
     return Response.json({ error: "Check-out must be after check-in." }, { status: 400 });
   }
+  if (hasProductionDatabase()) return updateProductionReservation(session, id, expectedVersion, changes);
   const now = new Date().toISOString();
   const result = db.update(reservations).set({
     ...(changes.status ? { status: changes.status } : {}),
