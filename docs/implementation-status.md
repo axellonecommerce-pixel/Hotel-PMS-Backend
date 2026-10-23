@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 24 |
-| Verified production path | 41 |
+| Verified demo | 23 |
+| Verified production path | 42 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -84,7 +84,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-RPT-001 | Verified demo | Custom range, print, PDF/Excel export, comparison, and report detail controls exist. |
 | FR-RPT-002 | Verified production path | Standard reports and tenant-scoped saved custom report definitions are connected to backend APIs; production saves are durably stored in the property settings record with duplicate-name protection. |
 | FR-NOT-001 | Verified production path | Tenant- and role-scoped notifications persist in PostgreSQL, support read/resolve controls, and are produced by scheduled ID-retention, invoice-reminder, and Night Audit workflows. |
-| FR-SRC-001 | Verified demo | Global search covers guests, reservations, rooms, companies, folios, and invoices. |
+| FR-SRC-001 | Verified production path | Global search debounces tenant-scoped server queries for guests (including active ID numbers), reservations, rooms, companies, folios, and invoices. Results never rely on whichever records happen to be loaded in the browser. |
 | FR-BKP-001 | Verified production path | The server produces a complete tenant snapshot with durable tables and private file bytes while removing expired/deleted ID-image keys. |
 | FR-BKP-002 | Verified production path | Restore requires the typed hotel-specific confirmation, replaces tenant data in dependency order inside one PostgreSQL transaction, then restores private files. Owners and managers can also explicitly reset tenant operational data while retaining all property settings and configuration. |
 | NFR-UX-001 | Verified demo | Responsive phone/tablet/desktop layouts and overflow controls exist across the main workspace. |
