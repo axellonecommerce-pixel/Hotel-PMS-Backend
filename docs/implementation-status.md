@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 16 |
-| Verified production path | 49 |
+| Verified demo | 15 |
+| Verified production path | 50 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -59,7 +59,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-FOL-006 | Verified production path | Registration-rule edits create versioned records and each acceptance stores the exact rule version and immutable accepted content snapshot. |
 | FR-CHK-001 | Verified production path | Checkout rejects unsettled deposits and non-company folio balances, permits company direct-bill transfer, and updates checkout/dirty-room state atomically. |
 | FR-PAY-001 | Verified production path | Tenant-scoped payment operations persist collection, allocation, deletion, and refund records; the server rejects a collection greater than the authoritative folio balance. |
-| FR-PAY-002 | Verified demo | Optional card metadata is supported without full card/CVV persistence. |
+| FR-PAY-002 | Verified production path | Saved payment-source metadata persists through the tenant-scoped guest API and accepts only a label, an optional four-digit masked suffix, and an optional processor reference; the PMS never asks staff to enter a full card number or CVV. |
 | FR-PAY-003 | Verified production path | Refunds are durable records, reduce the allocated folio amount, and cannot exceed the unrefunded payment; deletion removes the tenant-owned payment, allocation, and refund records together. |
 | FR-PAY-004 | Verified demo | BAD DEBT checkout settlement and loss representation exist. |
 | FR-DEP-001 | Verified production path | Tenant-scoped security deposits and immutable hold/charge/release transactions now persist through the reservation workspace. The server prevents duplicate holds, caps deductions/releases at the held balance, and checkout continues to require every held deposit be settled. |

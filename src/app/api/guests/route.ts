@@ -9,7 +9,12 @@ type Address = { addressLine1?: string; postalCode?: string; city?: string; stat
 type Preferences = { fixedRateCents?: number; dateOfBirth?: string; idExpires?: string; secondaryPhone?: string; secondaryEmail?: string; roomPreferences?: Record<string, unknown> };
 
 const guestStatusSchema = z.enum(["Regular", "Returning", "New", "Do Not Rent"]);
-const paymentSourceSchema = z.object({ id: z.string().optional(), label: z.string().trim().min(1), last4: z.string().optional(), tokenReference: z.string().optional() });
+const paymentSourceSchema = z.object({
+  id: z.string().optional(),
+  label: z.string().trim().min(1).max(120),
+  last4: z.string().regex(/^\d{4}$/).optional(),
+  tokenReference: z.string().trim().max(200).optional(),
+});
 const vehicleSchema = z.object({ plate: z.string().trim().min(1), make: z.string().optional(), color: z.string().optional(), year: z.string().optional() });
 const updateSchema = z.object({
   guestId: z.string().uuid(),
@@ -221,14 +226,17 @@ export async function POST(request: Request) {
         };
         if (row.idType && row.idNumber?.trim()) {
           const idNumber = normalizedId(row.idNumber);
-          const [existing] = await tx<Array<{ guestId: string; guestStatus: string }>>`
-            select gi.guest_id as "guestId",g.guest_status as "guestStatus"
+          const [existing] = await tx<Array<{ guestId: string; guestStatus: string; roomPreferences: unknown }>>`
+            select gi.guest_id as "guestId",g.guest_status as "guestStatus",g.room_preferences as "roomPreferences"
             from guest_identities gi join guests g on g.id=gi.guest_id
             where gi.property_id=${session.propertyId}::uuid and gi.id_type=${row.idType} and gi.normalized_id_number=${idNumber} and gi.deleted_at is null
             for update
           `;
           if (existing) {
-            await tx`update guests set first_name=${row.firstName},last_name=${row.lastName},phone=${row.phone?.replace(/\D/g, "") || null},email=${row.email || null},address=${tx.json(address)},remarks=case when ${notes} is null then remarks else ${notes} end,guest_status=${existing.guestStatus === "do_not_rent" ? "do_not_rent" : storedStatus(row.status ?? "New")},room_preferences=${tx.json({ dateOfBirth: row.dateOfBirth, idExpires: row.idExpires })},updated_at=now() where id=${existing.guestId}::uuid and property_id=${session.propertyId}::uuid`;
+            const preferences = parseObject<Preferences>(existing.roomPreferences);
+            if (row.dateOfBirth !== undefined) preferences.dateOfBirth = row.dateOfBirth;
+            if (row.idExpires !== undefined) preferences.idExpires = row.idExpires;
+            await tx`update guests set first_name=${row.firstName},last_name=${row.lastName},phone=${row.phone?.replace(/\D/g, "") || null},email=${row.email || null},address=${tx.json(address)},remarks=case when ${notes} is null then remarks else ${notes} end,guest_status=${existing.guestStatus === "do_not_rent" ? "do_not_rent" : storedStatus(row.status ?? "New")},room_preferences=${tx.json(preferences as never)},updated_at=now() where id=${existing.guestId}::uuid and property_id=${session.propertyId}::uuid`;
             return { guestId: existing.guestId, merged: true };
           }
         }
