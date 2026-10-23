@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 19 |
-| Verified production path | 46 |
+| Verified demo | 18 |
+| Verified production path | 47 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -45,7 +45,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-RES-006 | Verified production path | The room-move API locks the reservation and both room assignments, blocks non-rentable or occupied destinations, stores the move reason and rate decision, updates the active reservation room/type, marks the vacated physical room dirty, and returns the complete posted-charge balance in one transaction. |
 | FR-RES-007 | Verified production path | The Room Move Report reads tenant-scoped persisted moves by date range, including guest, old/new room, required reason, and the saved rate decision; its prior-period comparison uses the same API. |
 | FR-RES-008 | Verified production path | Cancellation and no-show lock the reserved room assignments, void the original room charges, post balancing ledger reversals, and release inventory in one transaction. Reinstatement validates current inventory, restores the originally voided charges/rates, posts the corresponding ledger entries, and returns the stay to Reserved. |
-| FR-RES-009 | Verified demo | OTA source and three payment-status choices exist. |
+| FR-RES-009 | Verified production path | Reservation creation stores the selected OTA source and one of the three permitted OTA payment states. The tenant-scoped reservation read model returns that saved state after refresh, so operational boards and reservation details do not fall back to an invented payment state. |
 | FR-RAT-001 | Verified production path | The reservation workflow passes the selected Availability default or explicit rate code, accepts same or nightly-specific prices, validates one price per night, and transactionally persists nightly rates with posted room-rent and tax entries. |
 | FR-RAT-002 | Verified production path | The rate-adjustment API locks posted room charges, updates nightly rates and linked tax from the reservation's stored tax snapshot, records balanced adjustments, recalculates the authoritative balance, and requires a reason for manual tax overrides. |
 | FR-RAT-003 | Verified production path | The folio-charge API resolves the authenticated property's configured charge type, snapshots tax, requires an override reason, and durably creates, edits, and voids manual charges with balanced ledger adjustments. |

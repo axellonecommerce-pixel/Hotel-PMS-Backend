@@ -25,7 +25,7 @@ export async function GET(request: Request) {
     if (hasProductionDatabase()) {
       const records = await productionSql()<Array<{
         id: string; version: number; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null;
-        checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null;
+        checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null; otaPaymentStatus: string | null;
         taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number;
         reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; status: string }>;
         extraGuests: Array<{ id: string; name: string; driverLicenseNumber: string | null }>;
@@ -34,7 +34,7 @@ export async function GET(request: Request) {
           rr.room_number as room,r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
           coalesce(bs.name,case when r.notes like '{%' then r.notes::jsonb->>'source' end,'Direct') as source,
           case when r.notes like '{%' then r.notes::jsonb->>'rateCode' end as "rateCode",
-          r.status,r.tax_rate_basis_points as "taxRateBasisPoints",r.tax_exempt as "taxExempt",
+          r.status,r.ota_payment_status as "otaPaymentStatus",r.tax_rate_basis_points as "taxRateBasisPoints",r.tax_exempt as "taxExempt",
           coalesce((case when r.notes like '{%' then r.notes::jsonb->>'adults' end)::int,1) as adults,coalesce((case when r.notes like '{%' then r.notes::jsonb->>'children' end)::int,0) as children,
           coalesce((case when r.notes like '{%' then r.notes::jsonb->>'petCount' end)::int,0) as "petCount",coalesce((case when r.notes like '{%' then r.notes::jsonb->>'servicePetCount' end)::int,0) as "servicePetCount",
           coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rrx on rrx.id=nr.reservation_room_id where rrx.reservation_id=r.id),0)::int as "roomRentCents",
@@ -64,7 +64,10 @@ export async function GET(request: Request) {
           name: guest.name,
           driverLicenseNumber: guest.driverLicenseNumber ?? undefined,
         }));
-        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+        const otaPaymentStatus = record.otaPaymentStatus === "Guest Pays Hotel" || record.otaPaymentStatus === "Paid Online" || record.otaPaymentStatus === "Virtual Card Pending"
+          ? record.otaPaymentStatus
+          : undefined;
+        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
     }
     const records = await db.query.reservations.findMany({
