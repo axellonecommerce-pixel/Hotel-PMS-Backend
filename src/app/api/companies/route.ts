@@ -29,7 +29,7 @@ export async function GET(request: Request) {
           coalesce((select sum(il.amount_cents) from invoices i join invoice_lines il on il.invoice_id=i.id where i.company_id=c.id)
             - (select coalesce(sum(ipa.amount_cents),0) from invoices i join invoice_payment_allocations ipa on ipa.invoice_id=i.id where i.company_id=c.id),0)::int as "currentBalanceCents"
         from companies c
-        left join lateral (select * from company_contacts where company_id=c.id order by primary desc limit 1) cc on true
+        left join lateral (select * from company_contacts where company_id=c.id order by "primary" desc limit 1) cc on true
         where c.property_id=${session.propertyId}::uuid order by c.name
       `;
       const rates = await productionSql()<Array<{ companyId: string; roomTypeId: string; roomTypeName: string; rateCents: number }>>`
@@ -58,7 +58,7 @@ export async function POST(request: Request) {
           values (${session.propertyId}::uuid,${parsed.data.name},${tx.json({ formatted: parsed.data.billingAddress })},${parsed.data.paymentTermsDays},${parsed.data.status.toLowerCase().replace(/ /g,"_")})
           returning id
         `;
-        await tx`insert into company_contacts (property_id,company_id,name,email,phone,primary) values (${session.propertyId}::uuid,${created.id}::uuid,${parsed.data.contactPerson},${parsed.data.email},${parsed.data.phone},true)`;
+        await tx`insert into company_contacts (property_id,company_id,name,email,phone,"primary") values (${session.propertyId}::uuid,${created.id}::uuid,${parsed.data.contactPerson},${parsed.data.email},${parsed.data.phone},true)`;
         return { id: created.id, ...parsed.data, currentBalanceCents: 0, openInvoices: 0, negotiatedRates: [] };
       });
       return Response.json({ company }, { status: 201 });
@@ -95,7 +95,7 @@ export async function PATCH(request: Request) {
         `;
         if (changes.contactPerson || changes.email || changes.phone) await tx`
           update company_contacts set name=coalesce(${changes.contactPerson ?? null},name),email=coalesce(${changes.email ?? null},email),phone=coalesce(${changes.phone ?? null},phone)
-          where company_id=${id}::uuid and primary=true
+          where company_id=${id}::uuid and "primary"=true
         `;
         return { id, ...changes };
       });

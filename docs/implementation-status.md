@@ -63,7 +63,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-PAY-003 | Verified production path | Refunds are durable records, reduce the allocated folio amount, and cannot exceed the unrefunded payment; deletion removes the tenant-owned payment, allocation, and refund records together. |
 | FR-PAY-004 | Verified demo | BAD DEBT checkout settlement and loss representation exist. |
 | FR-DEP-001 | Verified production path | Tenant-scoped security deposits and immutable hold/charge/release transactions now persist through the reservation workspace. The server prevents duplicate holds, caps deductions/releases at the held balance, and checkout continues to require every held deposit be settled. |
-| FR-COM-001 | Verified production path | Company CRUD, payment terms, contacts, statuses, and per-room-type negotiated rates are editable in the UI and stored through tenant-scoped PostgreSQL APIs. |
+| FR-COM-001 | Verified production path | Company CRUD, payment terms, contacts, statuses, and per-room-type negotiated rates are editable in the UI and stored through tenant-scoped PostgreSQL APIs. Primary-contact SQL safely quotes the database column name, so creation, listing, and editing work on PostgreSQL. |
 | FR-COM-002 | Verified demo | Checked-out Guest/Stay items can be marked Sent and moved to Invoices. |
 | FR-COM-003 | Verified production path | The daily worker marks eligible invoices overdue and creates a persisted reminder notification every seven days until payment. |
 | FR-COM-004 | Verified demo | One payment can allocate across invoices with partial allocation and company credit. |
