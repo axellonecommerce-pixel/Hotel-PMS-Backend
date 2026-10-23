@@ -11,7 +11,7 @@ import { bookingChannels, companies, guests, reservationCharges, reservationRoom
 import { recordChange } from "@/server/realtime/change-events";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import type { PropertySession } from "@/server/auth/authorization";
-import { allocateProductionDocumentNumber } from "@/server/finance/production-finance";
+import { allocateProductionDocumentNumber, postProductionLedger } from "@/server/finance/production-finance";
 
 /**
  * The operational UI needs a real property-scoped read model after refresh.
@@ -195,6 +195,9 @@ async function createProductionReservation(request: Request, session: PropertySe
   if (!parsed.success) return Response.json({ error: "Required guest and stay details are missing." }, { status: 400 });
   const payload = parsed.data;
   if (payload.checkoutDate <= payload.checkInDate) return Response.json({ error: "Check-out must be after check-in." }, { status: 400 });
+  if (payload.taxExempt && (!payload.taxExemptionReason || !payload.taxExemptionCertificate)) {
+    return Response.json({ error: "Tax-exempt stays require a reason and certificate number." }, { status: 400 });
+  }
   try {
     const result = await productionSql().begin(async (tx) => createProductionReservationTransaction(tx, session, payload));
     return Response.json(result, { status: 201 });
@@ -248,8 +251,16 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
   }
   const nights = Math.round((new Date(`${payload.checkoutDate}T12:00:00Z`).getTime() - new Date(`${payload.checkInDate}T12:00:00Z`).getTime()) / 86_400_000);
   if (payload.nightlyRatesCents.length !== nights) throw new ReservationRequestError("Enter one nightly rate for every night of the stay.");
+  // Store the selected source as a first-class record. Reports can now group
+  // new reservations by source without having to parse the reservation note.
+  const [bookingSource] = await tx<Array<{ id: string }>>`
+    insert into booking_sources (property_id,name,type,commission_basis_points,active)
+    values (${session.propertyId}::uuid,${payload.source},${payload.source === "Direct" ? "direct" : "other"},0,true)
+    on conflict (property_id,name) do update set active=true
+    returning id
+  `;
   const confirmationNumber = `PMS-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900 + 100)}`;
-  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${payload.otaPaymentStatus || null},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: payload.source })}::text) returning id`;
+  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${payload.otaPaymentStatus || null},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: payload.source })}::text) returning id`;
   const reservationRoomsCreated: Array<{ id: string; roomNumber: number }> = [];
   for (let index = 0; index < payload.roomCount; index += 1) {
     const [reservationRoom] = await tx<Array<{ id: string }>>`insert into reservation_rooms (property_id,reservation_id,room_type_id,room_id,status) values (${session.propertyId}::uuid,${reservation.id}::uuid,${roomType.id}::uuid,${selectedRooms[index]?.id || null}::uuid,'reserved') returning id`;
@@ -272,9 +283,33 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
         values (${session.propertyId}::uuid,${folio.id}::uuid,${reservationRoom.id}::uuid,'Room Rent',${`Room ${reservationRoom.roomNumber} · ${stayDate}`},${stayDate}::date,${rate},${!payload.taxExempt},'posted')
         returning id
       `;
+      // Initial room rent is a financial posting just like a manually added
+      // folio charge. Keeping both entries in this transaction means a
+      // created reservation is immediately represented in Revenue and can
+      // never leave an unbalanced partial ledger behind.
+      await postProductionLedger(tx, {
+        propertyId: session.propertyId,
+        businessDate: stayDate,
+        resourceType: "charge",
+        resourceId: charge.id,
+        description: `Room rent · ${stayDate}`,
+        debitAccount: "Guest Receivable",
+        creditAccount: "Room Revenue",
+        amountCents: rate,
+      });
       if (!payload.taxExempt) {
         const taxCents = calculateTaxCents(rate, payload.taxRatePercentage / 100);
         await tx`insert into charge_taxes (property_id,charge_id,name,rate_basis_points,amount_cents) values (${session.propertyId}::uuid,${charge.id}::uuid,'Room Tax',${Math.round(payload.taxRatePercentage * 100)},${taxCents})`;
+        if (taxCents > 0) await postProductionLedger(tx, {
+          propertyId: session.propertyId,
+          businessDate: stayDate,
+          resourceType: "charge-tax",
+          resourceId: charge.id,
+          description: `Room rent tax · ${stayDate}`,
+          debitAccount: "Guest Receivable",
+          creditAccount: "Tax Payable",
+          amountCents: taxCents,
+        });
       }
     }
   }
