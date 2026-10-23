@@ -5,6 +5,7 @@ import type { TransactionSql } from "postgres";
 
 import { db } from "@/server/db/client";
 import { calculateCommissionCents } from "@/domain/rules/commission";
+import { applyStackedPromotions, type Promotion } from "@/domain/rules/reservation-lifecycle";
 import { canUseRateCode } from "@/domain/rules/rate-code";
 import { calculateTaxCents } from "@/domain/rules/tax";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
@@ -157,6 +158,7 @@ const payloadSchema = z.object({
   petCount: z.number().int().nonnegative().default(0),
   servicePetCount: z.number().int().nonnegative().default(0),
   rateCode: z.string().trim().min(1),
+  baseNightlyRatesCents: z.array(z.number().int().nonnegative()).min(1),
   nightlyRatesCents: z.array(z.number().int().nonnegative()).min(1),
   fixedRateCents: z.number().int().nonnegative().optional(),
   promotionIds: z.array(z.string().trim().min(1)).default([]),
@@ -227,6 +229,39 @@ async function validateProductionRateCode(tx: TransactionSql, propertyId: string
   }
 }
 
+async function validatedPromotions(
+  tx: TransactionSql,
+  propertyId: string,
+  roomTypeId: string,
+  checkInDate: string,
+  checkoutDate: string,
+  promotionIds: string[],
+): Promise<Promotion[]> {
+  if (new Set(promotionIds).size !== promotionIds.length) {
+    throw new ReservationRequestError("Select each promotion only once.", 409);
+  }
+  const selected: Promotion[] = [];
+  for (const promotionId of promotionIds) {
+    if (!uuidPattern.test(promotionId)) throw new ReservationRequestError("A selected promotion is no longer configured.", 409);
+    const [promotion] = await tx<Array<{ id: string; discountType: string; discountValue: number }>>`
+      select p.id,p.discount_type as "discountType",p.discount_value as "discountValue"
+      from promotions p
+      where p.id=${promotionId}::uuid and p.property_id=${propertyId}::uuid and p.active=true
+        and p.starts_on <= ${checkInDate}::date and p.ends_on >= ${checkoutDate}::date
+        and (
+          not exists (select 1 from promotion_room_types prt where prt.property_id=${propertyId}::uuid and prt.promotion_id=p.id)
+          or exists (select 1 from promotion_room_types prt where prt.property_id=${propertyId}::uuid and prt.promotion_id=p.id and prt.room_type_id=${roomTypeId}::uuid)
+        )
+      for update
+    `;
+    if (!promotion) throw new ReservationRequestError("A selected promotion is no longer eligible for this stay.", 409);
+    if (promotion.discountType === "fixed") selected.push({ type: "fixed", valueCents: promotion.discountValue });
+    else if (promotion.discountType === "percentage") selected.push({ type: "percentage", valueBasisPoints: promotion.discountValue });
+    else throw new ReservationRequestError("A selected promotion has an invalid discount type.", 409);
+  }
+  return selected;
+}
+
 async function createProductionReservation(request: Request, session: PropertySession) {
   const parsed = payloadSchema.safeParse(await request.json());
   if (!parsed.success) return Response.json({ error: "Required guest and stay details are missing." }, { status: 400 });
@@ -257,6 +292,7 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
   const roomType = await productionRoomTypeForSettingsId(tx, session.propertyId, payload.roomTypeId);
   if (!roomType?.active) throw new ReservationRequestError("Select an active room type.", 409);
   await validateProductionRateCode(tx, session.propertyId, payload.rateCode);
+  const selectedPromotions = await validatedPromotions(tx, session.propertyId, roomType.id, payload.checkInDate, payload.checkoutDate, payload.promotionIds);
   const roomsForType = await tx<Array<{ id: string; number: string }>>`
     select r.id, r.number from rooms r
     where r.property_id=${session.propertyId}::uuid and r.room_type_id=${roomType.id}::uuid
@@ -305,7 +341,11 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
     await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.idType},${payload.idNumber},${normalizedId},now()+interval '1 year')`;
   }
   const nights = Math.round((new Date(`${payload.checkoutDate}T12:00:00Z`).getTime() - new Date(`${payload.checkInDate}T12:00:00Z`).getTime()) / 86_400_000);
-  if (payload.nightlyRatesCents.length !== nights) throw new ReservationRequestError("Enter one nightly rate for every night of the stay.");
+  if (payload.baseNightlyRatesCents.length !== nights || payload.nightlyRatesCents.length !== nights) throw new ReservationRequestError("Enter one nightly rate for every night of the stay.");
+  const serverNightlyRatesCents = payload.baseNightlyRatesCents.map((rate) => applyStackedPromotions(rate, selectedPromotions));
+  if (serverNightlyRatesCents.some((rate, index) => rate !== payload.nightlyRatesCents[index])) {
+    throw new ReservationRequestError("Promotion pricing changed. Review the nightly rates and try again.", 409);
+  }
   // Store the selected source as a first-class record. Reports can now group
   // new reservations by source without having to parse the reservation note.
   const [bookingSource] = await tx<Array<{ id: string }>>`
@@ -316,6 +356,9 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
   `;
   const confirmationNumber = `PMS-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900 + 100)}`;
   const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${payload.otaPaymentStatus || null},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: payload.source })}::text) returning id`;
+  for (const [appliedOrder, promotionId] of payload.promotionIds.entries()) {
+    await tx`insert into reservation_promotions (property_id,reservation_id,promotion_id,applied_order) values (${session.propertyId}::uuid,${reservation.id}::uuid,${promotionId}::uuid,${appliedOrder})`;
+  }
   await tx`insert into reservation_guests (property_id,reservation_id,guest_id,"primary") values (${session.propertyId}::uuid,${reservation.id}::uuid,${guestId}::uuid,true) on conflict (reservation_id,guest_id) do update set "primary"=true`;
   if (identity?.guestStatus === "do_not_rent" && payload.dnrOverrideReason) {
     // Keep the reason with the specific stay. A guest profile may later be
@@ -339,8 +382,9 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
     for (let night = 0; night < nights; night += 1) {
       const date = new Date(`${payload.checkInDate}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + night);
       const stayDate = date.toISOString().slice(0, 10);
+      const baseRate = payload.baseNightlyRatesCents[night];
       const rate = payload.nightlyRatesCents[night];
-      await tx`insert into nightly_rates (property_id,reservation_room_id,stay_date,base_rate_cents,discount_cents,final_rate_cents) values (${session.propertyId}::uuid,${reservationRoom.id}::uuid,${stayDate}::date,${rate},0,${rate})`;
+      await tx`insert into nightly_rates (property_id,reservation_room_id,stay_date,base_rate_cents,discount_cents,final_rate_cents) values (${session.propertyId}::uuid,${reservationRoom.id}::uuid,${stayDate}::date,${baseRate},${baseRate - rate},${rate})`;
       const [charge] = await tx<Array<{ id: string }>>`
         insert into charges (property_id,folio_id,reservation_room_id,type,description,service_date,amount_cents,taxable,status)
         values (${session.propertyId}::uuid,${folio.id}::uuid,${reservationRoom.id}::uuid,'Room Rent',${`Room ${reservationRoom.roomNumber} · ${stayDate}`},${stayDate}::date,${rate},${!payload.taxExempt},'posted')

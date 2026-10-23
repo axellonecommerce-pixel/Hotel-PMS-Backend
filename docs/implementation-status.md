@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 18 |
-| Verified production path | 47 |
+| Verified demo | 17 |
+| Verified production path | 48 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -50,7 +50,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-RAT-002 | Verified production path | The rate-adjustment API locks posted room charges, updates nightly rates and linked tax from the reservation's stored tax snapshot, records balanced adjustments, recalculates the authoritative balance, and requires a reason for manual tax overrides. |
 | FR-RAT-003 | Verified production path | The folio-charge API resolves the authenticated property's configured charge type, snapshots tax, requires an override reason, and durably creates, edits, and voids manual charges with balanced ledger adjustments. |
 | FR-RAT-004 | Verified demo | Booking sources, commissions, and commission expense representation exist. |
-| FR-RAT-005 | Verified demo | Configurable, date/room eligible, stackable promotions exist. |
+| FR-RAT-005 | Verified production path | Settings synchronizes promotions into tenant-scoped records with durable IDs, eligibility dates, room-type restrictions, active state, and deletion deactivation. Reservation creation locks and validates every selected promotion, recalculates stacked discount prices server-side, records application order, and snapshots base/discount/final nightly rates. |
 | FR-FOL-001 | Verified production path | A row-locked PostgreSQL allocator supplies the shared folio/invoice sequence and is used by checkout and the document-number API. |
 | FR-FOL-002 | Verified production path | Reservation folios are tenant-scoped database records. Extra folios, manual-charge moves, and each room's posted rent with its linked tax can be moved through row-locked server transactions. |
 | FR-FOL-003 | Verified production path | Tenant-scoped folio deletion locks the folio and rejects primary or financially active folios; empty secondary folios can be removed. |

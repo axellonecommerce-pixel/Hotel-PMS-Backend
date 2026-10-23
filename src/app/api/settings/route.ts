@@ -12,6 +12,7 @@ import { initialApplicationSettings } from "@/server/provisioning/platform-motel
 type ConfiguredRoomType = { id?: string; name?: string; shortLabel?: string; maxOccupancy?: number; baseRateCents?: number; active?: boolean; sortOrder?: number };
 type ConfiguredRoom = { number?: string; roomTypeId?: string; floor?: number; buildingId?: string; housekeepingStatus?: string; serviceStatus?: string; smokingAllowed?: boolean; mapColumn?: number; mapRow?: number; mapWidth?: number; mapHeight?: number };
 type ConfiguredEmployee = { name?: string; role?: string; hourlyRateCents?: number; status?: string };
+type ConfiguredPromotion = { id?: string; name?: string; discountType?: "Percentage" | "Fixed Amount"; discountValue?: number; roomTypeIds?: string[]; startDate?: string; endDate?: string; active?: boolean };
 
 type LiveRoomState = { number: string; cleanlinessStatus: string; serviceStatus: string };
 
@@ -43,7 +44,9 @@ async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: st
   const configuredTypes = Array.isArray(value.roomTypes) ? value.roomTypes as ConfiguredRoomType[] : [];
   const configuredRooms = Array.isArray(value.rooms) ? value.rooms as ConfiguredRoom[] : [];
   const configuredEmployees = Array.isArray(value.employees) ? value.employees as ConfiguredEmployee[] : [];
+  const configuredPromotions = Array.isArray(value.promotions) ? value.promotions as ConfiguredPromotion[] : [];
   const typeIds = new Map<string, string>();
+  const synchronizedPromotionIds = new Set<string>();
   for (const [index, configured] of configuredTypes.entries()) {
     if (!configured.id || !configured.name?.trim()) continue;
     const [roomType] = await tx<Array<{ id: string }>>`
@@ -61,6 +64,51 @@ async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: st
       values (${propertyId}::uuid,${typeIds.get(room.roomTypeId)!}::uuid,${room.number.trim()},${String(room.floor ?? 1)},${room.buildingId || null},${room.housekeepingStatus || "clean"},${room.serviceStatus === "non-rentable" ? "non-rentable" : "rentable"},${Boolean(room.smokingAllowed)},true,${tx.json({ mapColumn: room.mapColumn, mapRow: room.mapRow, mapWidth: room.mapWidth, mapHeight: room.mapHeight })})
       on conflict (property_id,number) do update set room_type_id=excluded.room_type_id,floor=excluded.floor,section=excluded.section,smoking_allowed=excluded.smoking_allowed,map_data=excluded.map_data,updated_at=now()
     `;
+  }
+  // Promotion IDs become database UUIDs on the first successful Settings
+  // save. This gives reservation_promotions a durable, tenant-scoped target
+  // while keeping the Settings JSON as the editing source of truth.
+  for (const configured of configuredPromotions) {
+    if (!configured.name?.trim() || !configured.startDate || !configured.endDate || configured.endDate < configured.startDate) continue;
+    const discountType = configured.discountType === "Fixed Amount" ? "fixed" : "percentage";
+    const discountValue = discountType === "fixed"
+      ? Math.max(0, Math.round((configured.discountValue ?? 0) * 100))
+      : Math.max(0, Math.round((configured.discountValue ?? 0) * 100));
+    let promotionId: string | undefined;
+    if (configured.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(configured.id)) {
+      const [existing] = await tx<Array<{ id: string }>>`select id from promotions where id=${configured.id}::uuid and property_id=${propertyId}::uuid for update`;
+      promotionId = existing?.id;
+    }
+    // One-time compatibility path for Settings records created before IDs
+    // were synchronized. New browser records use UUIDs, so this name lookup
+    // is never used to create a second promotion.
+    if (!promotionId) {
+      const [existing] = await tx<Array<{ id: string }>>`select id from promotions where property_id=${propertyId}::uuid and name=${configured.name.trim()} order by id limit 1 for update`;
+      promotionId = existing?.id;
+    }
+    if (promotionId) {
+      await tx`update promotions set name=${configured.name.trim()},discount_type=${discountType},discount_value=${discountValue},starts_on=${configured.startDate}::date,ends_on=${configured.endDate}::date,active=${configured.active !== false} where id=${promotionId}::uuid and property_id=${propertyId}::uuid`;
+    } else {
+      const [created] = await tx<Array<{ id: string }>>`insert into promotions (property_id,name,discount_type,discount_value,starts_on,ends_on,active) values (${propertyId}::uuid,${configured.name.trim()},${discountType},${discountValue},${configured.startDate}::date,${configured.endDate}::date,${configured.active !== false}) returning id`;
+      promotionId = created.id;
+    }
+    configured.id = promotionId;
+    synchronizedPromotionIds.add(promotionId);
+    await tx`delete from promotion_room_types where property_id=${propertyId}::uuid and promotion_id=${promotionId}::uuid`;
+    for (const configuredRoomTypeId of configured.roomTypeIds ?? []) {
+      const roomTypeId = typeIds.get(configuredRoomTypeId);
+      if (!roomTypeId) continue;
+      await tx`insert into promotion_room_types (property_id,promotion_id,room_type_id) values (${propertyId}::uuid,${promotionId}::uuid,${roomTypeId}::uuid) on conflict (promotion_id,room_type_id) do nothing`;
+    }
+  }
+  // Settings is the source of truth. Do not delete historical promotion rows
+  // that may be referenced by past reservations; deactivate records removed
+  // from Settings so they cannot be applied to another stay.
+  const storedPromotions = await tx<Array<{ id: string }>>`select id from promotions where property_id=${propertyId}::uuid and active=true for update`;
+  for (const promotion of storedPromotions) {
+    if (!synchronizedPromotionIds.has(promotion.id)) {
+      await tx`update promotions set active=false where id=${promotion.id}::uuid and property_id=${propertyId}::uuid`;
+    }
   }
   // Settings-created employees do not necessarily have login memberships, but
   // they are still operational staff and must exist as relational records for
@@ -169,12 +217,12 @@ export async function PUT(request: Request) {
     const now = new Date().toISOString();
     if (hasProductionDatabase()) {
       await productionSql().begin(async (tx) => {
+        await synchronizeConfiguredInventory(tx, session.propertyId, parsed.data);
         await tx`
           insert into property_settings (property_id,key,value,updated_at)
           values (${session.propertyId}::uuid,'application_settings',${tx.json(JSON.parse(JSON.stringify(parsed.data)))},${now})
           on conflict (property_id,key) do update set value=excluded.value,updated_at=excluded.updated_at
         `;
-        await synchronizeConfiguredInventory(tx, session.propertyId, parsed.data);
         await tx`
           insert into change_events (property_id,actor_auth_user_id,entity_type,entity_id,action,entity_version,payload)
           values (${session.propertyId}::uuid,${session.authUserId}::uuid,'settings',${session.propertyId}::uuid,'updated',${Math.floor(Date.now() / 1000)},'{}'::jsonb)
