@@ -4,7 +4,9 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 
 type Address = { addressLine1?: string; postalCode?: string; city?: string; state?: string; country?: string; countryCode?: string };
-type Preferences = { fixedRateCents?: number; roomPreferences?: Record<string, unknown> };
+// These profile values live with the configurable guest preferences so they
+// remain durable without requiring an unsafe production schema migration.
+type Preferences = { fixedRateCents?: number; dateOfBirth?: string; idExpires?: string; roomPreferences?: Record<string, unknown> };
 
 const guestStatusSchema = z.enum(["Regular", "Returning", "New", "Do Not Rent"]);
 const paymentSourceSchema = z.object({ id: z.string().optional(), label: z.string().trim().min(1), last4: z.string().optional(), tokenReference: z.string().optional() });
@@ -22,6 +24,8 @@ const updateSchema = z.object({
   country: z.string().max(120).optional(),
   countryCode: z.string().max(20).optional(),
   fixedRateCents: z.number().int().min(0).nullable().optional(),
+  dateOfBirth: z.string().date().nullable().optional(),
+  idExpires: z.string().date().nullable().optional(),
   notes: z.string().max(20_000).nullable().optional(),
   status: guestStatusSchema.optional(),
   roomPreferences: z.record(z.string(), z.unknown()).optional(),
@@ -53,6 +57,8 @@ const manualGuestSchema = z.object({
   email: z.string().email().or(z.literal("")).optional(),
   idType: z.enum(["US Driver License", "Passport", "Other"]).optional(),
   idNumber: z.string().trim().max(200).optional(),
+  dateOfBirth: z.string().date().optional(),
+  idExpires: z.string().date().optional(),
   addressLine1: z.string().max(400).optional(),
   city: z.string().max(120).optional(),
   state: z.string().max(120).optional(),
@@ -115,7 +121,7 @@ async function listGuests(propertyId: string) {
     return {
       id: guest.id, firstName: guest.firstName, lastName: guest.lastName, phone: guest.phone ?? "", phoneNormalized: (guest.phone ?? "").replace(/\D/g, ""),
       city: address.city ?? "", addressLine1: address.addressLine1, postalCode: address.postalCode, state: address.state, country: address.country, countryCode: address.countryCode,
-      email: guest.email ?? undefined, status: apiStatus(guest.guestStatus), fixedRateCents: prefs.fixedRateCents, roomPreferences: prefs.roomPreferences,
+      email: guest.email ?? undefined, status: apiStatus(guest.guestStatus), fixedRateCents: prefs.fixedRateCents, dateOfBirth: prefs.dateOfBirth, idExpires: prefs.idExpires, roomPreferences: prefs.roomPreferences,
       idType: identity?.idType, driverLicenseNumber: identity?.idNumber, notes: guest.remarks ?? undefined, dnrRemarks: guest.dnrReason ?? undefined,
       vehicle: vehicle ? { plate: vehicle.plate, make: vehicle.make ?? "", color: vehicle.color ?? "", year: vehicle.year ?? "" } : undefined,
       savedPaymentSources: (sourcesByGuest.get(guest.id) ?? []).map((source) => ({ id: source.id, label: source.label ?? source.method, last4: source.last4 ?? undefined, tokenReference: source.externalReference ?? "" })),
@@ -153,6 +159,8 @@ export async function PATCH(request: Request) {
       if (input.country !== undefined) address.country = input.country;
       if (input.countryCode !== undefined) address.countryCode = input.countryCode;
       if (input.fixedRateCents !== undefined) preferences.fixedRateCents = input.fixedRateCents ?? undefined;
+      if (input.dateOfBirth !== undefined) preferences.dateOfBirth = input.dateOfBirth ?? undefined;
+      if (input.idExpires !== undefined) preferences.idExpires = input.idExpires ?? undefined;
       if (input.roomPreferences !== undefined) preferences.roomPreferences = input.roomPreferences;
       const notes = input.notes ?? null;
       const dnrRemarks = input.dnrRemarks ?? null;
@@ -216,8 +224,8 @@ export async function POST(request: Request) {
           if (existing) return { duplicateGuestId: existing.guestId };
         }
         const [guest] = await tx<Array<{ id: string }>>`
-          insert into guests (property_id,first_name,last_name,phone,email,address,remarks,guest_status)
-          values (${session.propertyId}::uuid,${row.firstName},${row.lastName},${row.phone?.replace(/\D/g, "") || null},${row.email || null},${tx.json(address)},${row.notes || null},${storedStatus(row.status ?? "New")})
+          insert into guests (property_id,first_name,last_name,phone,email,address,remarks,guest_status,room_preferences)
+          values (${session.propertyId}::uuid,${row.firstName},${row.lastName},${row.phone?.replace(/\D/g, "") || null},${row.email || null},${tx.json(address)},${row.notes || null},${storedStatus(row.status ?? "New")},${tx.json({ dateOfBirth: row.dateOfBirth, idExpires: row.idExpires })})
           returning id
         `;
         if (row.idType && row.idNumber?.trim()) {

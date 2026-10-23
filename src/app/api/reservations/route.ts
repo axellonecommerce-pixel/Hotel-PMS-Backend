@@ -260,23 +260,27 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
   const selectedRooms = payload.roomNumbers.length
     ? payload.roomNumbers.map((number) => roomsForType.find((room) => room.number === number))
     : [];
-  if (selectedRooms.some((room) => !room) || payload.roomNumbers.length > payload.roomCount) throw new ReservationRequestError("One or more selected rooms are not rentable.", 409);
+  if (payload.roomNumbers.length !== payload.roomCount || new Set(payload.roomNumbers).size !== payload.roomNumbers.length || selectedRooms.some((room) => !room)) throw new ReservationRequestError("Select one unique rentable room number for every requested room.", 409);
   if (roomsForType.length < payload.roomCount) throw new ReservationRequestError("That room type no longer has enough inventory for those dates.", 409);
   if (payload.companyId) {
     const [company] = await tx<Array<{ id: string; status: string }>>`select id,status from companies where id=${payload.companyId}::uuid and property_id=${session.propertyId}::uuid`;
     if (!company || company.status !== "active") throw new ReservationRequestError("Select an active company for Direct Bill.");
   }
   const normalizedId = normalizeId(payload.idNumber);
-  const [identity] = await tx<Array<{ guestId: string; guestStatus: string }>>`
-    select gi.guest_id as "guestId",g.guest_status as "guestStatus" from guest_identities gi join guests g on g.id=gi.guest_id
+  const [identity] = await tx<Array<{ guestId: string; guestStatus: string; roomPreferences: unknown }>>`
+    select gi.guest_id as "guestId",g.guest_status as "guestStatus",g.room_preferences as "roomPreferences" from guest_identities gi join guests g on g.id=gi.guest_id
     where gi.property_id=${session.propertyId}::uuid and gi.normalized_id_number=${normalizedId} and gi.deleted_at is null for update
   `;
   if (identity?.guestStatus === "do_not_rent" && !payload.dnrOverrideReason) throw new ReservationRequestError("Enter a reason to override the Do Not Rent warning.", 403);
   let guestId = identity?.guestId;
   const address = { addressLine1: payload.addressLine1 ?? "", city: payload.city ?? "", state: payload.state ?? "", postalCode: payload.postalCode ?? "", country: payload.country ?? "", countryCode: payload.countryCode };
-  if (guestId) await tx`update guests set first_name=${payload.firstName},last_name=${payload.lastName},phone=${normalizePhone(payload.phone)},email=${payload.email || null},address=${tx.json(address)},updated_at=now() where id=${guestId}::uuid`;
+  const existingPreferences = identity?.roomPreferences && typeof identity.roomPreferences === "object" && !Array.isArray(identity.roomPreferences)
+    ? identity.roomPreferences as Record<string, unknown>
+    : {};
+  const guestPreferences = { ...existingPreferences, dateOfBirth: payload.dateOfBirth, idExpires: payload.idExpires };
+  if (guestId) await tx`update guests set first_name=${payload.firstName},last_name=${payload.lastName},phone=${normalizePhone(payload.phone)},email=${payload.email || null},address=${tx.json(address)},room_preferences=${tx.json(guestPreferences)},updated_at=now() where id=${guestId}::uuid`;
   else {
-    const [guest] = await tx<Array<{ id: string }>>`insert into guests (property_id,first_name,last_name,phone,email,address,guest_status) values (${session.propertyId}::uuid,${payload.firstName},${payload.lastName},${normalizePhone(payload.phone)},${payload.email || null},${tx.json(address)},'active') returning id`;
+    const [guest] = await tx<Array<{ id: string }>>`insert into guests (property_id,first_name,last_name,phone,email,address,guest_status,room_preferences) values (${session.propertyId}::uuid,${payload.firstName},${payload.lastName},${normalizePhone(payload.phone)},${payload.email || null},${tx.json(address)},'active',${tx.json(guestPreferences)}) returning id`;
     guestId = guest.id;
     await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.idType},${payload.idNumber},${normalizedId},now()+interval '1 year')`;
   }
@@ -373,8 +377,8 @@ export async function POST(request: Request) {
   });
   const rentableRooms = candidateRooms.filter((room) => room.active && room.serviceStatus === "in-service");
   const selectedRooms = payload.roomNumbers.map((number) => rentableRooms.find((room) => room.number === number));
-  if (selectedRooms.some((room) => !room) || payload.roomNumbers.length > payload.roomCount) {
-    return NextResponse.json({ error: "One or more selected rooms are not rentable." }, { status: 409 });
+  if (payload.roomNumbers.length !== payload.roomCount || new Set(payload.roomNumbers).size !== payload.roomNumbers.length || selectedRooms.some((room) => !room)) {
+    return NextResponse.json({ error: "Select one unique rentable room number for every requested room." }, { status: 409 });
   }
 
   const license = normalizeId(payload.idNumber);
