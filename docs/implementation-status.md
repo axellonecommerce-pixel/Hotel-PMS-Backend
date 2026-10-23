@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 25 |
-| Verified production path | 40 |
+| Verified demo | 24 |
+| Verified production path | 41 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -37,7 +37,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-GST-004 | Verified demo | Matching-ID merge and payment-source deduplication behavior is implemented in the guest domain/context. |
 | FR-GST-005 | Verified demo | DNR warning, reasoned override, and remark display exist. |
 | FR-GST-006 | Verified demo | Extra guest uses the reservation guest flow and compact workspace layout. |
-| FR-RES-001 | Verified demo | Room-type inventory is checked and sold-out types are blocked. |
+| FR-RES-001 | Verified production path | The tenant-scoped Availability API reads configured active room types and rate rules, durable rentable rooms, overlapping reservations, and maintenance blocks to return every room type (including zero inventory) with authoritative rates, tax, and bookable room numbers. Reservation creation repeats the overlap and rentable-room check inside its PostgreSQL transaction. |
 | FR-RES-002 | Verified demo | Multi-room/group reservation state and combined folio behavior exist. |
 | FR-RES-003 | Verified demo | Individual and bulk room checkout controls exist with room-attributed charges. |
 | FR-RES-004 | Verified production path | The checkout API locks the reservation and selected rooms, validates deposits and balances, creates room folios with locked numbering, moves each room’s charges and linked tax, checks out rooms, and marks physical rooms dirty in one transaction. |
