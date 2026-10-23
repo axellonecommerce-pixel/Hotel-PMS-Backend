@@ -61,3 +61,38 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     return propertyAccessResponse(error);
   }
 }
+
+/** Remove only the relationship to this stay; the reusable guest profile and
+ * its identity history remain available for future reservations. */
+export async function DELETE(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+  try {
+    const session = await requirePropertySession(request, "reservations.manage");
+    const parsed = bodySchema.safeParse(await request.json());
+    if (!parsed.success) return Response.json({ error: "Select a valid guest." }, { status: 400 });
+    const reservationId = await reservationIdFrom(context);
+    const removed = await productionSql().begin(async (tx) => {
+      const [reservation] = await tx<Array<{ id: string }>>`
+        select id from reservations
+        where id=${reservationId}::uuid and property_id=${session.propertyId}::uuid for update
+      `;
+      if (!reservation) throw new Error("Reservation not found.");
+      const [relationship] = await tx<Array<{ id: string }>>`
+        delete from reservation_guests
+        where property_id=${session.propertyId}::uuid and reservation_id=${reservationId}::uuid
+          and guest_id=${parsed.data.guestId}::uuid and "primary"=false
+        returning id
+      `;
+      return Boolean(relationship);
+    });
+    if (!removed) return Response.json({ error: "Extra guest is not attached to this reservation." }, { status: 404 });
+    try {
+      await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "reservation", entityId: reservationId, action: "updated", entityVersion: 1, payload: { guestId: parsed.data.guestId, change: "extra_guest_removed" } });
+    } catch {
+      // The committed relation is authoritative even if event delivery fails.
+    }
+    return Response.json({ removed: true });
+  } catch (error) {
+    if (error instanceof Error && /Reservation/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    return propertyAccessResponse(error);
+  }
+}
