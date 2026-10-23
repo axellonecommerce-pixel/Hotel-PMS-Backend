@@ -6,6 +6,10 @@ import { allocateProductionDocumentNumber } from "@/server/finance/production-fi
 
 const createSchema = z.object({ name: z.string().trim().min(1).max(120).optional() });
 const deleteSchema = z.object({ folioId: z.string().uuid() });
+const moveRoomChargesSchema = z.object({
+  folioId: z.string().uuid(),
+  reservationRoomId: z.string().uuid(),
+});
 
 function routeParams(context: { params: Promise<{ reservationId: string }> }) {
   return context.params.then(({ reservationId }) => reservationId);
@@ -89,6 +93,57 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
     return Response.json({ deleted });
   } catch (error) {
     if (error instanceof Error && /Folio|folio/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    return propertyAccessResponse(error);
+  }
+}
+
+/**
+ * Room rent is recorded as one charge per stay date and its tax is linked by
+ * charge_taxes. Moving the rent charges therefore keeps rent and tax together
+ * without rewriting their financial amounts or ledger history.
+ */
+export async function PATCH(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+  try {
+    const session = await requirePropertySession(request, "folios.manage");
+    const reservationId = await routeParams(context);
+    const parsed = moveRoomChargesSchema.safeParse(await request.json());
+    if (!z.string().uuid().safeParse(reservationId).success || !parsed.success) return Response.json({ error: "Room folio details are invalid." }, { status: 400 });
+    const result = await productionSql().begin(async (tx) => {
+      const [reservation] = await tx<Array<{ id: string }>>`
+        select id from reservations
+        where id=${reservationId}::uuid and property_id=${session.propertyId}::uuid
+        for update
+      `;
+      if (!reservation) throw new Error("Reservation not found.");
+      const [targetFolio] = await tx<Array<{ id: string; number: string }>>`
+        select id,number from folios
+        where id=${parsed.data.folioId}::uuid and property_id=${session.propertyId}::uuid
+          and reservation_id=${reservation.id}::uuid and status='open'
+        for update
+      `;
+      if (!targetFolio) throw new Error("The target folio is unavailable.");
+      const [reservationRoom] = await tx<Array<{ id: string }>>`
+        select id from reservation_rooms
+        where id=${parsed.data.reservationRoomId}::uuid and reservation_id=${reservation.id}::uuid
+        for update
+      `;
+      if (!reservationRoom) throw new Error("The reservation room is unavailable.");
+      const charges = await tx<Array<{ id: string }>>`
+        select id from charges
+        where property_id=${session.propertyId}::uuid and reservation_room_id=${reservationRoom.id}::uuid
+          and type='Room Rent' and status='posted'
+        for update
+      `;
+      if (!charges.length) throw new Error("There are no posted room charges to move.");
+      await tx`
+        update charges set folio_id=${targetFolio.id}::uuid,updated_at=now()
+        where id in ${tx(charges.map((charge) => charge.id))}
+      `;
+      return { folioId: targetFolio.id, folioNumber: targetFolio.number, movedChargeIds: charges.map((charge) => charge.id) };
+    });
+    return Response.json(result);
+  } catch (error) {
+    if (error instanceof Error && /Reservation|folio|room|charge/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
