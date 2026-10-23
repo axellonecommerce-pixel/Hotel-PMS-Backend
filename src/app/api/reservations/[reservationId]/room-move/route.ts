@@ -141,14 +141,14 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         where id=${reservationRoom.roomId}::uuid and property_id=${session.propertyId}::uuid
       `;
       await tx`update reservations set version=version+1,updated_at=now() where id=${reservation.id}::uuid`;
-      const [totals] = await tx<Array<{ roomRentCents: number; taxCents: number; paidCents: number }>>`
+      const [totals] = await tx<Array<{ roomRentCents: number; taxCents: number; totalCents: number; paidCents: number }>>`
         select
           coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rr on rr.id=nr.reservation_room_id where rr.reservation_id=${reservation.id}::uuid),0)::int as "roomRentCents",
           coalesce((select sum(ct.amount_cents) from charge_taxes ct join charges c on c.id=ct.charge_id join folios f on f.id=c.folio_id where f.reservation_id=${reservation.id}::uuid and c.status='posted'),0)::int as "taxCents",
+          coalesce((select sum(c.amount_cents + coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios f on f.id=c.folio_id where f.reservation_id=${reservation.id}::uuid and c.status='posted'),0)::int as "totalCents",
           coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=${reservation.id}::uuid),0)::int as "paidCents"
       `;
-      const totalCents = totals.roomRentCents + totals.taxCents;
-      return { room: destination.number, roomTypeId: destination.roomTypeId, destinationDirty: destination.cleanliness !== "clean", roomRentCents: totals.roomRentCents, taxCents: totals.taxCents, totalCents, balanceCents: Math.max(0, totalCents - totals.paidCents), version: reservation.version + 1 } as const;
+      return { room: destination.number, roomTypeId: destination.roomTypeId, destinationDirty: destination.cleanliness !== "clean", roomRentCents: totals.roomRentCents, taxCents: totals.taxCents, totalCents: totals.totalCents, balanceCents: Math.max(0, totals.totalCents - totals.paidCents), version: reservation.version + 1 } as const;
     });
     if ("error" in result) return Response.json(result, { status: result.status });
     return Response.json(result);
