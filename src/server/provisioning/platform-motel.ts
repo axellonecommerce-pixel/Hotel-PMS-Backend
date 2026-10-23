@@ -37,6 +37,22 @@ type PropertySettingsInput = Pick<
   | "ownerEmail"
 >;
 
+function localBusinessDate(timezone: string, now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const value = (part: Intl.DateTimeFormatPartTypes) =>
+    parts.find((entry) => entry.type === part)?.value;
+  const year = value("year");
+  const month = value("month");
+  const day = value("day");
+  if (!year || !month || !day) throw new Error("Could not determine the initial business date.");
+  return `${year}-${month}-${day}`;
+}
+
 /**
  * A new property must receive its own complete settings document at provision
  * time. Without this record the web app falls back to its generic local
@@ -225,6 +241,7 @@ export async function provisionPlatformMotel(input: PlatformMotelInput) {
   const membershipId = crypto.randomUUID();
   const employeeId = crypto.randomUUID();
   const applicationSettings = initialApplicationSettings(input, employeeId);
+  const firstBusinessDate = localBusinessDate(input.timezone);
   try {
     await productionSql().begin(async (tx) => {
       await tx`
@@ -246,6 +263,10 @@ export async function provisionPlatformMotel(input: PlatformMotelInput) {
           (${propertyId}::uuid,'invoice','{"prefix":"FOL","nextNumber":1,"annualReset":false,"paymentTermsDays":30}'::jsonb),
           (${propertyId}::uuid,'tax','{"percentage":0}'::jsonb),
           (${propertyId}::uuid,'application_settings',${tx.json(applicationSettings)})
+      `;
+      await tx`
+        insert into business_days (property_id,business_date,status,opened_at)
+        values (${propertyId}::uuid,${firstBusinessDate}::date,'open',now())
       `;
       await tx`
         insert into platform_subscriptions (property_id,plan_name,billing_cycle,amount_cents,starts_on,expires_on,status,notes)
