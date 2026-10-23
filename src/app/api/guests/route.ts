@@ -107,7 +107,7 @@ async function listGuests(propertyId: string) {
       r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
       coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rr on rr.id=nr.reservation_room_id where rr.reservation_id=r.id),0)::int as "rateCents",
       coalesce((select sum(c.amount_cents) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)::int as "totalCents"
-    from reservations r where r.property_id=${propertyId}::uuid order by r.departure_date desc
+    from reservations r where r.property_id=${propertyId}::uuid and r.status='checked_out' order by r.departure_date desc
   `;
   const identityByGuest = new Map(identities.map((identity) => [identity.guestId, identity]));
   const vehicleByGuest = new Map(vehicles.map((vehicle) => [vehicle.guestId, vehicle]));
