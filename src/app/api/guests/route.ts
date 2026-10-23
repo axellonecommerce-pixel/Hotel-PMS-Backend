@@ -1,0 +1,156 @@
+import { z } from "zod";
+
+import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
+import { hasProductionDatabase, productionSql } from "@/server/db/production";
+
+type Address = { addressLine1?: string; postalCode?: string; city?: string; state?: string; country?: string; countryCode?: string };
+type Preferences = { fixedRateCents?: number; roomPreferences?: Record<string, unknown> };
+
+const guestStatusSchema = z.enum(["Regular", "Returning", "New", "Do Not Rent"]);
+const paymentSourceSchema = z.object({ id: z.string().optional(), label: z.string().trim().min(1), last4: z.string().optional(), tokenReference: z.string().optional() });
+const vehicleSchema = z.object({ plate: z.string().trim().min(1), make: z.string().optional(), color: z.string().optional(), year: z.string().optional() });
+const updateSchema = z.object({
+  guestId: z.string().uuid(),
+  fixedRateCents: z.number().int().min(0).nullable().optional(),
+  notes: z.string().max(20_000).optional(),
+  status: guestStatusSchema.optional(),
+  roomPreferences: z.record(z.string(), z.unknown()).optional(),
+  vehicle: vehicleSchema.nullable().optional(),
+  savedPaymentSources: z.array(paymentSourceSchema).max(20).optional(),
+  remarkEntries: z.array(z.object({ text: z.string().trim().min(1).max(2_000), createdAt: z.string().optional() })).max(100).optional(),
+  dnrCode: z.string().max(200).optional(),
+  dnrRemarks: z.string().max(10_000).optional(),
+});
+const importSchema = z.object({
+  rows: z.array(z.object({
+    firstName: z.string().trim().min(1).max(120), lastName: z.string().trim().min(1).max(120),
+    phone: z.string().max(80).optional(), city: z.string().max(120).optional(),
+    idType: z.enum(["US Driver License", "Passport", "Other"]), driverLicenseNumber: z.string().trim().min(1).max(200),
+    addressLine1: z.string().max(400).optional(), notes: z.string().max(10_000).optional(),
+  })).min(1).max(2_000),
+});
+
+function parseObject<T extends object>(value: unknown): T {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as T;
+  if (typeof value === "string") try { const parsed = JSON.parse(value); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as T; } catch { /* use empty value */ }
+  return {} as T;
+}
+function apiStatus(status: string) { return status === "do_not_rent" ? "Do Not Rent" : status === "returning" ? "Returning" : status === "regular" ? "Regular" : "New"; }
+function storedStatus(status: z.infer<typeof guestStatusSchema>) { return status === "Do Not Rent" ? "do_not_rent" : status.toLowerCase(); }
+function normalizedId(value: string) { return value.replace(/\s/g, "").toUpperCase(); }
+
+async function listGuests(propertyId: string) {
+  const sql = productionSql();
+  const guests = await sql<Array<{ id: string; firstName: string; lastName: string; phone: string | null; email: string | null; address: unknown; guestStatus: string; remarks: string | null; dnrReason: string | null; roomPreferences: unknown }>>`
+    select id,first_name as "firstName",last_name as "lastName",phone,email,address,guest_status as "guestStatus",remarks,dnr_reason as "dnrReason",room_preferences as "roomPreferences"
+    from guests where property_id=${propertyId}::uuid and archived_at is null order by last_name,first_name
+  `;
+  if (!guests.length) return [];
+  const identities = await sql<Array<{ guestId: string; idType: string; idNumber: string }>>`
+    select distinct on (guest_id) guest_id as "guestId",id_type as "idType",id_number as "idNumber"
+    from guest_identities where property_id=${propertyId}::uuid and deleted_at is null order by guest_id,captured_at desc
+  `;
+  const vehicles = await sql<Array<{ guestId: string; plate: string; make: string | null; color: string | null; year: string | null }>>`
+    select distinct on (guest_id) guest_id as "guestId",plate,make,color,year from guest_vehicles where property_id=${propertyId}::uuid order by guest_id,updated_at desc
+  `;
+  const paymentSources = await sql<Array<{ guestId: string; id: string; label: string | null; last4: string | null; externalReference: string | null; method: string }>>`
+    select guest_id as "guestId",id,label,last4,external_reference as "externalReference",method from guest_payment_sources where property_id=${propertyId}::uuid order by created_at desc
+  `;
+  const remarks = await sql<Array<{ guestId: string; id: string; text: string; createdAt: string }>>`
+    select guest_id as "guestId",id,remark as text,created_at::text as "createdAt" from guest_remarks where property_id=${propertyId}::uuid order by created_at
+  `;
+  const stays = await sql<Array<{ guestId: string; id: string; room: string | null; checkInDate: string; checkoutDate: string; rateCents: number; totalCents: number }>>`
+    select r.main_guest_id as "guestId",r.id,coalesce((select room.number from reservation_rooms rr left join rooms room on room.id=rr.room_id where rr.reservation_id=r.id order by rr.created_at limit 1),'Unassigned') as room,
+      r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
+      coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rr on rr.id=nr.reservation_room_id where rr.reservation_id=r.id),0)::int as "rateCents",
+      coalesce((select sum(c.amount_cents) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)::int as "totalCents"
+    from reservations r where r.property_id=${propertyId}::uuid order by r.departure_date desc
+  `;
+  const identityByGuest = new Map(identities.map((identity) => [identity.guestId, identity]));
+  const vehicleByGuest = new Map(vehicles.map((vehicle) => [vehicle.guestId, vehicle]));
+  const sourcesByGuest = new Map<string, Array<typeof paymentSources[number]>>();
+  const remarksByGuest = new Map<string, Array<typeof remarks[number]>>();
+  const staysByGuest = new Map<string, Array<typeof stays[number]>>();
+  for (const source of paymentSources) sourcesByGuest.set(source.guestId, [...(sourcesByGuest.get(source.guestId) ?? []), source]);
+  for (const remark of remarks) remarksByGuest.set(remark.guestId, [...(remarksByGuest.get(remark.guestId) ?? []), remark]);
+  for (const stay of stays) staysByGuest.set(stay.guestId, [...(staysByGuest.get(stay.guestId) ?? []), stay]);
+  return guests.map((guest) => {
+    const address = parseObject<Address>(guest.address); const prefs = parseObject<Preferences>(guest.roomPreferences);
+    const identity = identityByGuest.get(guest.id); const vehicle = vehicleByGuest.get(guest.id); const guestStays = staysByGuest.get(guest.id) ?? [];
+    return {
+      id: guest.id, firstName: guest.firstName, lastName: guest.lastName, phone: guest.phone ?? "", phoneNormalized: (guest.phone ?? "").replace(/\D/g, ""),
+      city: address.city ?? "", addressLine1: address.addressLine1, postalCode: address.postalCode, state: address.state, country: address.country, countryCode: address.countryCode,
+      email: guest.email ?? undefined, status: apiStatus(guest.guestStatus), fixedRateCents: prefs.fixedRateCents, roomPreferences: prefs.roomPreferences,
+      idType: identity?.idType, driverLicenseNumber: identity?.idNumber, notes: guest.remarks ?? undefined, dnrRemarks: guest.dnrReason ?? undefined,
+      vehicle: vehicle ? { plate: vehicle.plate, make: vehicle.make ?? "", color: vehicle.color ?? "", year: vehicle.year ?? "" } : undefined,
+      savedPaymentSources: (sourcesByGuest.get(guest.id) ?? []).map((source) => ({ id: source.id, label: source.label ?? source.method, last4: source.last4 ?? undefined, tokenReference: source.externalReference ?? "" })),
+      remarkEntries: (remarksByGuest.get(guest.id) ?? []).map((remark) => ({ id: remark.id, text: remark.text, createdAt: remark.createdAt })),
+      totalStays: guestStays.length, lastStayDate: guestStays[0]?.checkoutDate,
+      stayHistory: guestStays.map((stay) => ({ ...stay, room: stay.room ?? "Unassigned", paymentType: "Credit" })),
+    };
+  });
+}
+
+export async function GET(request: Request) {
+  try {
+    const session = await requirePropertySession(request, "guests.manage");
+    if (!hasProductionDatabase()) return Response.json({ guests: [] });
+    return Response.json({ guests: await listGuests(session.propertyId) });
+  } catch (error) { return propertyAccessResponse(error); }
+}
+
+export async function PATCH(request: Request) {
+  try {
+    const session = await requirePropertySession(request, "guests.manage");
+    const parsed = updateSchema.safeParse(await request.json());
+    if (!parsed.success) return Response.json({ error: "Guest update is invalid." }, { status: 400 });
+    if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
+    const input = parsed.data;
+    const updated = await productionSql().begin(async (tx) => {
+      const [guest] = await tx<Array<{ roomPreferences: unknown }>>`select room_preferences as "roomPreferences" from guests where id=${input.guestId}::uuid and property_id=${session.propertyId}::uuid for update`;
+      if (!guest) return false;
+      const preferences = parseObject<Preferences>(guest.roomPreferences);
+      if (input.fixedRateCents !== undefined) preferences.fixedRateCents = input.fixedRateCents ?? undefined;
+      if (input.roomPreferences !== undefined) preferences.roomPreferences = input.roomPreferences;
+      await tx`update guests set remarks=coalesce(${input.notes ?? null},remarks),guest_status=coalesce(${input.status ? storedStatus(input.status) : null},guest_status),dnr_reason=coalesce(${input.dnrRemarks ?? input.dnrCode ?? null},dnr_reason),room_preferences=${tx.json(preferences as never)},updated_at=now() where id=${input.guestId}::uuid and property_id=${session.propertyId}::uuid`;
+      if (input.vehicle !== undefined) {
+        await tx`delete from guest_vehicles where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid`;
+        if (input.vehicle) await tx`insert into guest_vehicles (property_id,guest_id,plate,make,color,year) values (${session.propertyId}::uuid,${input.guestId}::uuid,${input.vehicle.plate},${input.vehicle.make || null},${input.vehicle.color || null},${input.vehicle.year || null})`;
+      }
+      if (input.savedPaymentSources !== undefined) {
+        await tx`delete from guest_payment_sources where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid`;
+        for (const source of input.savedPaymentSources) await tx`insert into guest_payment_sources (property_id,guest_id,method,label,last4,external_reference) values (${session.propertyId}::uuid,${input.guestId}::uuid,'card',${source.label},${source.last4 || null},${source.tokenReference || null})`;
+      }
+      if (input.remarkEntries !== undefined) {
+        await tx`delete from guest_remarks where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid`;
+        for (const remark of input.remarkEntries) await tx`insert into guest_remarks (property_id,guest_id,remark) values (${session.propertyId}::uuid,${input.guestId}::uuid,${remark.text})`;
+      }
+      return true;
+    });
+    if (!updated) return Response.json({ error: "Guest not found." }, { status: 404 });
+    return Response.json({ updated: true });
+  } catch (error) { return propertyAccessResponse(error); }
+}
+
+export async function POST(request: Request) {
+  try {
+    const session = await requirePropertySession(request, "guests.manage");
+    const parsed = importSchema.safeParse(await request.json());
+    if (!parsed.success) return Response.json({ error: "Guest import rows are invalid." }, { status: 400 });
+    if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
+    let merged = 0;
+    await productionSql().begin(async (tx) => {
+      for (const row of parsed.data.rows) {
+        const idNumber = normalizedId(row.driverLicenseNumber);
+        const [identity] = await tx<Array<{ guestId: string }>>`select guest_id as "guestId" from guest_identities where property_id=${session.propertyId}::uuid and id_type=${row.idType} and normalized_id_number=${idNumber} and deleted_at is null for update`;
+        const address = { addressLine1: row.addressLine1 ?? "", city: row.city ?? "" };
+        if (identity) { merged += 1; await tx`update guests set first_name=${row.firstName},last_name=${row.lastName},phone=${row.phone?.replace(/\D/g, "") || null},address=${tx.json(address)},remarks=coalesce(${row.notes || null},remarks),updated_at=now() where id=${identity.guestId}::uuid and property_id=${session.propertyId}::uuid`; }
+        else {
+          const [guest] = await tx<Array<{ id: string }>>`insert into guests (property_id,first_name,last_name,phone,address,remarks,guest_status) values (${session.propertyId}::uuid,${row.firstName},${row.lastName},${row.phone?.replace(/\D/g, "") || null},${tx.json(address)},${row.notes || null},'active') returning id`;
+          await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guest.id}::uuid,${row.idType},${row.driverLicenseNumber},${idNumber},now()+interval '1 year')`;
+        }
+      }
+    });
+    return Response.json({ imported: parsed.data.rows.length, merged });
+  } catch (error) { return propertyAccessResponse(error); }
+}
