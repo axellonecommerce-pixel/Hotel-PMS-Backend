@@ -16,7 +16,7 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 | Status | Count |
 |---|---:|
 | Verified demo | 45 |
-| Verified production path | 20 |
+| Verified production path | 21 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -76,7 +76,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-PAYR-001 | Verified demo | Pay periods, payday, hourly/piece/total compensation, and gross-pay calculations exist. |
 | FR-PAYR-002 | Verified demo | Paid state/date/method and optional correction note exist. |
 | FR-EXP-001 | Verified demo | Expense and recurrence records persist, and optional receipts upload to tenant-prefixed private object storage. |
-| FR-CSH-001 | Verified demo | Employee-shift cash, opening amount, multiple drops, and retained float exist. |
+| FR-CSH-001 | Verified production path | Cash reconciliation now writes tenant-scoped PostgreSQL cash shifts, adjustment transactions, and cash-drop records. The server reads the configured drawer float, retains it on every drop, rejects short counts without a reason, and verifies the named supervisor is an active Owner or Manager. |
 | FR-CSH-002 | Verified demo | Expected/count/over-short calculation and Other-expense note validation exist. |
 | FR-AUD-001 | Verified production path | Manual and scheduled Night Audit use an advisory lock and locked business-day row, store run results and blockers, close/open business days transactionally, and persist a failure notification. |
 | FR-REV-001 | Verified production path | PostgreSQL ledger entries enforce balanced debit/credit posting for room revenue, tax, charge edits, and expenses; financial writes and ledger lines share the same transaction. |
@@ -97,7 +97,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 
 The original 16 partial requirements are closed. Before a real hotel launch, the remaining demo-backed workflows should be migrated in this order:
 
-1. Replace remaining React-state/seeded-data paths for deposits, housekeeping, time, payroll, and cash with their PostgreSQL equivalents.
+1. Replace remaining React-state/seeded-data paths for deposits, housekeeping, time, and payroll with their PostgreSQL equivalents.
 2. Provision the first hotel owner, relational room types/rooms, business day, taxes, and charge types.
 3. Link and deploy the backend, add its URL to the frontend environment, then deploy the frontend.
 4. Run the same release suite against the deployed URLs with the first real hotel account.
