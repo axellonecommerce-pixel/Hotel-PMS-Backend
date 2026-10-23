@@ -731,6 +731,18 @@ export const notifications = pgTable("notifications", {
   createdAt: createdAt(),
 }, (table) => [index("notifications_property_unresolved").on(table.propertyId, table.resolvedAt)]);
 
+export const propertyTasks = pgTable("property_tasks", {
+  id: id(),
+  propertyId: propertyId(),
+  text: text("text").notNull(),
+  area: text("area").notNull(),
+  completed: boolean("completed").notNull().default(false),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  createdByEmployeeId: uuid("created_by_employee_id").references(() => employees.id),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, (table) => [index("property_tasks_property_completed").on(table.propertyId, table.completed)]);
+
 export const attachments = pgTable("attachments", {
   id: id(),
   propertyId: propertyId(),

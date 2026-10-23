@@ -84,6 +84,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-RPT-001 | Verified demo | Custom range, print, PDF/Excel export, comparison, and report detail controls exist. |
 | FR-RPT-002 | Verified demo | Standard reports and tenant-scoped saved custom report definitions are connected to backend APIs. |
 | FR-NOT-001 | Verified production path | Tenant- and role-scoped notifications persist in PostgreSQL, support read/resolve controls, and are produced by scheduled ID-retention, invoice-reminder, and Night Audit workflows. |
+| FR-TSK-001 | Verified production path | Dashboard shift tasks load, create, and complete through a tenant-scoped PostgreSQL API; failed saves revert the optimistic client update instead of silently disappearing after refresh. |
 | FR-SRC-001 | Verified demo | Global search covers guests, reservations, rooms, companies, folios, and invoices. |
 | FR-BKP-001 | Verified production path | The server produces a complete tenant snapshot with durable tables and private file bytes while removing expired/deleted ID-image keys. |
 | FR-BKP-002 | Verified production path | Restore requires the typed hotel-specific confirmation, replaces tenant data in dependency order inside one PostgreSQL transaction, then restores private files. |
