@@ -34,6 +34,7 @@ type CashRecord = {
 };
 
 type StoredSettings = { property?: { cashFloatCents?: unknown } };
+type CashActivity = { paymentCents: number; refundCents: number; netCents: number };
 
 function shiftStatus(kind: "open" | "closed", shift: string) {
   return `${kind}:${shift}`;
@@ -94,11 +95,26 @@ async function listRecords(propertyId: string) {
   return rows.map(toRecord);
 }
 
+async function cashActivityForDate(sql: ReturnType<typeof productionSql>, propertyId: string, date: string): Promise<CashActivity> {
+  const [activity] = await sql<Array<{ paymentCents: number; refundCents: number }>>`
+    select
+      coalesce((select sum(p.amount_cents) from payments p where p.property_id=${propertyId}::uuid and p.effective_date=${date}::date and lower(p.method) like '%cash%'),0)::int as "paymentCents",
+      coalesce((select sum(r.amount_cents) from refunds r join payments p on p.id=r.payment_id where r.property_id=${propertyId}::uuid and r.effective_date=${date}::date and lower(p.method) like '%cash%'),0)::int as "refundCents"
+  `;
+  const paymentCents = activity?.paymentCents ?? 0;
+  const refundCents = activity?.refundCents ?? 0;
+  return { paymentCents, refundCents, netCents: paymentCents - refundCents };
+}
+
 export async function GET(request: Request) {
   try {
     const session = await requirePropertySession(request, "cash.manage");
     if (!hasProductionDatabase()) return Response.json({ records: [] });
-    return Response.json({ records: await listRecords(session.propertyId) });
+    const date = new URL(request.url).searchParams.get("date");
+    const cashActivity = dateSchema.safeParse(date).success
+      ? await cashActivityForDate(productionSql(), session.propertyId, date!)
+      : { paymentCents: 0, refundCents: 0, netCents: 0 };
+    return Response.json({ records: await listRecords(session.propertyId), cashActivity });
   } catch (error) {
     return propertyAccessResponse(error);
   }
@@ -125,6 +141,16 @@ export async function POST(request: Request) {
         where property_id=${session.propertyId}::uuid and key='application_settings'
       `;
       const drawerFloatCents = parseFloatCents(settings?.value);
+      const [cashActivityRow] = await tx<Array<{ paymentCents: number; refundCents: number }>>`
+        select
+          coalesce((select sum(p.amount_cents) from payments p where p.property_id=${session.propertyId}::uuid and p.effective_date=${input.date}::date and lower(p.method) like '%cash%'),0)::int as "paymentCents",
+          coalesce((select sum(r.amount_cents) from refunds r join payments p on p.id=r.payment_id where r.property_id=${session.propertyId}::uuid and r.effective_date=${input.date}::date and lower(p.method) like '%cash%'),0)::int as "refundCents"
+      `;
+      const cashActivity = {
+        paymentCents: cashActivityRow?.paymentCents ?? 0,
+        refundCents: cashActivityRow?.refundCents ?? 0,
+        netCents: (cashActivityRow?.paymentCents ?? 0) - (cashActivityRow?.refundCents ?? 0),
+      };
       const [businessDay] = await tx<Array<{ id: string }>>`
         insert into business_days (property_id,business_date,status,opened_at)
         values (${session.propertyId}::uuid,${input.date},'open',now())
@@ -139,7 +165,10 @@ export async function POST(request: Request) {
       `;
       if (existing[0]) return { error: "This shift already has a completed cash drop. Create a correcting adjustment instead of replacing the audit record." } as const;
       const adjustmentTotal = input.laundryIncomeCents - input.cashExpenseCents - input.housekeeperPaymentCents + input.otherAdjustmentCents;
-      const expectedCents = Math.max(0, drawerFloatCents + adjustmentTotal);
+      // Payments and refunds are recorded in the reservation ledger. Cash
+      // refunds reduce the drawer on the refund date, so use the net amount
+      // rather than treating a refund as an unexplained cash shortage.
+      const expectedCents = Math.max(0, drawerFloatCents + cashActivity.netCents + adjustmentTotal);
       if (input.droppedCents > Math.max(0, input.countedCents - drawerFloatCents)) {
         return { error: "Keep the configured drawer float in the drawer; only excess cash can be dropped." } as const;
       }
