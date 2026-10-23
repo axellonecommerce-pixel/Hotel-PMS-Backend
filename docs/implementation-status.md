@@ -16,7 +16,7 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 | Status | Count |
 |---|---:|
 | Verified demo | 45 |
-| Verified production path | 23 |
+| Verified production path | 24 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -72,7 +72,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-HSK-003 | Verified demo | Smoking designation/icon appears in Housekeeping and Floor Map. |
 | FR-MNT-001 | Verified production path | Tenant-scoped PostgreSQL work orders persist the room, issue, priority, worker, cost, notes, service dates, and rentable/non-rentable period; reservations exclude overlapping non-rentable periods. Images and PDF receipts are uploaded to tenant-scoped private storage after the work order receives its durable ID. |
 | FR-MNT-002 | Verified production path | Completion, extension, and explicit make-available actions are tenant-scoped persisted API operations. Completing work does not reopen inventory; making available explicitly resolves the block and the client marks the room dirty. |
-| FR-TIM-001 | Verified demo | Separate time events, live clock, complete manual shift, corrections, breaks, and configured overtime logic exist. |
+| FR-TIM-001 | Verified production path | Housekeeping time clock and manual correction forms now load and upsert tenant-scoped PostgreSQL time entries. The server validates active motel staff, work date/times, break ordering, and one entry per employee per date. |
 | FR-PAYR-001 | Verified demo | Pay periods, payday, hourly/piece/total compensation, and gross-pay calculations exist. |
 | FR-PAYR-002 | Verified demo | Paid state/date/method and optional correction note exist. |
 | FR-EXP-001 | Verified demo | Expense and recurrence records persist, and optional receipts upload to tenant-prefixed private object storage. |
@@ -97,7 +97,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 
 The original 16 partial requirements are closed. Before a real hotel launch, the remaining demo-backed workflows should be migrated in this order:
 
-1. Replace remaining React-state/seeded-data paths for housekeeping, time, and payroll with their PostgreSQL equivalents.
+1. Replace remaining React-state/seeded-data paths for housekeeping and payroll with their PostgreSQL equivalents.
 2. Provision the first hotel owner, relational room types/rooms, business day, taxes, and charge types.
 3. Link and deploy the backend, add its URL to the frontend environment, then deploy the frontend.
 4. Run the same release suite against the deployed URLs with the first real hotel account.
