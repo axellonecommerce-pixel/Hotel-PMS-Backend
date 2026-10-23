@@ -11,15 +11,25 @@ const paymentSourceSchema = z.object({ id: z.string().optional(), label: z.strin
 const vehicleSchema = z.object({ plate: z.string().trim().min(1), make: z.string().optional(), color: z.string().optional(), year: z.string().optional() });
 const updateSchema = z.object({
   guestId: z.string().uuid(),
+  firstName: z.string().trim().min(1).max(120).optional(),
+  lastName: z.string().trim().min(1).max(120).optional(),
+  phone: z.string().max(80).optional(),
+  email: z.string().email().or(z.literal("")).optional(),
+  addressLine1: z.string().max(400).optional(),
+  postalCode: z.string().max(40).optional(),
+  city: z.string().max(120).optional(),
+  state: z.string().max(120).optional(),
+  country: z.string().max(120).optional(),
+  countryCode: z.string().max(20).optional(),
   fixedRateCents: z.number().int().min(0).nullable().optional(),
-  notes: z.string().max(20_000).optional(),
+  notes: z.string().max(20_000).nullable().optional(),
   status: guestStatusSchema.optional(),
   roomPreferences: z.record(z.string(), z.unknown()).optional(),
   vehicle: vehicleSchema.nullable().optional(),
   savedPaymentSources: z.array(paymentSourceSchema).max(20).optional(),
   remarkEntries: z.array(z.object({ text: z.string().trim().min(1).max(2_000), createdAt: z.string().optional() })).max(100).optional(),
   dnrCode: z.string().max(200).optional(),
-  dnrRemarks: z.string().max(10_000).optional(),
+  dnrRemarks: z.string().max(10_000).nullable().optional(),
 });
 const importSchema = z.object({
   rows: z.array(z.object({
@@ -107,12 +117,22 @@ export async function PATCH(request: Request) {
     if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
     const input = parsed.data;
     const updated = await productionSql().begin(async (tx) => {
-      const [guest] = await tx<Array<{ roomPreferences: unknown }>>`select room_preferences as "roomPreferences" from guests where id=${input.guestId}::uuid and property_id=${session.propertyId}::uuid for update`;
+      const [guest] = await tx<Array<{ roomPreferences: unknown; address: unknown }>>`select room_preferences as "roomPreferences",address from guests where id=${input.guestId}::uuid and property_id=${session.propertyId}::uuid for update`;
       if (!guest) return false;
       const preferences = parseObject<Preferences>(guest.roomPreferences);
+      const address = parseObject<Address>(guest.address);
+      if (input.addressLine1 !== undefined) address.addressLine1 = input.addressLine1;
+      if (input.postalCode !== undefined) address.postalCode = input.postalCode;
+      if (input.city !== undefined) address.city = input.city;
+      if (input.state !== undefined) address.state = input.state;
+      if (input.country !== undefined) address.country = input.country;
+      if (input.countryCode !== undefined) address.countryCode = input.countryCode;
       if (input.fixedRateCents !== undefined) preferences.fixedRateCents = input.fixedRateCents ?? undefined;
       if (input.roomPreferences !== undefined) preferences.roomPreferences = input.roomPreferences;
-      await tx`update guests set remarks=coalesce(${input.notes ?? null},remarks),guest_status=coalesce(${input.status ? storedStatus(input.status) : null},guest_status),dnr_reason=coalesce(${input.dnrRemarks ?? input.dnrCode ?? null},dnr_reason),room_preferences=${tx.json(preferences as never)},updated_at=now() where id=${input.guestId}::uuid and property_id=${session.propertyId}::uuid`;
+      const notes = input.notes ?? null;
+      const dnrRemarks = input.dnrRemarks ?? null;
+      const dnrCode = input.dnrCode ?? null;
+      await tx`update guests set first_name=coalesce(${input.firstName ?? null},first_name),last_name=coalesce(${input.lastName ?? null},last_name),phone=case when ${input.phone !== undefined} then ${input.phone?.replace(/\D/g, "") || null} else phone end,email=case when ${input.email !== undefined} then ${input.email || null} else email end,address=${tx.json(address as never)},remarks=case when ${input.notes !== undefined} then ${notes} else remarks end,guest_status=coalesce(${input.status ? storedStatus(input.status) : null},guest_status),dnr_reason=case when ${input.dnrRemarks !== undefined} then ${dnrRemarks} when ${input.dnrCode !== undefined} then ${dnrCode} else dnr_reason end,room_preferences=${tx.json(preferences as never)},updated_at=now() where id=${input.guestId}::uuid and property_id=${session.propertyId}::uuid`;
       if (input.vehicle !== undefined) {
         await tx`delete from guest_vehicles where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid`;
         if (input.vehicle) await tx`insert into guest_vehicles (property_id,guest_id,plate,make,color,year) values (${session.propertyId}::uuid,${input.guestId}::uuid,${input.vehicle.plate},${input.vehicle.make || null},${input.vehicle.color || null},${input.vehicle.year || null})`;
