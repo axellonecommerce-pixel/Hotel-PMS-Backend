@@ -1,6 +1,6 @@
 # Requirements implementation status
 
-Audit date: 2026-10-22
+Audit date: 2026-10-23
 
 This is the code-backed traceability audit for the 65 formal requirements in `prd.md`. Those requirements consolidate the product owner's roughly 200 discovery answers.
 
@@ -73,7 +73,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-MNT-001 | Verified production path | Tenant-scoped PostgreSQL work orders persist the room, issue, priority, worker, cost, notes, service dates, and rentable/non-rentable period; reservations exclude overlapping non-rentable periods. Images and PDF receipts are uploaded to tenant-scoped private storage after the work order receives its durable ID. |
 | FR-MNT-002 | Verified production path | Completion, extension, and explicit make-available actions are tenant-scoped persisted API operations. Completing work does not reopen inventory; making available explicitly resolves the block and the client marks the room dirty. |
 | FR-TIM-001 | Verified production path | Housekeeping time clock and manual correction forms now load and upsert tenant-scoped PostgreSQL time entries. The server validates active motel staff, work date/times, break ordering, and one entry per employee per date. |
-| FR-PAYR-001 | Verified production path | Payroll now creates the configured weekly, biweekly, semi-monthly, or monthly tenant pay period, derives completed time-entry minutes, snapshots hourly rates, and persists each employee payroll entry. |
+| FR-PAYR-001 | Verified production path | Payroll now creates the configured weekly, biweekly, semi-monthly, or monthly tenant pay period, derives completed time-entry minutes, snapshots hourly rates, and persists each employee payroll entry. Paid entries are not recalculated when a later refresh derives current-period payroll. |
 | FR-PAYR-002 | Verified production path | Payroll approval, adjustment, paid status, and paid-on date persist in the tenant payroll entry. |
 | FR-EXP-001 | Verified demo | Expense and recurrence records persist, and optional receipts upload to tenant-prefixed private object storage. |
 | FR-CSH-001 | Verified production path | Cash reconciliation now writes tenant-scoped PostgreSQL cash shifts, adjustment transactions, and cash-drop records. The server reads the configured drawer float, retains it on every drop, rejects short counts without a reason, and verifies the named supervisor is an active Owner or Manager. |
