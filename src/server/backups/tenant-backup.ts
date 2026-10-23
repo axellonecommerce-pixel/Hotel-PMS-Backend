@@ -13,6 +13,14 @@ const tableOrder = [
   "change_events","ledger_entries",
 ] as const;
 
+// These records define the property rather than its day-to-day activity. A
+// reset must keep them so the motel does not need to be configured again.
+const settingsTables = new Set<string>([
+  "property_settings", "employees", "room_types", "rooms", "booking_sources",
+  "promotions", "promotion_room_types", "tax_definitions", "charge_types",
+  "registration_rule_versions", "document_sequences",
+]);
+
 export type TenantBackup = {
   schemaVersion: "2026-10-16.1";
   propertyId: string;
@@ -72,6 +80,13 @@ export async function restoreTenantBackup(tx: TransactionSql<Record<string, neve
     const allowed = new Set(validColumns.map((column) => column.columnName));
     const sanitized = rows.map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => allowed.has(key))));
     await tx`insert into ${tx(table)} ${tx(sanitized)}`;
+  }
+}
+
+export async function resetTenantOperationalData(tx: TransactionSql<Record<string, never>>, propertyId: string) {
+  for (const table of [...tableOrder].reverse()) {
+    if (settingsTables.has(table)) continue;
+    await tx.unsafe(`delete from "${table}" where property_id = $1`, [propertyId]);
   }
 }
 
