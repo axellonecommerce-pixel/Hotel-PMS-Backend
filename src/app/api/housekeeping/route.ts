@@ -9,7 +9,7 @@ const updateSchema = z.object({
   updates: z.array(z.object({
     roomNumber: z.string().trim().min(1),
     status: z.enum(["Unassigned", "Assigned", "Cleaning", "Clean", "Maintenance Issue"]),
-    assignedHousekeeper: z.string().trim().optional(),
+    assignedHousekeeper: z.string().trim().min(1).nullable().optional(),
   })).min(1),
 });
 
@@ -30,10 +30,12 @@ export async function GET(request: Request) {
     if (!hasProductionDatabase()) return Response.json({ records: [] });
     const records = await productionSql()<RecordRow[]>`
       select r.number as "roomNumber",
-        case h.assignment_status
-          when 'completed' then 'Clean'
-          when 'in_progress' then 'Cleaning'
-          when 'assigned' then 'Assigned'
+        case
+          when r.cleanliness_status <> 'clean' and h.assignment_status = 'completed' then 'Unassigned'
+          when r.cleanliness_status <> 'clean' and h.assignment_status is null then 'Unassigned'
+          when h.assignment_status = 'completed' then 'Clean'
+          when h.assignment_status = 'in_progress' then 'Cleaning'
+          when h.assignment_status = 'assigned' then 'Assigned'
           else 'Unassigned'
         end as status,
         e.name as "assignedHousekeeper"
