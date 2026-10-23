@@ -52,7 +52,7 @@ export async function GET(request: Request) {
       // Keep inactive employees in this response too. Their historical pay
       // entries remain part of payroll and omitting them leaves the frontend
       // with an entry whose employee cannot be resolved.
-      const employees = await tx<Array<{ id: string; name: string; role: string; hourlyRateCents: number | null; active: boolean }>>`
+      const employees = await tx<Array<{ id: string; name: string | null; role: string | null; hourlyRateCents: number | null; active: boolean }>>`
         select id,name,job_role as role,hourly_rate_cents as "hourlyRateCents",active from employees where property_id=${session.propertyId}::uuid order by active desc,name
       `;
       for (const employee of employees) {
@@ -79,7 +79,20 @@ export async function GET(request: Request) {
         where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id<>${period.id}::uuid order by pp.ends_on desc limit 100
       `;
       const mapEntry = (entry: typeof entries[number]) => { const meta = parseDescription(entry.description); return { id: entry.id, payrollPeriodId: entry.periodId, employeeId: entry.employeeId, regularMinutes: entry.regularMinutes, hourlyRateCents: entry.hourlyRateCents ?? 0, adjustmentCents: meta.adjustmentCents ?? 0, paymentStatus: entry.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending" }; };
-      return { period: { id: period.id, label: `${period.start} to ${period.end}`, startDate: period.start, endDate: period.end, payDate: period.payDate }, employees: employees.map((employee) => ({ ...employee, role: employee.role.toLowerCase() === 'housekeeper' ? 'Housekeeper' : employee.role.toLowerCase() === 'manager' || employee.role.toLowerCase() === 'owner' ? 'Manager' : 'Other Employee', status: employee.active ? 'Active' : 'Inactive' })), entries: entries.map(mapEntry), history: history.map((entry) => ({ ...mapEntry(entry), periodLabel: `${entry.startsOn} to ${entry.endsOn}` })) };
+      return {
+        period: { id: period.id, label: `${period.start} to ${period.end}`, startDate: period.start, endDate: period.end, payDate: period.payDate },
+        employees: employees.map((employee) => {
+          const role = employee.role?.toLowerCase() ?? "";
+          return {
+            ...employee,
+            name: employee.name?.trim() || "Unnamed employee",
+            role: role === "housekeeper" ? "Housekeeper" : role === "manager" || role === "owner" ? "Manager" : "Other Employee",
+            status: employee.active ? "Active" : "Inactive",
+          };
+        }),
+        entries: entries.map(mapEntry),
+        history: history.map((entry) => ({ ...mapEntry(entry), periodLabel: `${entry.startsOn} to ${entry.endsOn}` })),
+      };
     });
     return Response.json(result);
   } catch (error) { return propertyAccessResponse(error); }
