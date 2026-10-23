@@ -70,6 +70,14 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
           and c.type='Room Rent' and c.status='posted'
         for update of c
       `;
+      const nightlyRates = await tx<Array<{ reservationRoomId: string; stayDate: string; baseRateCents: number; discountCents: number; finalRateCents: number }>>`
+        select reservation_room_id as "reservationRoomId",stay_date::text as "stayDate",
+          base_rate_cents as "baseRateCents",discount_cents as "discountCents",final_rate_cents as "finalRateCents"
+        from nightly_rates
+        where property_id=${session.propertyId}::uuid
+          and reservation_room_id in ${tx(rooms.map((room) => room.id))}
+        for update
+      `;
       const [businessDay] = await tx<Array<{ date: string }>>`
         select business_date::text as date from business_days
         where property_id=${session.propertyId}::uuid order by business_date desc limit 1
@@ -152,7 +160,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       `;
       const releasedAt = new Date().toISOString();
       await tx`
-        update reservations set status=${status},notes=${addReleaseMetadata(reservation.notes, { action: input.action, feeCents: input.feeCents, note: input.note, at: releasedAt })},version=version+1,updated_at=now()
+        update reservations set status=${status},notes=${addReleaseMetadata(reservation.notes, { action: input.action, feeCents: input.feeCents, note: input.note, roomRentCharges, nightlyRates, at: releasedAt })},version=version+1,updated_at=now()
         where id=${reservation.id}::uuid and property_id=${session.propertyId}::uuid
       `;
       await tx`
