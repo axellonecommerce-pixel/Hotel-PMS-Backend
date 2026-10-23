@@ -6,7 +6,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 type Address = { addressLine1?: string; postalCode?: string; city?: string; state?: string; country?: string; countryCode?: string };
 // These profile values live with the configurable guest preferences so they
 // remain durable without requiring an unsafe production schema migration.
-type Preferences = { fixedRateCents?: number; dateOfBirth?: string; idExpires?: string; roomPreferences?: Record<string, unknown> };
+type Preferences = { fixedRateCents?: number; dateOfBirth?: string; idExpires?: string; secondaryPhone?: string; secondaryEmail?: string; roomPreferences?: Record<string, unknown> };
 
 const guestStatusSchema = z.enum(["Regular", "Returning", "New", "Do Not Rent"]);
 const paymentSourceSchema = z.object({ id: z.string().optional(), label: z.string().trim().min(1), last4: z.string().optional(), tokenReference: z.string().optional() });
@@ -16,7 +16,9 @@ const updateSchema = z.object({
   firstName: z.string().trim().min(1).max(120).optional(),
   lastName: z.string().trim().min(1).max(120).optional(),
   phone: z.string().max(80).optional(),
+  secondaryPhone: z.string().max(80).optional(),
   email: z.string().email().or(z.literal("")).optional(),
+  secondaryEmail: z.string().email().or(z.literal("")).optional(),
   addressLine1: z.string().max(400).optional(),
   postalCode: z.string().max(40).optional(),
   city: z.string().max(120).optional(),
@@ -121,7 +123,7 @@ async function listGuests(propertyId: string) {
     return {
       id: guest.id, firstName: guest.firstName, lastName: guest.lastName, phone: guest.phone ?? "", phoneNormalized: (guest.phone ?? "").replace(/\D/g, ""),
       city: address.city ?? "", addressLine1: address.addressLine1, postalCode: address.postalCode, state: address.state, country: address.country, countryCode: address.countryCode,
-      email: guest.email ?? undefined, status: apiStatus(guest.guestStatus), fixedRateCents: prefs.fixedRateCents, dateOfBirth: prefs.dateOfBirth, idExpires: prefs.idExpires, roomPreferences: prefs.roomPreferences,
+      email: guest.email ?? undefined, secondaryPhone: prefs.secondaryPhone, secondaryEmail: prefs.secondaryEmail, status: apiStatus(guest.guestStatus), fixedRateCents: prefs.fixedRateCents, dateOfBirth: prefs.dateOfBirth, idExpires: prefs.idExpires, roomPreferences: prefs.roomPreferences,
       idType: identity?.idType, driverLicenseNumber: identity?.idNumber, notes: guest.remarks ?? undefined, dnrRemarks: guest.dnrReason ?? undefined,
       vehicle: vehicle ? { plate: vehicle.plate, make: vehicle.make ?? "", color: vehicle.color ?? "", year: vehicle.year ?? "" } : undefined,
       savedPaymentSources: (sourcesByGuest.get(guest.id) ?? []).map((source) => ({ id: source.id, label: source.label ?? source.method, last4: source.last4 ?? undefined, tokenReference: source.externalReference ?? "" })),
@@ -158,6 +160,8 @@ export async function PATCH(request: Request) {
       if (input.state !== undefined) address.state = input.state;
       if (input.country !== undefined) address.country = input.country;
       if (input.countryCode !== undefined) address.countryCode = input.countryCode;
+      if (input.secondaryPhone !== undefined) preferences.secondaryPhone = input.secondaryPhone || undefined;
+      if (input.secondaryEmail !== undefined) preferences.secondaryEmail = input.secondaryEmail || undefined;
       if (input.fixedRateCents !== undefined) preferences.fixedRateCents = input.fixedRateCents ?? undefined;
       if (input.dateOfBirth !== undefined) preferences.dateOfBirth = input.dateOfBirth ?? undefined;
       if (input.idExpires !== undefined) preferences.idExpires = input.idExpires ?? undefined;

@@ -24,12 +24,12 @@ export async function GET(request: Request) {
     const session = await requirePropertySession(request, "reservations.manage");
     if (hasProductionDatabase()) {
       const records = await productionSql()<Array<{
-        id: string; version: number; firstName: string; lastName: string; phone: string | null; room: string | null;
+        id: string; version: number; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null;
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null;
         taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number;
         reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; status: string }>;
       }>>`
-        select r.id,r.version,g.first_name as "firstName",g.last_name as "lastName",g.phone,
+        select r.id,r.version,r.company_id as "companyId",g.first_name as "firstName",g.last_name as "lastName",g.phone,
           rr.room_number as room,r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
           coalesce(bs.name,case when r.notes like '{%' then r.notes::jsonb->>'source' end,'Direct') as source,
           case when r.notes like '{%' then r.notes::jsonb->>'rateCode' end as "rateCode",
@@ -53,7 +53,7 @@ export async function GET(request: Request) {
         const status = record.status === "reserved" ? "Reserved" : record.status === "checked_in" ? "Checked In" : record.status === "checked_out" ? "Checked Out" : record.status === "no_show" ? "No Show" : record.status === "cancelled" ? "Cancelled" : record.status;
         const roomStatus = (value: string) => value === "reserved" ? "Reserved" : value === "checked_in" ? "Checked In" : value === "checked_out" ? "Checked Out" : value === "no_show" ? "No Show" : "Cancelled";
         const reservationRooms = (record.reservationRooms ?? []).map((room) => ({ id: room.id, roomNumber: room.roomNumber ?? undefined, roomTypeId: room.roomTypeId, status: roomStatus(room.status), nightlyRatesCents: [] }));
-        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: "Credit", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
     }
     const records = await db.query.reservations.findMany({
@@ -92,7 +92,7 @@ export async function GET(request: Request) {
           checkInTime: "3:00 PM",
           nights,
           source: record.source,
-          paymentType: record.paymentArrangement,
+          paymentType: record.paymentArrangement === "Credit" ? "Not entered" : record.paymentArrangement,
           roomRentCents,
           taxCents: record.taxExempt ? 0 : taxCents,
           totalCents: roomRentCents + (record.taxExempt ? 0 : taxCents),
@@ -512,7 +512,7 @@ export async function POST(request: Request) {
       taxExemptionReason: payload.taxExemptionReason || null,
       taxExemptionCertificate: payload.taxExemptionCertificate || null,
       otaPaymentStatus: channel?.channelType === "OTA" ? payload.otaPaymentStatus ?? "Guest Pays Hotel" : null,
-      paymentArrangement: payload.companyId ? "Direct Bill" : "Credit",
+      paymentArrangement: payload.companyId ? "Direct Bill" : "Not entered",
       rateCode: payload.rateCode,
       petCount: payload.petCount,
       servicePetCount: payload.servicePetCount,
@@ -572,7 +572,7 @@ export async function POST(request: Request) {
           checkInTime: "3:00 PM",
           nights,
           source: payload.source,
-          paymentType: payload.companyId ? "Direct Bill" : "Credit",
+          paymentType: payload.companyId ? "Direct Bill" : "Not entered",
           roomRentCents,
           taxCents,
           totalCents: roomRentCents + taxCents,
