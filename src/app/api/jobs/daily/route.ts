@@ -5,6 +5,7 @@ import { attachments, notifications } from "@/server/db/schema";
 import { deletePrivateFiles } from "@/server/storage/private-files";
 import { createHash } from "node:crypto";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { postDueRecurringExpenses } from "@/server/expenses/recurring";
 
 function authorized(request: Request) {
   const expected = process.env.CRON_SECRET; const supplied = request.headers.get("authorization")?.replace(/^Bearer /, "");
@@ -51,7 +52,8 @@ export async function POST(request: Request) {
       await tx`insert into notifications (property_id,recipient_role,type,title,message,resource_type,resource_id)
         values (${invoice.propertyId}::uuid,'manager','INVOICE_REMINDER','Company invoice requires follow-up',${`${invoice.number} was due ${invoice.dueDate}.`},'invoice',${invoice.id}::uuid)`;
     });
-    return Response.json({ warned: expiring.length, deleted: expired.length, invoiceReminders: reminders.length });
+    const recurringExpensesPosted = await sql.begin((tx) => postDueRecurringExpenses(tx));
+    return Response.json({ warned: expiring.length, deleted: expired.length, invoiceReminders: reminders.length, recurringExpensesPosted });
   }
   const now = new Date();
   const warningCutoff = new Date(now.getTime() + 7 * 86_400_000).toISOString();
