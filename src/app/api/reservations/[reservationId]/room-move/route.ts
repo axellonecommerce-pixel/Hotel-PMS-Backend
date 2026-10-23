@@ -22,8 +22,8 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     if (!input.success) return Response.json({ error: "Room move details are invalid." }, { status: 400 });
     const reservationId = await routeParams(context);
     const result = await productionSql().begin(async (tx) => {
-      const [reservation] = await tx<Array<{ id: string; version: number; status: string }>>`
-        select id,version,status from reservations
+      const [reservation] = await tx<Array<{ id: string; version: number; status: string; taxExempt: boolean; taxRateBasisPoints: number }>>`
+        select id,version,status,tax_exempt as "taxExempt",tax_rate_basis_points as "taxRateBasisPoints" from reservations
         where id=${reservationId}::uuid and property_id=${session.propertyId}::uuid for update
       `;
       if (!reservation) return { error: "Reservation not found.", status: 404 } as const;
@@ -40,9 +40,10 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       if (!reservationRoom?.roomId) return { error: "This reservation has no assigned room to move.", status: 409 } as const;
       if (reservationRoom.roomNumber === input.data.destinationRoomNumber) return { error: "Choose a different destination room.", status: 400 } as const;
 
-      const [destination] = await tx<Array<{ id: string; number: string; roomTypeId: string; cleanliness: string; service: string }>>`
-        select id,number,room_type_id as "roomTypeId",cleanliness_status as cleanliness,service_status as service
-        from rooms where property_id=${session.propertyId}::uuid and number=${input.data.destinationRoomNumber} for update
+      const [destination] = await tx<Array<{ id: string; number: string; roomTypeId: string; baseRateCents: number; cleanliness: string; service: string }>>`
+        select r.id,r.number,r.room_type_id as "roomTypeId",rt.base_rate_cents as "baseRateCents",r.cleanliness_status as cleanliness,r.service_status as service
+        from rooms r join room_types rt on rt.id=r.room_type_id
+        where r.property_id=${session.propertyId}::uuid and r.number=${input.data.destinationRoomNumber} for update
       `;
       if (!destination || destination.service !== "rentable") return { error: "This destination room is non-rentable.", status: 409 } as const;
       const [occupied] = await tx<Array<{ id: string }>>`
@@ -62,6 +63,34 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         update reservation_rooms set room_id=${destination.id}::uuid,room_type_id=${destination.roomTypeId}::uuid,updated_at=now()
         where id=${reservationRoom.id}::uuid
       `;
+
+      // A move never rewrites a consumed night. Choosing the destination
+      // room's rate changes only the open business day and future nights,
+      // updating the matching Room Rent and tax postings in the same
+      // transaction as the physical room change.
+      if (input.data.rateDecision === "change") {
+        const [businessDay] = await tx<Array<{ date: string }>>`
+          select business_date::text as date from business_days
+          where property_id=${session.propertyId}::uuid order by business_date desc limit 1
+        `;
+        const effectiveDate = businessDay?.date ?? new Date().toISOString().slice(0, 10);
+        await tx`
+          update nightly_rates set base_rate_cents=${destination.baseRateCents},discount_cents=0,final_rate_cents=${destination.baseRateCents}
+          where reservation_room_id=${reservationRoom.id}::uuid and stay_date>=${effectiveDate}::date
+        `;
+        await tx`
+          update charges set amount_cents=${destination.baseRateCents}
+          where reservation_room_id=${reservationRoom.id}::uuid and type='Room Rent' and service_date>=${effectiveDate}::date and status='posted'
+        `;
+        if (!reservation.taxExempt) {
+          await tx`
+            update charge_taxes ct set amount_cents=round(${destination.baseRateCents} * ct.rate_basis_points / 10000.0)::int
+            from charges c
+            where ct.charge_id=c.id and c.reservation_room_id=${reservationRoom.id}::uuid
+              and c.type='Room Rent' and c.service_date>=${effectiveDate}::date and c.status='posted'
+          `;
+        }
+      }
       await tx`
         insert into room_moves (property_id,reservation_room_id,from_room_id,to_room_id,rate_decision,remark,moved_by_employee_id)
         values (${session.propertyId}::uuid,${reservationRoom.id}::uuid,${reservationRoom.roomId}::uuid,${destination.id}::uuid,${input.data.rateDecision},${input.data.remark},${employee?.id ?? null}::uuid)
@@ -71,7 +100,14 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         where id=${reservationRoom.roomId}::uuid and property_id=${session.propertyId}::uuid
       `;
       await tx`update reservations set version=version+1,updated_at=now() where id=${reservation.id}::uuid`;
-      return { room: destination.number, roomTypeId: destination.roomTypeId, destinationDirty: destination.cleanliness !== "clean", version: reservation.version + 1 } as const;
+      const [totals] = await tx<Array<{ roomRentCents: number; taxCents: number; paidCents: number }>>`
+        select
+          coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rr on rr.id=nr.reservation_room_id where rr.reservation_id=${reservation.id}::uuid),0)::int as "roomRentCents",
+          coalesce((select sum(ct.amount_cents) from charge_taxes ct join charges c on c.id=ct.charge_id join folios f on f.id=c.folio_id where f.reservation_id=${reservation.id}::uuid and c.status='posted'),0)::int as "taxCents",
+          coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=${reservation.id}::uuid),0)::int as "paidCents"
+      `;
+      const totalCents = totals.roomRentCents + totals.taxCents;
+      return { room: destination.number, roomTypeId: destination.roomTypeId, destinationDirty: destination.cleanliness !== "clean", roomRentCents: totals.roomRentCents, taxCents: totals.taxCents, totalCents, balanceCents: Math.max(0, totalCents - totals.paidCents), version: reservation.version + 1 } as const;
     });
     if ("error" in result) return Response.json(result, { status: result.status });
     return Response.json(result);
