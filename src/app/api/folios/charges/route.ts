@@ -25,6 +25,7 @@ const createSchema = z.object({
 
 const editSchema = z.object({
   chargeId: z.string().uuid(),
+  folioId: z.string().uuid().optional(),
   description: z.string().trim().min(1).optional(),
   amountCents: z.number().int().positive().optional(),
   taxOverrideCents: z.number().int().nonnegative().optional(),
@@ -143,8 +144,8 @@ export async function PATCH(request: Request) {
     if (!parsed.success) return Response.json({ error: "Charge changes are invalid." }, { status: 400 });
     const input = parsed.data;
     const updated = await productionSql().begin(async (tx) => {
-      const [current] = await tx<Array<ChargeContext & { id: string; description: string; amountCents: number; serviceDate: string; taxCents: number }>>`
-        select c.id, c.description, c.amount_cents as "amountCents", c.service_date::text as "serviceDate",
+      const [current] = await tx<Array<ChargeContext & { id: string; folioId: string; description: string; amountCents: number; serviceDate: string; taxCents: number }>>`
+        select c.id, c.folio_id as "folioId", c.description, c.amount_cents as "amountCents", c.service_date::text as "serviceDate",
           coalesce(ctax.amount_cents, 0) as "taxCents", r.id as "reservationId",
           r.tax_rate_basis_points as "taxRateBasisPoints", r.tax_exempt as "taxExempt",
           c.type as "typeName", coalesce(def.revenue_category, 'misc') as "revenueCategory", c.taxable
@@ -159,8 +160,19 @@ export async function PATCH(request: Request) {
       if (!current) throw new Error("Charge not found.");
       const amountCents = input.amountCents ?? current.amountCents;
       const description = input.description ?? current.description;
+      let folioId = current.folioId;
+      if (input.folioId && input.folioId !== current.folioId) {
+        const [targetFolio] = await tx<Array<{ id: string }>>`
+          select f.id from folios f
+          where f.id=${input.folioId}::uuid and f.property_id=${session.propertyId}::uuid
+            and f.reservation_id=${current.reservationId}::uuid and f.status='open'
+          for update
+        `;
+        if (!targetFolio) throw new Error("The target folio is unavailable.");
+        folioId = targetFolio.id;
+      }
       const nextTax = taxAmount(current, amountCents, input.taxOverrideCents, input.taxOverrideReason);
-      await tx`update charges set amount_cents=${amountCents}, description=${description}, updated_at=now() where id=${current.id}::uuid`;
+      await tx`update charges set folio_id=${folioId}::uuid, amount_cents=${amountCents}, description=${description}, updated_at=now() where id=${current.id}::uuid`;
       await tx`delete from charge_taxes where charge_id=${current.id}::uuid`;
       if (nextTax > 0 || input.taxOverrideCents !== undefined) await tx`
         insert into charge_taxes (property_id, charge_id, name, rate_basis_points, amount_cents, override_reason)
@@ -184,7 +196,7 @@ export async function PATCH(request: Request) {
           - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios all_folios on all_folios.id=pa.folio_id where all_folios.reservation_id=${current.reservationId}::uuid),0)
         )::int as "balanceCents"
       `;
-      return { id: current.id, description, amountCents, taxCents: nextTax, totalCents: amountCents + nextTax, balanceCents: balance?.balanceCents ?? amountCents + nextTax };
+      return { id: current.id, folioId, description, amountCents, taxCents: nextTax, totalCents: amountCents + nextTax, balanceCents: balance?.balanceCents ?? amountCents + nextTax };
     });
     return Response.json({ charge: updated });
   } catch (error) {
