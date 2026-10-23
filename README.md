@@ -47,7 +47,26 @@ These addresses must already be Supabase Auth users. The console intentionally
 uses the server-only Supabase secret to create owner accounts; never place that
 secret in frontend environment variables.
 
-Apply `drizzle-production/0009_platform_subscriptions.sql` in the Supabase SQL
-Editor before using the console. It creates the current subscription and manual
-subscription-payment tables. Card charging is deliberately not implemented:
-payments can be recorded manually until a payment processor is selected.
+## Production database migrations
+
+Before enabling the Platform Admin or accepting production traffic, apply the
+production SQL migrations in numeric order (`0000` through the newest file in
+`drizzle-production/`) in the Supabase SQL Editor or your managed PostgreSQL
+migration runner. Then apply `supabase/rls.sql`. The RLS script must run after
+the schema exists so every property-scoped table receives its tenant-isolation
+policy.
+
+For an already-running property, apply only the migrations it has not already
+recorded, in order. Never rerun destructive reset commands against production.
+The current sequence includes platform subscriptions, deletion cascades,
+property tasks, and `0013_secure_property_tasks.sql`; the latter enables the
+required RLS policy for task records. Verify the resulting deployment with:
+
+```bash
+bun run test:rls
+```
+
+The Platform Admin tables are created by
+`drizzle-production/0009_platform_subscriptions.sql`. Card charging is
+deliberately not implemented: subscription payments can be recorded manually
+until a payment processor is selected.
