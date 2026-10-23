@@ -39,6 +39,24 @@ const importSchema = z.object({
     addressLine1: z.string().max(400).optional(), notes: z.string().max(10_000).optional(),
   })).min(1).max(2_000),
 });
+const manualGuestSchema = z.object({
+  firstName: z.string().trim().min(1).max(120),
+  lastName: z.string().trim().min(1).max(120),
+  phone: z.string().max(80).optional(),
+  email: z.string().email().or(z.literal("")).optional(),
+  idType: z.enum(["US Driver License", "Passport", "Other"]).optional(),
+  idNumber: z.string().trim().max(200).optional(),
+  addressLine1: z.string().max(400).optional(),
+  city: z.string().max(120).optional(),
+  state: z.string().max(120).optional(),
+  postalCode: z.string().max(40).optional(),
+  country: z.string().max(120).optional(),
+  countryCode: z.string().max(20).optional(),
+  notes: z.string().max(10_000).optional(),
+  status: guestStatusSchema.optional(),
+}).refine((value) => Boolean(value.idType) === Boolean(value.idNumber?.trim()), {
+  message: "Enter both an ID type and ID number, or leave both blank.",
+});
 
 function parseObject<T extends object>(value: unknown): T {
   if (value && typeof value === "object" && !Array.isArray(value)) return value as T;
@@ -155,7 +173,39 @@ export async function PATCH(request: Request) {
 export async function POST(request: Request) {
   try {
     const session = await requirePropertySession(request, "guests.manage");
-    const parsed = importSchema.safeParse(await request.json());
+    const body = await request.json();
+    const manual = z.object({ guest: manualGuestSchema }).safeParse(body);
+    if (manual.success) {
+      if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
+      const row = manual.data.guest;
+      const result = await productionSql().begin(async (tx) => {
+        const address = {
+          addressLine1: row.addressLine1 ?? "", city: row.city ?? "", state: row.state ?? "",
+          postalCode: row.postalCode ?? "", country: row.country ?? "", countryCode: row.countryCode ?? "",
+        };
+        if (row.idType && row.idNumber?.trim()) {
+          const idNumber = normalizedId(row.idNumber);
+          const [existing] = await tx<Array<{ guestId: string }>>`
+            select guest_id as "guestId" from guest_identities
+            where property_id=${session.propertyId}::uuid and id_type=${row.idType} and normalized_id_number=${idNumber} and deleted_at is null
+            limit 1
+          `;
+          if (existing) return { duplicateGuestId: existing.guestId };
+        }
+        const [guest] = await tx<Array<{ id: string }>>`
+          insert into guests (property_id,first_name,last_name,phone,email,address,remarks,guest_status)
+          values (${session.propertyId}::uuid,${row.firstName},${row.lastName},${row.phone?.replace(/\D/g, "") || null},${row.email || null},${tx.json(address)},${row.notes || null},${storedStatus(row.status ?? "New")})
+          returning id
+        `;
+        if (row.idType && row.idNumber?.trim()) {
+          await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guest.id}::uuid,${row.idType},${row.idNumber},${normalizedId(row.idNumber)},now()+interval '1 year')`;
+        }
+        return { guestId: guest.id };
+      });
+      if ("duplicateGuestId" in result) return Response.json({ error: "A guest with this ID is already on file.", guestId: result.duplicateGuestId }, { status: 409 });
+      return Response.json(result, { status: 201 });
+    }
+    const parsed = importSchema.safeParse(body);
     if (!parsed.success) return Response.json({ error: "Guest import rows are invalid." }, { status: 400 });
     if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
     let merged = 0;
