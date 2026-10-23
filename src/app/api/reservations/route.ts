@@ -26,6 +26,7 @@ export async function GET(request: Request) {
         id: string; version: number; firstName: string; lastName: string; phone: string | null; room: string | null;
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null;
         taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number;
+        reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; status: string }>;
       }>>`
         select r.id,r.version,g.first_name as "firstName",g.last_name as "lastName",g.phone,
           rr.room_number as room,r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
@@ -34,7 +35,9 @@ export async function GET(request: Request) {
           coalesce((case when r.notes like '{%' then r.notes::jsonb->>'petCount' end)::int,0) as "petCount",coalesce((case when r.notes like '{%' then r.notes::jsonb->>'servicePetCount' end)::int,0) as "servicePetCount",
           coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rrx on rrx.id=nr.reservation_room_id where rrx.reservation_id=r.id),0)::int as "roomRentCents",
           (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)
-            - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=r.id),0))::int as "balanceCents"
+            - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=r.id),0))::int as "balanceCents",
+          coalesce((select json_agg(json_build_object('id',rrx.id,'roomNumber',room.number,'roomTypeId',rrx.room_type_id,'status',rrx.status) order by rrx.created_at)
+            from reservation_rooms rrx left join rooms room on room.id=rrx.room_id where rrx.reservation_id=r.id),'[]'::json) as "reservationRooms"
         from reservations r
         join guests g on g.id=r.main_guest_id
         left join booking_sources bs on bs.id=r.booking_source_id
@@ -45,7 +48,9 @@ export async function GET(request: Request) {
         const nights = Math.max(1, Math.round((new Date(`${record.checkoutDate}T12:00:00Z`).getTime() - new Date(`${record.checkInDate}T12:00:00Z`).getTime()) / 86_400_000));
         const taxCents = record.taxExempt ? 0 : Math.round(record.roomRentCents * record.taxRateBasisPoints / 10_000);
         const status = record.status === "reserved" ? "Reserved" : record.status === "checked_in" ? "Checked In" : record.status === "checked_out" ? "Checked Out" : record.status === "no_show" ? "No Show" : record.status === "cancelled" ? "Cancelled" : record.status;
-        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: false, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: "Credit", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: undefined, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+        const roomStatus = (value: string) => value === "reserved" ? "Reserved" : value === "checked_in" ? "Checked In" : value === "checked_out" ? "Checked Out" : value === "no_show" ? "No Show" : "Cancelled";
+        const reservationRooms = (record.reservationRooms ?? []).map((room) => ({ id: room.id, roomNumber: room.roomNumber ?? undefined, roomTypeId: room.roomTypeId, status: roomStatus(room.status), nightlyRatesCents: [] }));
+        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: "Credit", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: undefined, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
     }
     const records = await db.query.reservations.findMany({
