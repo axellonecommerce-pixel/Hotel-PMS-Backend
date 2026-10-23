@@ -43,6 +43,12 @@ try {
           (${propertyA.id}, 'Visible Company', ${tx.json({ formatted: "1 Test Way" })}),
           (${propertyB.id}, 'Hidden Company', ${tx.json({ formatted: "2 Test Way" })})
       `;
+      await tx`
+        insert into property_tasks (property_id, text, area)
+        values
+          (${propertyA.id}, 'Visible task', 'front_desk'),
+          (${propertyB.id}, 'Hidden task', 'front_desk')
+      `;
 
       await tx`select set_config('request.jwt.claim.sub', ${userA}, true)`;
       await tx.unsafe("set local role authenticated");
@@ -51,12 +57,18 @@ try {
         select property_id as "propertyId", name from companies order by name
       `;
       const visibleProperties = await tx<{ id: string }[]>`select id from properties order by id`;
+      const visibleTasks = await tx<{ propertyId: string; text: string }[]>`
+        select property_id as "propertyId", text from property_tasks order by text
+      `;
 
       if (visibleCompanies.length !== 1 || visibleCompanies[0]?.propertyId !== propertyA.id || visibleCompanies[0]?.name !== "Visible Company") {
         throw new Error(`Company isolation failed: authenticated employee saw ${visibleCompanies.length} companies.`);
       }
       if (visibleProperties.length !== 1 || visibleProperties[0]?.id !== propertyA.id) {
         throw new Error(`Property isolation failed: authenticated employee saw ${visibleProperties.length} properties.`);
+      }
+      if (visibleTasks.length !== 1 || visibleTasks[0]?.propertyId !== propertyA.id || visibleTasks[0]?.text !== "Visible task") {
+        throw new Error(`Property task isolation failed: authenticated employee saw ${visibleTasks.length} tasks.`);
       }
 
       throw rollbackMarker;
@@ -65,7 +77,7 @@ try {
     if (error !== rollbackMarker) throw error;
   }
 
-  console.log(`RLS verified: ${protectedTables} public tables protected; cross-hotel company and property records are isolated.`);
+  console.log(`RLS verified: ${protectedTables} public tables protected; cross-hotel company, property, and task records are isolated.`);
 } finally {
   await sql.end();
 }
