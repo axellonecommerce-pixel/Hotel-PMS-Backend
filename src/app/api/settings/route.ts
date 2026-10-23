@@ -13,6 +13,32 @@ type ConfiguredRoomType = { id?: string; name?: string; shortLabel?: string; max
 type ConfiguredRoom = { number?: string; roomTypeId?: string; floor?: number; buildingId?: string; housekeepingStatus?: string; serviceStatus?: string; smokingAllowed?: boolean; mapColumn?: number; mapRow?: number; mapWidth?: number; mapHeight?: number };
 type ConfiguredEmployee = { name?: string; role?: string; hourlyRateCents?: number; status?: string };
 
+type LiveRoomState = { number: string; cleanlinessStatus: string; serviceStatus: string };
+
+/** Room readiness is operational state, not a Settings draft. Merge the
+ * relational inventory into the settings payload so refreshes never turn a
+ * room repaired by Maintenance back into a stale clean/non-rentable value. */
+function mergeLiveRoomState(value: unknown, liveRooms: LiveRoomState[]) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const settings = value as Record<string, unknown>;
+  if (!Array.isArray(settings.rooms)) return value;
+  const byNumber = new Map(liveRooms.map((room) => [room.number, room]));
+  return {
+    ...settings,
+    rooms: settings.rooms.map((room) => {
+      if (!room || typeof room !== "object" || Array.isArray(room)) return room;
+      const configured = room as Record<string, unknown>;
+      const live = typeof configured.number === "string" ? byNumber.get(configured.number) : undefined;
+      if (!live) return room;
+      return {
+        ...configured,
+        housekeepingStatus: live.cleanlinessStatus === "clean" ? "clean" : "dirty",
+        serviceStatus: live.serviceStatus === "non-rentable" ? "non-rentable" : "rentable",
+      };
+    }),
+  };
+}
+
 async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: string, value: Record<string, unknown>) {
   const configuredTypes = Array.isArray(value.roomTypes) ? value.roomTypes as ConfiguredRoomType[] : [];
   const configuredRooms = Array.isArray(value.rooms) ? value.rooms as ConfiguredRoom[] : [];
@@ -33,7 +59,7 @@ async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: st
     await tx`
       insert into rooms (property_id,room_type_id,number,floor,section,cleanliness_status,service_status,smoking_allowed,active,map_data)
       values (${propertyId}::uuid,${typeIds.get(room.roomTypeId)!}::uuid,${room.number.trim()},${String(room.floor ?? 1)},${room.buildingId || null},${room.housekeepingStatus || "clean"},${room.serviceStatus === "non-rentable" ? "non-rentable" : "rentable"},${Boolean(room.smokingAllowed)},true,${tx.json({ mapColumn: room.mapColumn, mapRow: room.mapRow, mapWidth: room.mapWidth, mapHeight: room.mapHeight })})
-      on conflict (property_id,number) do update set room_type_id=excluded.room_type_id,floor=excluded.floor,section=excluded.section,cleanliness_status=excluded.cleanliness_status,service_status=excluded.service_status,smoking_allowed=excluded.smoking_allowed,map_data=excluded.map_data,updated_at=now()
+      on conflict (property_id,number) do update set room_type_id=excluded.room_type_id,floor=excluded.floor,section=excluded.section,smoking_allowed=excluded.smoking_allowed,map_data=excluded.map_data,updated_at=now()
     `;
   }
   // Settings-created employees do not necessarily have login memberships, but
@@ -79,7 +105,11 @@ export async function GET(request: Request) {
             where property_id=${session.propertyId}::uuid and key='application_settings'
           `;
         }
-        return Response.json({ settings: storedSettings });
+        const liveRooms = await productionSql()<LiveRoomState[]>`
+          select number,cleanliness_status as "cleanlinessStatus",service_status as "serviceStatus"
+          from rooms where property_id=${session.propertyId}::uuid
+        `;
+        return Response.json({ settings: mergeLiveRoomState(storedSettings, liveRooms) });
       }
 
       // Properties created before application_settings was introduced already

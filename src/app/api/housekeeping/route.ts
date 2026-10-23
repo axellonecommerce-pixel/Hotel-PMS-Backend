@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { recordChange } from "@/server/realtime/change-events";
 
 const querySchema = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) });
 const updateSchema = z.object({
@@ -9,7 +10,9 @@ const updateSchema = z.object({
   updates: z.array(z.object({
     roomNumber: z.string().trim().min(1),
     status: z.enum(["Unassigned", "Assigned", "Cleaning", "Clean", "Maintenance Issue"]),
-    assignedHousekeeper: z.string().trim().min(1).nullable().optional(),
+    // Older clients can submit an empty selection when a room is unassigned.
+    // Normalize it instead of rejecting the entire housekeeping batch.
+    assignedHousekeeper: z.preprocess((value) => typeof value === "string" && !value.trim() ? null : value, z.string().trim().min(1).nullable().optional()),
   })).min(1),
 });
 
@@ -73,6 +76,15 @@ export async function PUT(request: Request) {
         `;
         await tx`update rooms set cleanliness_status=${state.cleanliness}, updated_at=now() where id=${room.id}::uuid`;
       }
+    });
+    await recordChange({
+      propertyId: session.propertyId,
+      actorAuthUserId: session.authUserId,
+      entityType: "settings",
+      entityId: session.propertyId,
+      action: "updated",
+      entityVersion: Math.floor(Date.now() / 1000),
+      payload: { source: "housekeeping" },
     });
     return GET(new Request(`${new URL(request.url).origin}${new URL(request.url).pathname}?date=${parsed.data.serviceDate}`, { headers: request.headers }));
   } catch (error) { return propertyAccessResponse(error); }

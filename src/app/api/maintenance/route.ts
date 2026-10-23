@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { recordChange } from "@/server/realtime/change-events";
 
 const orderSchema = z.object({
   roomNumber: z.string().trim().min(1),
@@ -93,6 +94,15 @@ export async function POST(request: Request) {
       return created;
     });
     if (!workOrder) return Response.json({ error: "The selected room no longer exists." }, { status: 404 });
+    await recordChange({
+      propertyId: session.propertyId,
+      actorAuthUserId: session.authUserId,
+      entityType: "settings",
+      entityId: session.propertyId,
+      action: "updated",
+      entityVersion: Math.floor(Date.now() / 1000),
+      payload: { source: "maintenance" },
+    });
     return Response.json({ workOrder: toClient(workOrder) }, { status: 201 });
   } catch (error) { return propertyAccessResponse(error); }
 }
@@ -138,6 +148,15 @@ export async function PATCH(request: Request) {
     });
     if (updated === "invalid-date") return Response.json({ error: "Choose a later block end date." }, { status: 400 });
     if (!updated) return Response.json({ error: "Maintenance issue not found." }, { status: 404 });
+    await recordChange({
+      propertyId: session.propertyId,
+      actorAuthUserId: session.authUserId,
+      entityType: "settings",
+      entityId: session.propertyId,
+      action: "updated",
+      entityVersion: Math.floor(Date.now() / 1000),
+      payload: { source: "maintenance" },
+    });
     return Response.json({ workOrder: toClient(updated) });
   } catch (error) { return propertyAccessResponse(error); }
 }
