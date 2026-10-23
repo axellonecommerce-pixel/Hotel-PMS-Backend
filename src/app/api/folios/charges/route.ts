@@ -5,14 +5,22 @@ import { productionSql } from "@/server/db/production";
 import { postProductionLedger } from "@/server/finance/production-finance";
 
 const createSchema = z.object({
-  folioId: z.string().uuid(),
+  // Older clients hold a display folio label and a configured charge-type
+  // name, while production records use UUIDs. Accept either trusted handle
+  // and resolve it within the authenticated property below.
+  folioId: z.string().uuid().optional(),
+  reservationId: z.string().uuid().optional(),
   reservationRoomId: z.string().uuid().nullable().optional(),
-  chargeTypeId: z.string().uuid(),
+  chargeTypeId: z.string().uuid().optional(),
+  chargeTypeName: z.string().trim().min(1).max(200).optional(),
   description: z.string().trim().min(1),
   serviceDate: z.string().date(),
   amountCents: z.number().int().positive(),
   taxOverrideCents: z.number().int().nonnegative().optional(),
   taxOverrideReason: z.string().trim().min(1).optional(),
+}).superRefine((value, context) => {
+  if (!value.folioId && !value.reservationId) context.addIssue({ code: "custom", message: "A folio or reservation is required." });
+  if (!value.chargeTypeId && !value.chargeTypeName) context.addIssue({ code: "custom", message: "A charge type is required." });
 });
 
 const editSchema = z.object({
@@ -51,16 +59,20 @@ export async function POST(request: Request) {
     if (!parsed.success) return Response.json({ error: "Charge details are invalid." }, { status: 400 });
     const input = parsed.data;
     const charge = await productionSql().begin(async (tx) => {
-      const [context] = await tx<Array<ChargeContext>>`
+      const [context] = await tx<Array<ChargeContext & { folioId: string }>>`
         select r.id as "reservationId", r.tax_rate_basis_points as "taxRateBasisPoints",
           r.tax_exempt as "taxExempt", ct.name as "typeName",
-          ct.revenue_category as "revenueCategory", ct.taxable
+          ct.revenue_category as "revenueCategory", ct.taxable,f.id as "folioId"
         from folios f
         join reservations r on r.id = f.reservation_id and r.property_id = f.property_id
-        join charge_types ct on ct.id = ${input.chargeTypeId}::uuid and ct.property_id = f.property_id
-        where f.id = ${input.folioId}::uuid and f.property_id = ${session.propertyId}::uuid
+        join charge_types ct on ct.property_id = f.property_id
+          and (${input.chargeTypeId ?? null}::uuid is null or ct.id = ${input.chargeTypeId ?? null}::uuid)
+          and (${input.chargeTypeName ?? null}::text is null or ct.name = ${input.chargeTypeName ?? null})
+        where f.property_id = ${session.propertyId}::uuid
+          and (${input.folioId ?? null}::uuid is null or f.id = ${input.folioId ?? null}::uuid)
+          and (${input.reservationId ?? null}::uuid is null or f.reservation_id = ${input.reservationId ?? null}::uuid)
           and f.status <> 'closed' and ct.active = true
-        for update of f
+        order by f.created_at limit 1 for update of f
       `;
       if (!context) throw new Error("The folio or charge type is unavailable.");
       const taxCents = taxAmount(context, input.amountCents, input.taxOverrideCents, input.taxOverrideReason);
@@ -69,7 +81,7 @@ export async function POST(request: Request) {
           property_id, folio_id, reservation_room_id, type, description,
           service_date, amount_cents, taxable, status
         ) values (
-          ${session.propertyId}::uuid, ${input.folioId}::uuid,
+          ${session.propertyId}::uuid, ${context.folioId}::uuid,
           ${input.reservationRoomId ?? null}::uuid, ${context.typeName}, ${input.description},
           ${input.serviceDate}::date, ${input.amountCents}, ${context.taxable && !context.taxExempt}, 'posted'
         ) returning id
@@ -88,11 +100,36 @@ export async function POST(request: Request) {
         propertyId: session.propertyId, businessDate: input.serviceDate, resourceType: "charge-tax", resourceId: created.id,
         description: `${input.description} tax`, debitAccount: "Guest Receivable", creditAccount: "Tax Payable", amountCents: taxCents,
       });
-      return { id: created.id, ...input, type: context.typeName, taxable: context.taxable && !context.taxExempt, taxCents, totalCents: input.amountCents + taxCents };
+      const [balance] = await tx<Array<{ balanceCents: number }>>`
+        select (
+          coalesce((select sum(c.amount_cents + coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios all_folios on all_folios.id=c.folio_id where all_folios.reservation_id=${context.reservationId}::uuid and c.status='posted'),0)
+          - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios all_folios on all_folios.id=pa.folio_id where all_folios.reservation_id=${context.reservationId}::uuid),0)
+        )::int as "balanceCents"
+      `;
+      return { id: created.id, folioId: context.folioId, reservationRoomId: input.reservationRoomId ?? null, description: input.description, amountCents: input.amountCents, type: context.typeName, taxable: context.taxable && !context.taxExempt, taxCents, totalCents: input.amountCents + taxCents, balanceCents: balance?.balanceCents ?? input.amountCents + taxCents };
     });
     return Response.json({ charge }, { status: 201 });
   } catch (error) {
     if (error instanceof Error && /folio|tax|charge type/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    return propertyAccessResponse(error);
+  }
+}
+
+export async function GET(request: Request) {
+  try {
+    const session = await requirePropertySession(request, "folios.manage");
+    const reservationId = new URL(request.url).searchParams.get("reservationId");
+    if (!reservationId || !z.string().uuid().safeParse(reservationId).success) return Response.json({ error: "A reservation is required." }, { status: 400 });
+    const charges = await productionSql()<Array<{ id: string; folioId: string; description: string; amountCents: number; type: string; taxCents: number }>>`
+      select c.id,c.folio_id as "folioId",c.description,c.amount_cents as "amountCents",c.type,
+        coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)::int as "taxCents"
+      from charges c join folios f on f.id=c.folio_id
+      where c.property_id=${session.propertyId}::uuid and f.reservation_id=${reservationId}::uuid
+        and c.status='posted' and c.type <> 'Room Rent'
+      order by c.service_date,c.created_at
+    `;
+    return Response.json({ charges: charges.map((charge) => ({ ...charge, totalCents: charge.amountCents + charge.taxCents })) });
+  } catch (error) {
     return propertyAccessResponse(error);
   }
 }
