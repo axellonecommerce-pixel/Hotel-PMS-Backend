@@ -79,6 +79,17 @@ export async function POST(request: Request) {
         values (${session.propertyId}::uuid,${room.id}::uuid,${parsed.data.note},${parsed.data.priority.toLowerCase()},${parsed.data.assignedWorker ?? null},${parsed.data.costCents},${!parsed.data.blockRoom},'open',${tx.json({ additionalNotes: parsed.data.notes, attachmentNames: parsed.data.attachmentNames ?? [], blockReason: parsed.data.blockReason, blockFrom: parsed.data.blockFrom, blockTo: parsed.data.blockTo })}::text)
         returning id,(select number from rooms where id=room_id) as "roomNumber",problem as note,initcap(priority) as priority,assigned_worker as "assignedWorker",cost_cents as "costCents",rentable,status,notes,created_at as "createdAt",completed_at as "completedAt",returned_to_service_at as "returnedToServiceAt"
       `;
+      // A non-rentable maintenance issue is an inventory change, not only a
+      // work-order label. Keep the durable room record in sync so every
+      // inventory consumer (availability, housekeeping, and the floor map)
+      // reports the same state after a refresh.
+      if (parsed.data.blockRoom) {
+        await tx`
+          update rooms
+          set service_status='non-rentable', updated_at=now()
+          where id=${room.id}::uuid
+        `;
+      }
       return created;
     });
     if (!workOrder) return Response.json({ error: "The selected room no longer exists." }, { status: 404 });
@@ -113,6 +124,16 @@ export async function PATCH(request: Request) {
         where id=${existing.id}::uuid
         returning id,(select number from rooms where id=room_id) as "roomNumber",problem as note,initcap(priority) as priority,assigned_worker as "assignedWorker",cost_cents as "costCents",rentable,status,notes,created_at as "createdAt",completed_at as "completedAt",returned_to_service_at as "returnedToServiceAt"
       `;
+      // "Make Available" is the controlled return-to-service action. A
+      // repaired room becomes rentable but dirty, so it cannot be treated as
+      // guest-ready until Housekeeping completes the clean.
+      if (parsed.data.action === "unblock") {
+        await tx`
+          update rooms
+          set service_status='rentable', cleanliness_status='dirty', updated_at=now()
+          where property_id=${session.propertyId}::uuid and number=${existing.roomNumber}
+        `;
+      }
       return row;
     });
     if (updated === "invalid-date") return Response.json({ error: "Choose a later block end date." }, { status: 400 });
