@@ -77,7 +77,7 @@ Representative groups: `/auth`, `/property`, `/users`, `/guests`, `/reservations
 
 ## 8. Jobs and retention
 
-- Scheduler: automatic Night Audit, seven-day overdue reminders, ID-image deletion warning, one-year ID-image deletion, recurring expense generation, and export cleanup.
+- Scheduler: automatic Night Audit, seven-day overdue reminders, ID-image deletion warning, one-year ID-image deletion, recurring expense generation, and export cleanup. A configured property-local Night Audit time is persisted as property data; the UI must describe it as a service window unless the deployed scheduler supports exact per-property execution.
 - Jobs are idempotent, property-timezone aware, retryable, and observable.
 - ID image deletion removes object storage content and active references while retaining guest/stay data. Backups must respect deletion tombstones.
 - Closed business days cannot reopen; corrections occur through current-day adjusting transactions where applicable.

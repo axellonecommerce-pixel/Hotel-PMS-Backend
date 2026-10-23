@@ -99,6 +99,7 @@ erDiagram
 - `payroll_periods`, `payroll_lines`, `piecework_items`, `payroll_payments`.
 - `vendors`, `expense_categories`, `expenses`, `recurring_expense_rules`.
 - `business_days`: property/date/status, opened/closed times; unique property/date.
+- `reservations`: current lifecycle status, arrival/departure, processing timestamp, and structured lifecycle events in notes. Current No Show & Late Cancel reporting filters durable cancelled/no-show status by its lifecycle update timestamp; reinstated records become active again.
 - `cash_shifts`: business day, employee, opening/expected/counted/float/status.
 - `cash_transactions`: payment/refund/expense/manual supported ledger link.
 - `cash_drops`: shift/drop amount/time. Over/short derives from ledger and count; no manual over/short columns.
@@ -107,7 +108,7 @@ erDiagram
 
 - `notifications`: property, recipient role/user, type, related resource, read/resolved timestamps.
 - `scheduled_jobs`: idempotency key, property, job type, scheduled/run state, attempts/error.
-- `saved_reports`: owner, filters, columns, grouping, visibility.
+- `saved_reports`: owner, filters, columns, grouping, visibility. Standard lifecycle reports are read-only tenant-scoped projections; occupancy reads durable room assignments plus current room service/cleanliness state; Final Audit combines ledger entries, payments/refunds, cash drops, reservations, and Night Audit records without changing them.
 - `backup_jobs` and `restore_jobs`: manifest version, state, file reference, validation result.
 - `import_jobs` and `import_errors`: guest CSV/XLSX processing and row errors.
 

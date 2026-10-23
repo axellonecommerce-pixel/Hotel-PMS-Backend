@@ -43,8 +43,8 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     const reservationId = await routeParams(context);
     const input = parsed.data;
     const result = await productionSql().begin(async (tx) => {
-      const [reservation] = await tx<Array<{ id: string; version: number; status: string; notes: string | null }>>`
-        select id,version,status,notes from reservations
+      const [reservation] = await tx<Array<{ id: string; version: number; status: string; notes: string | null; arrivalDate: string }>>`
+        select id,version,status,notes,arrival_date::text as "arrivalDate" from reservations
         where id=${reservationId}::uuid and property_id=${session.propertyId}::uuid
         for update
       `;
@@ -53,6 +53,20 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         return { error: "Another employee changed this reservation. Review the latest version before saving.", httpStatus: 409, code: "EDIT_CONFLICT", currentVersion: reservation.version } as const;
       }
       if (reservation.status !== "reserved") return { error: "Only a reserved stay can be cancelled or marked No Show.", httpStatus: 409 } as const;
+
+      // A no-show is a same-business-day arrival outcome. Future and past
+      // reservations must be handled through their appropriate workflow, not
+      // silently released as a no-show from an arbitrary date.
+      if (input.action === "no-show") {
+        const [openDay] = await tx<Array<{ businessDate: string }>>`
+          select business_date::text as "businessDate" from business_days
+          where property_id=${session.propertyId}::uuid and status='open'
+          order by business_date limit 1
+        `;
+        if (!openDay || reservation.arrivalDate !== openDay.businessDate) {
+          return { error: "A reservation can be marked No Show only on its current business-day arrival date.", httpStatus: 409 } as const;
+        }
+      }
 
       const rooms = await tx<Array<{ id: string }>>`
         select id from reservation_rooms

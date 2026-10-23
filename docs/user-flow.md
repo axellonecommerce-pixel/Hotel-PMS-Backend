@@ -31,7 +31,7 @@ flowchart TD
 flowchart TD
   A[Reserved stay] --> B{Release reason}
   B -->|Cancelled| C[Release inventory and optionally post cancellation fee]
-  B -->|No Show| D[Release inventory and optionally post no-show fee]
+  B -->|No Show on current business date| D[Release inventory and optionally post no-show fee]
   C --> E[Staff chooses Reinstate Reservation]
   D --> E
   E --> F[Check assigned rooms and room-type inventory]
@@ -156,9 +156,9 @@ flowchart TD
   B --> C{Blocking issue?}
   C -->|Yes| D[Stop audit and create in-app alert]
   D --> E[Staff resolves issue and reruns]
-  C -->|No| F[Finalize business date]
-  F --> G[Lock date permanently]
-  G --> H[Generate final reports and open next day]
+  C -->|No| F[Mark remaining same-day arrivals No Show]
+  F --> G[Finalize and lock business date permanently]
+  G --> H[Generate Final Audit control summary and open next day]
 ```
 
 ## 9. Guest merge and ID retention

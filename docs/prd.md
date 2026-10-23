@@ -53,7 +53,7 @@ The first release is employee-only. It supports many hotels, but one owner accou
 - **FR-RES-005:** On partial company checkout, room charges transfer toward one group company invoice. The invoice is created only after all group rooms check out.
 - **FR-RES-006:** Staff may change room or room type only after entering a remark. They choose whether to retain or replace the rate. The prior room becomes vacant/available and dirty. A dirty available destination is allowed after a warning; out-of-order rooms are blocked.
 - **FR-RES-007:** All moves appear in a date-filtered Room Move Report.
-- **FR-RES-008:** Early check-in, cancellation fee, late checkout, and no-show fee are supported. Marking No Show releases inventory immediately. Staff may reinstate a cancelled or No Show reservation after the system confirms that the assigned room and room-type inventory are still available; reinstatement restores the stay charges and group-room reservation statuses.
+- **FR-RES-008:** Early check-in, cancellation fee, late checkout, and no-show fee are supported. A No Show may be marked only for a reservation arriving on the current business date; it releases inventory immediately. Staff may reinstate a cancelled or No Show reservation after the system confirms that the assigned room and room-type inventory are still available; reinstatement restores the stay charges and group-room reservation statuses.
 - **FR-RES-009:** Online/OTA bookings are entered manually. Payment status supports Guest Pays Hotel, Paid Online, and Virtual Card Pending.
 
 ### 3.4 Rates, promotions, taxes, and charges
@@ -108,11 +108,11 @@ The first release is employee-only. It supports many hotels, but one owner accou
 
 ### 3.10 Night Audit, revenue, reports, notifications
 
-- **FR-AUD-001:** Night Audit may run manually or at a hotel-configured time. It stops for unpaid departures, unresolved deposits, open shifts, or other blocking issues. Closed days cannot reopen. Failed automatic runs notify owner/manager in-app.
+- **FR-AUD-001:** Night Audit may run manually or at a hotel-configured time. It stops for unpaid departures, unresolved deposits, open shifts, or other blocking issues. Before it advances the business day, any unprocessed arrival for that business date becomes a No Show. Closed days cannot reopen. Failed automatic runs notify owner/manager in-app. The deployed scheduler must not promise exact property-local timing unless its infrastructure can deliver it.
 - **FR-REV-001:** Taxes and refundable deposits are liabilities, not revenue. Charged deposit deductions become the configured revenue/charge type. Refunds reduce revenue on refund date; BAD DEBT is a separate loss; OTA commissions are expenses.
-- **FR-REV-002:** Show Gross Revenue and Net Revenue. ADR counts all sold rooms, including a zero-rate room. Show occupancy and RevPAR both including and excluding out-of-order rooms.
+- **FR-REV-002:** Show Gross Revenue and Net Revenue. ADR counts all sold rooms, including a zero-rate room and same-day/day-use rooms. Day use contributes to rooms sold and occupancy without reducing overnight availability. Show occupancy and RevPAR both including and excluding out-of-order rooms.
 - **FR-RPT-001:** Every report supports custom dates, print, PDF, and Excel. Financial reports support prior-period comparison and drill-down.
-- **FR-RPT-002:** Hotels build and save custom reports/columns. Required standard reports include revenue/metrics, room moves, occupancy, cash drops, expenses, payroll, housekeeping productivity, maintenance, guest/stay, folios, company A/R, refunds, bad debt, and Night Audit.
+- **FR-RPT-002:** Hotels build and save custom reports/columns. Required standard reports include revenue/metrics, room moves, occupancy, No Show & Late Cancel, cash drops, expenses, payroll, housekeeping productivity, maintenance, guest/stay, folios, company A/R, refunds, bad debt, Night Audit, and a Final Audit control summary. The Final Audit summary combines durable ledger, payment, cash-drop, occupancy, and business-day data, and must never certify an unrun or blocked Night Audit as closed. Reports must read tenant-scoped persisted records when the PMS API is connected.
 - **FR-NOT-001:** One notification center contains overdue invoices, upcoming ID-image deletion, Night Audit failures, and operational alerts. Items remain until read or resolved.
 - **FR-SRC-001:** Global search finds guests, reservations, rooms, companies, folios, and invoices.
 

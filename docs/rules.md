@@ -37,6 +37,8 @@ These rules apply to humans, AI coding tools, both repositories, database work, 
 - Per-room deposits must resolve before that room checks out.
 - Calculate cash Over/Short; never accept it as manual input.
 - Closed Night Audit days cannot reopen.
+- A manual No Show is valid only for a Reserved arrival on the current property business date. Night Audit converts any remaining same-day Reserved arrivals to No Show before closing the date.
+- Same-day/day-use sales count as rooms sold but never remove overnight inventory availability.
 - Preserve accepted rules version with signed registration records.
 - Delete ID images at one year after seven-day warning; retain guest/stay data.
 

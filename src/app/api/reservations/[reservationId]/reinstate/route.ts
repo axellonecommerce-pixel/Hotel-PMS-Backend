@@ -55,7 +55,10 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       if (reservation.version !== parsed.data.expectedVersion) return { error: "Another employee changed this reservation. Review the latest version before saving.", httpStatus: 409 } as const;
       if (reservation.status !== "no_show" && reservation.status !== "cancelled") return { error: "Only cancelled or no-show stays can be reinstated.", httpStatus: 409 } as const;
       const release = priorRelease(reservation.notes);
-      if (!release?.roomRentCharges?.length || !release.nightlyRates?.length) return { error: "This older released reservation does not have enough pricing history to reinstate safely.", httpStatus: 409 } as const;
+      // A zero-rate or same-day reservation can legitimately have no posted
+      // room-rent charge. Its durable nightly-rate history is still enough to
+      // restore inventory safely; non-zero charges are restored when present.
+      if (!release?.nightlyRates?.length) return { error: "This older released reservation does not have enough pricing history to reinstate safely.", httpStatus: 409 } as const;
 
       const rooms = await tx<Array<{ id: string; roomId: string; number: string; serviceStatus: string }>>`
         select rr.id,r.id as "roomId",r.number,r.service_status as "serviceStatus"
@@ -74,14 +77,17 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       `;
       if (conflicts.length) return { error: "A previously assigned room is no longer available for these dates.", httpStatus: 409 } as const;
 
-      const chargeIds = release.roomRentCharges.map((charge) => charge.id);
-      const existingCharges = await tx<Array<{ id: string }>>`
-        select id from charges where property_id=${session.propertyId}::uuid
-          and id in ${tx(chargeIds)} and status='voided' for update
-      `;
-      if (existingCharges.length !== chargeIds.length) return { error: "The original room-rent audit trail has changed and cannot be reinstated automatically.", httpStatus: 409 } as const;
-      await tx`update charges set status='posted',updated_at=now() where property_id=${session.propertyId}::uuid and id in ${tx(chargeIds)}`;
-      for (const charge of release.roomRentCharges) {
+      const chargeIds = release.roomRentCharges ?? [];
+      const chargeIdValues = chargeIds.map((charge) => charge.id);
+      const existingCharges = chargeIdValues.length
+        ? await tx<Array<{ id: string }>>`
+          select id from charges where property_id=${session.propertyId}::uuid
+            and id in ${tx(chargeIdValues)} and status='voided' for update
+        `
+        : [];
+      if (existingCharges.length !== chargeIdValues.length) return { error: "The original room-rent audit trail has changed and cannot be reinstated automatically.", httpStatus: 409 } as const;
+      if (chargeIdValues.length) await tx`update charges set status='posted',updated_at=now() where property_id=${session.propertyId}::uuid and id in ${tx(chargeIdValues)}`;
+      for (const charge of chargeIds) {
         if (charge.amountCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: new Date().toISOString().slice(0, 10), resourceType: "reservation-reinstatement", resourceId: reservation.id, description: `Reinstated room rent · ${charge.serviceDate}`, debitAccount: "Guest Receivable", creditAccount: "Room Revenue", amountCents: charge.amountCents });
         if (charge.taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: new Date().toISOString().slice(0, 10), resourceType: "reservation-reinstatement-tax", resourceId: reservation.id, description: `Reinstated room tax · ${charge.serviceDate}`, debitAccount: "Guest Receivable", creditAccount: "Tax Payable", amountCents: charge.taxCents });
       }

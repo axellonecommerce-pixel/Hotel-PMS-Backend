@@ -4,14 +4,32 @@ import { postProductionLedger } from "@/server/finance/production-finance";
 
 type Tx = TransactionSql<Record<string, never>>;
 
+type ReleasedCharge = { id: string; serviceDate: string; amountCents: number; taxCents: number };
+type ReleasedNightlyRate = { reservationRoomId: string; stayDate: string; baseRateCents: number; discountCents: number; finalRateCents: number };
+
+function addNightAuditNoShowMetadata(
+  notes: string | null,
+  event: { roomRentCharges: ReleasedCharge[]; nightlyRates: ReleasedNightlyRate[]; at: string },
+) {
+  try {
+    const parsed = notes ? JSON.parse(notes) as unknown : {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    const current = parsed as Record<string, unknown>;
+    const events = Array.isArray(current.lifecycleEvents) ? current.lifecycleEvents : [];
+    return JSON.stringify({ ...current, lifecycleEvents: [...events, { action: "no-show", source: "night-audit", ...event }].slice(-20) });
+  } catch {
+    return `${notes?.trim() ?? ""}${notes?.trim() ? "\n" : ""}no-show by night audit on ${event.at}.`;
+  }
+}
+
 /**
  * A no-show is a financial release, not only an operational status. Keep the
  * original room-rent charges for audit, remove them from the active folio,
  * and post the matching reversal before the business day is closed.
  */
 async function releaseUnarrivedReservations(tx: Tx, propertyId: string, businessDate: string) {
-  const reservations = await tx<Array<{ id: string }>>`
-    select id from reservations
+  const reservations = await tx<Array<{ id: string; notes: string | null }>>`
+    select id,notes from reservations
     where property_id=${propertyId}::uuid and status='reserved'
       and arrival_date=${businessDate}::date
     for update
@@ -32,6 +50,13 @@ async function releaseUnarrivedReservations(tx: Tx, propertyId: string, business
         and c.type='Room Rent' and c.status='posted'
       for update of c
     `;
+    const nightlyRates = rooms.length ? await tx<ReleasedNightlyRate[]>`
+      select reservation_room_id as "reservationRoomId",stay_date::text as "stayDate",
+        base_rate_cents as "baseRateCents",discount_cents as "discountCents",final_rate_cents as "finalRateCents"
+      from nightly_rates
+      where property_id=${propertyId}::uuid and reservation_room_id in ${tx(rooms.map((room) => room.id))}
+      for update
+    ` : [];
     if (roomRentCharges.length) {
       await tx`
         update charges set status='voided',updated_at=now()
@@ -71,7 +96,7 @@ async function releaseUnarrivedReservations(tx: Tx, propertyId: string, business
       where reservation_id=${reservation.id}::uuid and property_id=${propertyId}::uuid
     `;
     await tx`
-      update reservations set status='no_show',version=version+1,updated_at=now()
+      update reservations set status='no_show',notes=${addNightAuditNoShowMetadata(reservation.notes, { roomRentCharges, nightlyRates, at: new Date().toISOString() })},version=version+1,updated_at=now()
       where id=${reservation.id}::uuid and property_id=${propertyId}::uuid
     `;
   }
