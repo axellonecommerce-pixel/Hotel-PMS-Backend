@@ -214,18 +214,23 @@ export async function POST(request: Request) {
       if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
       const row = manual.data.guest;
       const result = await productionSql().begin(async (tx) => {
+        const notes = row.notes?.trim() || null;
         const address = {
           addressLine1: row.addressLine1 ?? "", city: row.city ?? "", state: row.state ?? "",
           postalCode: row.postalCode ?? "", country: row.country ?? "", countryCode: row.countryCode ?? "",
         };
         if (row.idType && row.idNumber?.trim()) {
           const idNumber = normalizedId(row.idNumber);
-          const [existing] = await tx<Array<{ guestId: string }>>`
-            select guest_id as "guestId" from guest_identities
-            where property_id=${session.propertyId}::uuid and id_type=${row.idType} and normalized_id_number=${idNumber} and deleted_at is null
-            limit 1
+          const [existing] = await tx<Array<{ guestId: string; guestStatus: string }>>`
+            select gi.guest_id as "guestId",g.guest_status as "guestStatus"
+            from guest_identities gi join guests g on g.id=gi.guest_id
+            where gi.property_id=${session.propertyId}::uuid and gi.id_type=${row.idType} and gi.normalized_id_number=${idNumber} and gi.deleted_at is null
+            for update
           `;
-          if (existing) return { duplicateGuestId: existing.guestId };
+          if (existing) {
+            await tx`update guests set first_name=${row.firstName},last_name=${row.lastName},phone=${row.phone?.replace(/\D/g, "") || null},email=${row.email || null},address=${tx.json(address)},remarks=case when ${notes} is null then remarks else ${notes} end,guest_status=${existing.guestStatus === "do_not_rent" ? "do_not_rent" : storedStatus(row.status ?? "New")},room_preferences=${tx.json({ dateOfBirth: row.dateOfBirth, idExpires: row.idExpires })},updated_at=now() where id=${existing.guestId}::uuid and property_id=${session.propertyId}::uuid`;
+            return { guestId: existing.guestId, merged: true };
+          }
         }
         const [guest] = await tx<Array<{ id: string }>>`
           insert into guests (property_id,first_name,last_name,phone,email,address,remarks,guest_status,room_preferences)
@@ -237,8 +242,7 @@ export async function POST(request: Request) {
         }
         return { guestId: guest.id };
       });
-      if ("duplicateGuestId" in result) return Response.json({ error: "A guest with this ID is already on file.", guestId: result.duplicateGuestId }, { status: 409 });
-      return Response.json(result, { status: 201 });
+      return Response.json(result, { status: result.merged ? 200 : 201 });
     }
     const parsed = importSchema.safeParse(body);
     if (!parsed.success) return Response.json({ error: "Guest import rows are invalid." }, { status: 400 });
