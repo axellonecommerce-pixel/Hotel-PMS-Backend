@@ -144,6 +144,7 @@ const payloadSchema = z.object({
   servicePetCount: z.number().int().nonnegative().default(0),
   rateCode: z.string().trim().min(1),
   nightlyRatesCents: z.array(z.number().int().nonnegative()).min(1),
+  fixedRateCents: z.number().int().nonnegative().optional(),
   promotionIds: z.array(z.string().trim().min(1)).default([]),
   taxRatePercentage: z.number().nonnegative().max(100),
   taxExempt: z.boolean().default(false),
@@ -277,7 +278,12 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
   const existingPreferences = identity?.roomPreferences && typeof identity.roomPreferences === "object" && !Array.isArray(identity.roomPreferences)
     ? identity.roomPreferences as Record<string, unknown>
     : {};
-  const guestPreferences = { ...existingPreferences, dateOfBirth: payload.dateOfBirth, idExpires: payload.idExpires };
+  const guestPreferences = {
+    ...existingPreferences,
+    dateOfBirth: payload.dateOfBirth,
+    idExpires: payload.idExpires,
+    ...(payload.fixedRateCents !== undefined ? { fixedRateCents: payload.fixedRateCents } : {}),
+  };
   if (guestId) await tx`update guests set first_name=${payload.firstName},last_name=${payload.lastName},phone=${normalizePhone(payload.phone)},email=${payload.email || null},address=${tx.json(address)},room_preferences=${tx.json(guestPreferences)},updated_at=now() where id=${guestId}::uuid`;
   else {
     const [guest] = await tx<Array<{ id: string }>>`insert into guests (property_id,first_name,last_name,phone,email,address,guest_status,room_preferences) values (${session.propertyId}::uuid,${payload.firstName},${payload.lastName},${normalizePhone(payload.phone)},${payload.email || null},${tx.json(address)},'active',${tx.json(guestPreferences)}) returning id`;
