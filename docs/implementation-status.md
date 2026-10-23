@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 21 |
-| Verified production path | 44 |
+| Verified demo | 19 |
+| Verified production path | 46 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -39,7 +39,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-GST-006 | Verified production path | Extra guests are created or reused as tenant-scoped guest profiles, then durably attached through `reservation_guests`. They can be removed from a stay without deleting the reusable guest profile. Reservation reads, realtime refresh, and printed stay documents reload the persisted guest list after a browser refresh. |
 | FR-RES-001 | Verified production path | The tenant-scoped Availability API reads configured active room types and rate rules, durable rentable rooms, overlapping reservations, and maintenance blocks to return every room type (including zero inventory) with authoritative rates, tax, and bookable room numbers. Reservation creation repeats the overlap and rentable-room check inside its PostgreSQL transaction. |
 | FR-RES-002 | Verified demo | Multi-room/group reservation state and combined folio behavior exist. |
-| FR-RES-003 | Verified demo | Individual and bulk room checkout controls exist with room-attributed charges. |
+| FR-RES-003 | Verified production path | Individual and bulk room checkout controls call the tenant checkout transaction for their selected checked-in rooms; it locks the room assignments, preserves room-attributed charges, marks physical rooms dirty, and publishes a reservation refresh event. |
 | FR-RES-004 | Verified production path | The checkout API locks the reservation and selected rooms, validates deposits and balances, creates room folios with locked numbering, moves each room’s charges and linked tax, checks out rooms, and marks physical rooms dirty in one transaction. |
 | FR-RES-005 | Verified production path | Company group checkout waits for every room, then transactionally creates exactly one draft company invoice containing all group folio charges and tax. |
 | FR-RES-006 | Verified production path | The room-move API locks the reservation and both room assignments, blocks non-rentable or occupied destinations, stores the move reason and rate decision, updates the active reservation room/type, marks the vacated physical room dirty, and returns the complete posted-charge balance in one transaction. |
@@ -57,7 +57,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-FOL-004 | Verified demo | Sent documents remain editable and resend updates sent state/date. |
 | FR-FOL-005 | Verified demo | Folio/invoice/registration print layouts include hotel, stay, guest, and breakdown details. |
 | FR-FOL-006 | Verified production path | Registration-rule edits create versioned records and each acceptance stores the exact rule version and immutable accepted content snapshot. |
-| FR-CHK-001 | Verified demo | Zero-balance, direct-bill, and deposit-settlement checkout rules exist. |
+| FR-CHK-001 | Verified production path | Checkout rejects unsettled deposits and non-company folio balances, permits company direct-bill transfer, and updates checkout/dirty-room state atomically. |
 | FR-PAY-001 | Verified production path | Tenant-scoped payment operations persist collection, allocation, deletion, and refund records; the server rejects a collection greater than the authoritative folio balance. |
 | FR-PAY-002 | Verified demo | Optional card metadata is supported without full card/CVV persistence. |
 | FR-PAY-003 | Verified production path | Refunds are durable records, reduce the allocated folio amount, and cannot exceed the unrefunded payment; deletion removes the tenant-owned payment, allocation, and refund records together. |

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { allocateProductionDocumentNumber } from "@/server/finance/production-finance";
+import { recordChange } from "@/server/realtime/change-events";
 
 const checkoutSchema = z.object({
   reservationId: z.string().uuid(),
@@ -128,6 +129,15 @@ export async function POST(request: Request) {
         }
       }
       return { checkedOutRoomIds: input.reservationRoomIds, reservationCheckedOut: remaining.count === 0, invoiceId };
+    });
+    await recordChange({
+      propertyId: session.propertyId,
+      actorAuthUserId: session.authUserId,
+      entityType: "reservation",
+      entityId: input.reservationId,
+      action: "updated",
+      entityVersion: Date.now(),
+      payload: { change: "checkout", checkedOutRoomIds: result.checkedOutRoomIds },
     });
     return Response.json(result);
   } catch (error) {
