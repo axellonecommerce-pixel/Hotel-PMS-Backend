@@ -33,7 +33,21 @@ export async function GET(request: Request) {
         from expenses e left join vendors v on v.id=e.vendor_id
         where e.property_id=${session.propertyId}::uuid order by e.expense_date desc,e.created_at desc
       `;
-      return Response.json({ expenses: records.map((record) => ({ ...record, receiptName: record.receiptName ?? undefined, recurring: false, enteredBy: "Hotel Staff" })) });
+      const recurringExpenses = await productionSql()<Array<{
+        id: string; category: string; vendor: string; description: string;
+        paymentMethod: string; amountCents: number; recurrence: string; nextDueDate: string;
+      }>>`
+        select re.id,re.category,coalesce(v.name,'Other') as vendor,re.description,
+          re.payment_method as "paymentMethod",re.amount_cents as "amountCents",
+          re.frequency as recurrence,re.next_run_on::text as "nextDueDate"
+        from recurring_expenses re left join vendors v on v.id=re.vendor_id
+        where re.property_id=${session.propertyId}::uuid and re.active=true
+        order by re.next_run_on,re.created_at
+      `;
+      return Response.json({
+        expenses: records.map((record) => ({ ...record, receiptName: record.receiptName ?? undefined, recurring: false, enteredBy: "Hotel Staff" })),
+        recurringExpenses,
+      });
     }
     const records = await db.query.expenses.findMany({ where: eq(expenses.propertyId, session.propertyId) });
     return Response.json({ expenses: records.map(toClient) });
@@ -59,10 +73,15 @@ export async function POST(request: Request) {
           values (${session.propertyId}::uuid,${vendor.id}::uuid,${parsed.data.date}::date,${parsed.data.category},${parsed.data.description},${parsed.data.paymentMethod},${parsed.data.amountCents})
           returning id
         `;
-        if (parsed.data.recurring && parsed.data.recurrence && parsed.data.nextDueDate) await tx`
+        let recurringExpense: { id: string; category: string; vendor: string; description: string; paymentMethod: string; amountCents: number; recurrence: string; nextDueDate: string } | undefined;
+        if (parsed.data.recurring && parsed.data.recurrence && parsed.data.nextDueDate) {
+          const [createdRecurringExpense] = await tx<Array<{ id: string; category: string; description: string; paymentMethod: string; amountCents: number; recurrence: string; nextDueDate: string }>>`
           insert into recurring_expenses (property_id,vendor_id,category,description,payment_method,amount_cents,frequency,next_run_on)
           values (${session.propertyId}::uuid,${vendor.id}::uuid,${parsed.data.category},${parsed.data.description},${parsed.data.paymentMethod},${parsed.data.amountCents},${parsed.data.recurrence},${parsed.data.nextDueDate}::date)
+          returning id,category,description,payment_method as "paymentMethod",amount_cents as "amountCents",frequency as recurrence,next_run_on::text as "nextDueDate"
         `;
+          recurringExpense = { ...createdRecurringExpense, vendor: parsed.data.vendor };
+        }
         await postProductionLedger(tx, {
           propertyId: session.propertyId,
           businessDate: parsed.data.date,
@@ -73,9 +92,12 @@ export async function POST(request: Request) {
           creditAccount: ["Cash", "Check", "Debit Card"].includes(parsed.data.paymentMethod) ? "Cash" : "Accounts Payable",
           amountCents: parsed.data.amountCents,
         });
-        return { id: expense.id, ...parsed.data, recurring: parsed.data.recurring ?? false, enteredBy: "Hotel Staff" };
+        return {
+          expense: { id: expense.id, ...parsed.data, recurring: parsed.data.recurring ?? false, enteredBy: "Hotel Staff" },
+          recurringExpense,
+        };
       });
-      return Response.json({ expense: created }, { status: 201 });
+      return Response.json(created, { status: 201 });
     }
     const record: typeof expenses.$inferInsert = {
       id: `expense-${crypto.randomUUID()}`, propertyId: session.propertyId, expenseDate: parsed.data.date,

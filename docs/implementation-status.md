@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 31 |
-| Verified production path | 34 |
+| Verified demo | 30 |
+| Verified production path | 35 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -75,7 +75,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-TIM-001 | Verified production path | Housekeeping time clock and manual correction forms now load and upsert tenant-scoped PostgreSQL time entries. The server validates active motel staff, work date/times, break ordering, and one entry per employee per date. |
 | FR-PAYR-001 | Verified production path | Payroll now creates the configured weekly, biweekly, semi-monthly, or monthly tenant pay period, derives completed time-entry minutes, snapshots hourly rates, and persists each employee payroll entry. Paid entries are not recalculated when a later refresh derives current-period payroll. |
 | FR-PAYR-002 | Verified production path | Payroll approval, adjustment, paid status, and paid-on date persist in the tenant payroll entry. |
-| FR-EXP-001 | Verified demo | Expense and recurrence records persist, and optional receipts upload to tenant-prefixed private object storage. |
+| FR-EXP-001 | Verified production path | Expense writes, vendors, recurring schedules, and optional receipts persist in tenant-scoped PostgreSQL/private storage. The Expenses API reloads active recurring schedules alongside posted expenses, so configured recurrence remains visible after refresh. |
 | FR-CSH-001 | Verified production path | Cash reconciliation now writes tenant-scoped PostgreSQL cash shifts, adjustment transactions, and cash-drop records. The server reads the configured drawer float, retains it on every drop, rejects short counts without a reason, and verifies the named supervisor is an active Owner or Manager. |
 | FR-CSH-002 | Verified production path | The durable cash-drop API calculates expected cash from the saved drawer float and signed adjustment ledger, persists count/drop totals, derives over/short status, and requires a reason for shortages. |
 | FR-AUD-001 | Verified production path | Manual and scheduled Night Audit use an advisory lock and locked business-day row, store run results and blockers, close/open business days transactionally, and persist a failure notification. The current open business date is also exposed through a tenant-scoped read API for every operational screen. |
@@ -91,7 +91,7 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | NFR-UX-002 | Verified production path | Playwright plus axe-core now checks representative dashboards, operational boards, companies, settings, and reservation workspace views for serious/critical WCAG issues; skip-link and reduced-motion behavior are also exercised. |
 | NFR-RT-001 | Verified demo | Tenant-scoped server-sent events update reservation clients without refresh; versioned writes return a conflict instead of overwriting a newer edit. |
 | NFR-SEC-001 | Verified production path | API property scope comes from the authenticated production membership. All 62 public Supabase tables have RLS, and the live rollback-only isolation test proves Hotel A cannot read Hotel B property/company records. |
-| NFR-QA-001 | Verified production path | The release checks include 27 domain/authorization tests, a live RLS integration check, TypeScript checks, and 39 browser tests spanning phone, tablet portrait/landscape, desktop, keyboard navigation, accessibility, and horizontal overflow. |
+| NFR-QA-001 | Verified production path | The release checks include 27 domain/authorization tests, a live RLS integration check, TypeScript checks, and 49 browser tests spanning phone, tablet portrait/landscape, desktop, keyboard navigation, accessibility, and horizontal overflow. |
 
 ## Next production migration gates
 
