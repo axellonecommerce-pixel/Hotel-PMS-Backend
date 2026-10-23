@@ -9,7 +9,10 @@ export async function GET(request: Request) {
     const [record] = await productionSql()<Array<{ value: { enabled?: boolean; time?: string } }>>`
       select value from property_settings where property_id=${session.propertyId}::uuid and key='night_audit_schedule'
     `;
-    return Response.json({ schedule: record?.value ?? { enabled: false, time: "23:55" } });
+    const [applicationSettings] = await productionSql()<Array<{ value: { property?: { nightAuditTime?: string } } }>>`
+      select value from property_settings where property_id=${session.propertyId}::uuid and key='application_settings'
+    `;
+    return Response.json({ schedule: record?.value ?? { enabled: false, time: applicationSettings?.value.property?.nightAuditTime ?? "02:00" } });
   } catch (error) { return propertyAccessResponse(error); }
 }
 
@@ -21,6 +24,11 @@ export async function PUT(request: Request) {
     await productionSql()`
       insert into property_settings (property_id,key,value) values (${session.propertyId}::uuid,'night_audit_schedule',${productionSql().json(parsed.data)})
       on conflict (property_id,key) do update set value=excluded.value,updated_at=now()
+    `;
+    await productionSql()`
+      update property_settings
+      set value=jsonb_set(value, '{property,nightAuditTime}', to_jsonb(${parsed.data.time}::text), true), updated_at=now()
+      where property_id=${session.propertyId}::uuid and key='application_settings'
     `;
     return Response.json({ schedule: parsed.data });
   } catch (error) { return propertyAccessResponse(error); }
