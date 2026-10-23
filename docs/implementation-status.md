@@ -15,8 +15,8 @@ This is the code-backed traceability audit for the 65 formal requirements in `pr
 
 | Status | Count |
 |---|---:|
-| Verified demo | 30 |
-| Verified production path | 35 |
+| Verified demo | 29 |
+| Verified production path | 36 |
 | Partial | 0 |
 | Not implemented | 0 |
 | Total | 65 |
@@ -44,11 +44,11 @@ The 16 items that were partial in the October 16 audit now have durable implemen
 | FR-RES-005 | Verified production path | Company group checkout waits for every room, then transactionally creates exactly one draft company invoice containing all group folio charges and tax. |
 | FR-RES-006 | Verified production path | The room-move API locks the reservation and both room assignments, blocks non-rentable or occupied destinations, stores the move reason and rate decision, updates the active reservation room/type, and marks the vacated physical room dirty in one transaction. |
 | FR-RES-007 | Verified production path | The Room Move Report reads tenant-scoped persisted moves by date range, including guest, old/new room, required reason, and the saved rate decision; its prior-period comparison uses the same API. |
-| FR-RES-008 | Verified demo | Early/late fees, cancellation, no-show, inventory release, and reinstatement controls exist. |
+| FR-RES-008 | Verified production path | Cancellation and no-show lock the reserved room assignments, void the original room charges, post balancing ledger reversals, and release inventory in one transaction. Reinstatement validates current inventory, restores the originally voided charges/rates, posts the corresponding ledger entries, and returns the stay to Reserved. |
 | FR-RES-009 | Verified demo | OTA source and three payment-status choices exist. |
 | FR-RAT-001 | Verified demo | Same/different nightly rate entry and immediate planned postings exist. |
 | FR-RAT-002 | Verified demo | Room-rent edit recalculates linked tax using the reservation tax snapshot. |
-| FR-RAT-003 | Verified production path | The folio-charge API reads active configured charge types and tax definitions, enforces taxability, requires a reason for an override, snapshots tax, and recalculates tax when the charge amount changes. |
+| FR-RAT-003 | Verified production path | The folio-charge API resolves the authenticated property's configured charge type, snapshots tax, requires an override reason, and durably creates, edits, and voids manual charges with balanced ledger adjustments. |
 | FR-RAT-004 | Verified demo | Booking sources, commissions, and commission expense representation exist. |
 | FR-RAT-005 | Verified demo | Configurable, date/room eligible, stackable promotions exist. |
 | FR-FOL-001 | Verified production path | A row-locked PostgreSQL allocator supplies the shared folio/invoice sequence and is used by checkout and the document-number API. |
