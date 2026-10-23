@@ -30,6 +30,13 @@ const updateSchema = z.object({
   remarkEntries: z.array(z.object({ text: z.string().trim().min(1).max(2_000), createdAt: z.string().optional() })).max(100).optional(),
   dnrCode: z.string().max(200).optional(),
   dnrRemarks: z.string().max(10_000).nullable().optional(),
+  idType: z.enum(["US Driver License", "Passport", "Other"]).nullable().optional(),
+  driverLicenseNumber: z.string().trim().min(1).max(200).nullable().optional(),
+}).superRefine((value, context) => {
+  const changingIdentity = value.idType !== undefined || value.driverLicenseNumber !== undefined;
+  if (changingIdentity && Boolean(value.idType) !== Boolean(value.driverLicenseNumber)) {
+    context.addIssue({ code: "custom", message: "Enter both an ID type and ID number, or remove both." });
+  }
 });
 const importSchema = z.object({
   rows: z.array(z.object({
@@ -162,6 +169,22 @@ export async function PATCH(request: Request) {
       if (input.remarkEntries !== undefined) {
         await tx`delete from guest_remarks where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid`;
         for (const remark of input.remarkEntries) await tx`insert into guest_remarks (property_id,guest_id,remark) values (${session.propertyId}::uuid,${input.guestId}::uuid,${remark.text})`;
+      }
+      if (input.idType !== undefined || input.driverLicenseNumber !== undefined) {
+        // Preserve the history/audit trail rather than hard-deleting identity
+        // records. Only one current identity is returned to the PMS client.
+        await tx`update guest_identities set deleted_at=now() where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid and deleted_at is null`;
+        if (input.idType && input.driverLicenseNumber) {
+          const normalized = normalizedId(input.driverLicenseNumber);
+          const [duplicate] = await tx<Array<{ guestId: string }>>`
+            select guest_id as "guestId" from guest_identities
+            where property_id=${session.propertyId}::uuid and id_type=${input.idType} and normalized_id_number=${normalized} and deleted_at is null
+            limit 1
+          `;
+          if (duplicate && duplicate.guestId !== input.guestId) throw new Error("A different guest already has this ID.");
+          await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after)
+            values (${session.propertyId}::uuid,${input.guestId}::uuid,${input.idType},${input.driverLicenseNumber},${normalized},now()+interval '1 year')`;
+        }
       }
       return true;
     });
