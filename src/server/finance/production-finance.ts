@@ -68,3 +68,12 @@ export async function propertyBusinessDate(tx: Tx | Sql, propertyId: string) {
   `;
   return row.date;
 }
+
+/**
+ * Ledger date for reversing a charge. A night that has not been audited yet
+ * is reversed on its own date so that day nets to zero; a charge from a
+ * closed day is reversed on the current business date.
+ */
+export function reversalBusinessDate(businessDate: string, serviceDate: string) {
+  return serviceDate > businessDate ? serviceDate : businessDate;
+}

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
-import { allocateProductionDocumentNumber, postProductionLedger } from "@/server/finance/production-finance";
+import { allocateProductionDocumentNumber, postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
 
 const releaseSchema = z.object({
@@ -93,11 +93,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
           and reservation_room_id in ${tx(rooms.map((room) => room.id))}
         for update
       `;
-      const [businessDay] = await tx<Array<{ date: string }>>`
-        select business_date::text as date from business_days
-        where property_id=${session.propertyId}::uuid order by business_date desc limit 1
-      `;
-      const businessDate = businessDay?.date ?? new Date().toISOString().slice(0, 10);
+      const businessDate = await propertyBusinessDate(tx, session.propertyId);
       const status = input.action === "no-show" ? "no_show" : "cancelled";
       const label = input.action === "no-show" ? "No-show" : "Cancellation";
 
@@ -112,7 +108,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       for (const charge of roomRentCharges) {
         if (charge.amountCents > 0) await postProductionLedger(tx, {
           propertyId: session.propertyId,
-          businessDate,
+          businessDate: reversalBusinessDate(businessDate, charge.serviceDate),
           resourceType: "reservation-release",
           resourceId: reservation.id,
           description: `${label} room-rent reversal · ${charge.serviceDate}`,
@@ -122,7 +118,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         });
         if (charge.taxCents > 0) await postProductionLedger(tx, {
           propertyId: session.propertyId,
-          businessDate,
+          businessDate: reversalBusinessDate(businessDate, charge.serviceDate),
           resourceType: "reservation-release-tax",
           resourceId: reservation.id,
           description: `${label} room-tax reversal · ${charge.serviceDate}`,

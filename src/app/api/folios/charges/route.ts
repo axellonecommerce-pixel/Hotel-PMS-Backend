@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
-import { postProductionLedger } from "@/server/finance/production-finance";
+import { postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 
 const createSchema = z.object({
   // Older clients hold a display folio label and a configured charge-type
@@ -228,13 +228,14 @@ export async function DELETE(request: Request) {
         for update of c
       `;
       if (!current) throw new Error("Charge not found or cannot be removed.");
-      await tx`update charges set status='void', updated_at=now() where id=${current.id}::uuid`;
+      await tx`update charges set status='voided', updated_at=now() where id=${current.id}::uuid`;
+      const businessDate = await propertyBusinessDate(tx, session.propertyId);
       await postProductionLedger(tx, {
-        propertyId: session.propertyId, businessDate: current.serviceDate, resourceType: "charge-void", resourceId: current.id,
+        propertyId: session.propertyId, businessDate: reversalBusinessDate(businessDate, current.serviceDate), resourceType: "charge-void", resourceId: current.id,
         description: `${current.description} void`, debitAccount: revenueAccount(current), creditAccount: "Guest Receivable", amountCents: current.amountCents,
       });
       if (current.taxCents > 0) await postProductionLedger(tx, {
-        propertyId: session.propertyId, businessDate: current.serviceDate, resourceType: "charge-tax-void", resourceId: current.id,
+        propertyId: session.propertyId, businessDate: reversalBusinessDate(businessDate, current.serviceDate), resourceType: "charge-tax-void", resourceId: current.id,
         description: `${current.description} tax void`, debitAccount: "Tax Payable", creditAccount: "Guest Receivable", amountCents: current.taxCents,
       });
       const [balance] = await tx<Array<{ balanceCents: number }>>`

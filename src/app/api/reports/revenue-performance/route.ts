@@ -19,9 +19,9 @@ export async function GET(request: Request) {
     `;
     const rows = await productionSql()<Array<{ date: string; roomRevenue: number; otherRevenue: number; taxes: number; expenses: number; roomsSold: number }>>`
       select day::date::text as date,
-        coalesce((select sum(le.credit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account='Room Revenue'),0)::int as "roomRevenue",
-        coalesce((select sum(le.credit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account like 'Revenue:%'),0)::int as "otherRevenue",
-        coalesce((select sum(le.credit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account='Tax Payable'),0)::int as taxes,
+        coalesce((select sum(le.credit_cents-le.debit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account='Room Revenue'),0)::int as "roomRevenue",
+        coalesce((select sum(le.credit_cents-le.debit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account like 'Revenue:%'),0)::int as "otherRevenue",
+        coalesce((select sum(le.credit_cents-le.debit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account='Tax Payable'),0)::int as taxes,
         coalesce((select sum(e.amount_cents) from expenses e where e.property_id=${session.propertyId}::uuid and e.expense_date=day::date),0)::int as expenses,
         coalesce((select count(distinct rr.room_id) from reservation_rooms rr join reservations r on r.id=rr.reservation_id where r.property_id=${session.propertyId}::uuid and rr.room_id is not null and rr.status in ('reserved','checked_in','checked_out') and r.status not in ('cancelled','no_show') and ((r.arrival_date <= day::date and r.departure_date > day::date) or (r.arrival_date=day::date and r.departure_date=day::date))),0)::int as "roomsSold"
       from generate_series(${input.data.startDate}::date,${input.data.endDate}::date,'1 day'::interval) as days(day)

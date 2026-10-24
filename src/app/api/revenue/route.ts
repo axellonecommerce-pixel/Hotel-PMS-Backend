@@ -19,9 +19,9 @@ export async function GET(request: Request) {
     const [rows, paymentBreakdown, reservationSources] = await Promise.all([
       sql<Array<{ date: string; roomRevenueCents: number; taxCents: number; miscellaneousRevenueCents: number }>>`
       select business_date::text as date,
-        coalesce(sum(credit_cents) filter (where account='Room Revenue'),0)::int as "roomRevenueCents",
-        coalesce(sum(credit_cents) filter (where account='Tax Payable'),0)::int as "taxCents",
-        coalesce(sum(credit_cents) filter (where account like 'Revenue:%'),0)::int as "miscellaneousRevenueCents"
+        coalesce(sum(credit_cents-debit_cents) filter (where account='Room Revenue'),0)::int as "roomRevenueCents",
+        coalesce(sum(credit_cents-debit_cents) filter (where account='Tax Payable'),0)::int as "taxCents",
+        coalesce(sum(credit_cents-debit_cents) filter (where account like 'Revenue:%'),0)::int as "miscellaneousRevenueCents"
       from ledger_entries
       where property_id=${session.propertyId}::uuid
         and business_date between ${parsed.data.start}::date and ${parsed.data.end}::date

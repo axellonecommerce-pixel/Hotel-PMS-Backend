@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
-import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+import { postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { setReservationCommission } from "@/server/finance/ota-commission";
 
 const reinstateSchema = z.object({
@@ -114,8 +114,8 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       if (chargeIdValues.length) await tx`update charges set status='posted',updated_at=now() where property_id=${session.propertyId}::uuid and id in ${tx(chargeIdValues)}`;
       const businessDate = await propertyBusinessDate(tx, session.propertyId);
       for (const charge of chargeIds) {
-        if (charge.amountCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate, resourceType: "reservation-reinstatement", resourceId: reservation.id, description: `Reinstated room rent · ${charge.serviceDate}`, debitAccount: "Guest Receivable", creditAccount: "Room Revenue", amountCents: charge.amountCents });
-        if (charge.taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate, resourceType: "reservation-reinstatement-tax", resourceId: reservation.id, description: `Reinstated room tax · ${charge.serviceDate}`, debitAccount: "Guest Receivable", creditAccount: "Tax Payable", amountCents: charge.taxCents });
+        if (charge.amountCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: reversalBusinessDate(businessDate, charge.serviceDate), resourceType: "reservation-reinstatement", resourceId: reservation.id, description: `Reinstated room rent · ${charge.serviceDate}`, debitAccount: "Guest Receivable", creditAccount: "Room Revenue", amountCents: charge.amountCents });
+        if (charge.taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: reversalBusinessDate(businessDate, charge.serviceDate), resourceType: "reservation-reinstatement-tax", resourceId: reservation.id, description: `Reinstated room tax · ${charge.serviceDate}`, debitAccount: "Guest Receivable", creditAccount: "Tax Payable", amountCents: charge.taxCents });
       }
       for (const rate of release.nightlyRates) {
         await tx`

@@ -1,7 +1,8 @@
 import type { TransactionSql } from "postgres";
 
 import { nightAuditBlockers } from "@/domain/rules/reservation-lifecycle";
-import { postProductionLedger } from "@/server/finance/production-finance";
+import { postProductionLedger, reversalBusinessDate } from "@/server/finance/production-finance";
+import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
 
 type Tx = TransactionSql<Record<string, never>>;
 
@@ -10,7 +11,7 @@ type ReleasedNightlyRate = { reservationRoomId: string; stayDate: string; baseRa
 
 function addNightAuditNoShowMetadata(
   notes: string | null,
-  event: { roomRentCharges: ReleasedCharge[]; nightlyRates: ReleasedNightlyRate[]; at: string },
+  event: { roomRentCharges: ReleasedCharge[]; nightlyRates: ReleasedNightlyRate[]; commissionCents: number; at: string },
 ) {
   try {
     const parsed = notes ? JSON.parse(notes) as unknown : {};
@@ -68,7 +69,7 @@ async function releaseUnarrivedReservations(tx: Tx, propertyId: string, business
     for (const charge of roomRentCharges) {
       if (charge.amountCents > 0) await postProductionLedger(tx, {
         propertyId,
-        businessDate,
+        businessDate: reversalBusinessDate(businessDate, charge.serviceDate),
         resourceType: "night-audit-no-show",
         resourceId: reservation.id,
         description: `Night-audit no-show room-rent reversal · ${charge.serviceDate}`,
@@ -78,7 +79,7 @@ async function releaseUnarrivedReservations(tx: Tx, propertyId: string, business
       });
       if (charge.taxCents > 0) await postProductionLedger(tx, {
         propertyId,
-        businessDate,
+        businessDate: reversalBusinessDate(businessDate, charge.serviceDate),
         resourceType: "night-audit-no-show-tax",
         resourceId: reservation.id,
         description: `Night-audit no-show room-tax reversal · ${charge.serviceDate}`,
@@ -86,6 +87,13 @@ async function releaseUnarrivedReservations(tx: Tx, propertyId: string, business
         creditAccount: "Guest Receivable",
         amountCents: charge.taxCents,
       });
+    }
+    // Same as a manual No Show: an unpaid OTA commission (and the OTA's
+    // settlement on the folio) is reversed; reinstatement restores it.
+    const commission = await readReservationCommission(tx, propertyId, reservation.id);
+    const commissionCents = commission.deducted || commission.paidCents === 0 ? commission.commissionCents : 0;
+    if (commissionCents > 0) {
+      await setReservationCommission(tx, { propertyId, reservationId: reservation.id, targetCents: 0, businessDate, reason: "Night-audit no-show commission reversal" });
     }
     if (rooms.length) await tx`
       delete from nightly_rates
@@ -97,7 +105,7 @@ async function releaseUnarrivedReservations(tx: Tx, propertyId: string, business
       where reservation_id=${reservation.id}::uuid and property_id=${propertyId}::uuid
     `;
     await tx`
-      update reservations set status='no_show',notes=${addNightAuditNoShowMetadata(reservation.notes, { roomRentCharges, nightlyRates, at: new Date().toISOString() })},version=version+1,updated_at=now()
+      update reservations set status='no_show',notes=${addNightAuditNoShowMetadata(reservation.notes, { roomRentCharges, nightlyRates, commissionCents, at: new Date().toISOString() })},version=version+1,updated_at=now()
       where id=${reservation.id}::uuid and property_id=${propertyId}::uuid
     `;
   }

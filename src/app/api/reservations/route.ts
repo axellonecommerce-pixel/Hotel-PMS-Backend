@@ -13,7 +13,7 @@ import { bookingChannels, companies, guests, reservationCharges, reservationRoom
 import { recordChange } from "@/server/realtime/change-events";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import type { PropertySession } from "@/server/auth/authorization";
-import { allocateProductionDocumentNumber, postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+import { allocateProductionDocumentNumber, postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
 
 /**
@@ -28,12 +28,13 @@ export async function GET(request: Request) {
       const records = await productionSql()<Array<{
         id: string; version: number; confirmationNumber: string; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null; companyName: string | null;
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null; otaPaymentStatus: string | null;
-        taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number;
+        taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; checkedOutDate: string | null; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number;
         reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; roomTypeName: string | null; status: string }>;
         extraGuests: Array<{ id: string; name: string; driverLicenseNumber: string | null }>;
       }>>`
         select r.id,r.version,r.confirmation_number as "confirmationNumber",r.company_id as "companyId",(select c.name from companies c where c.id=r.company_id) as "companyName",g.first_name as "firstName",g.last_name as "lastName",g.phone,
           rr.room_number as room,r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
+          (select to_char(max(rrx.checked_out_at at time zone p.timezone),'YYYY-MM-DD') from reservation_rooms rrx join properties p on p.id=r.property_id where rrx.reservation_id=r.id) as "checkedOutDate",
           coalesce(bs.name,case when r.notes like '{%' then r.notes::jsonb->>'source' end,'Direct') as source,
           case when r.notes like '{%' then r.notes::jsonb->>'rateCode' end as "rateCode",
           r.status,r.ota_payment_status as "otaPaymentStatus",r.tax_rate_basis_points as "taxRateBasisPoints",r.tax_exempt as "taxExempt",coalesce(bs.commission_basis_points,0)::int as "commissionBasisPoints",
@@ -83,7 +84,7 @@ export async function GET(request: Request) {
           ? record.otaPaymentStatus
           : undefined;
         const commissionCents = record.commissionCents;
-        return { id: record.id, version: record.version, confirmationNumber: record.confirmationNumber, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", companyId: record.companyId ?? undefined, company: record.companyName ?? undefined, roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+        return { id: record.id, version: record.version, confirmationNumber: record.confirmationNumber, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkedOutDate: record.checkedOutDate ?? undefined, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", companyId: record.companyId ?? undefined, company: record.companyName ?? undefined, roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
     }
     const records = await db.query.reservations.findMany({
@@ -878,8 +879,8 @@ async function updateProductionReservation(
           if (unused.length) await tx`update charges set status='voided',updated_at=now() where id in ${tx(unused.map((charge) => charge.id))}`;
           const businessDate = await propertyBusinessDate(tx, session.propertyId);
           for (const charge of unused) {
-            if (charge.amountCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate, resourceType: "stay-shortened", resourceId: id, description: `Early departure room-rent reversal · ${charge.serviceDate}`, debitAccount: "Room Revenue", creditAccount: "Guest Receivable", amountCents: charge.amountCents });
-            if (charge.taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate, resourceType: "stay-shortened-tax", resourceId: id, description: `Early departure room-tax reversal · ${charge.serviceDate}`, debitAccount: "Tax Payable", creditAccount: "Guest Receivable", amountCents: charge.taxCents });
+            if (charge.amountCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: reversalBusinessDate(businessDate, charge.serviceDate), resourceType: "stay-shortened", resourceId: id, description: `Early departure room-rent reversal · ${charge.serviceDate}`, debitAccount: "Room Revenue", creditAccount: "Guest Receivable", amountCents: charge.amountCents });
+            if (charge.taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: reversalBusinessDate(businessDate, charge.serviceDate), resourceType: "stay-shortened-tax", resourceId: id, description: `Early departure room-tax reversal · ${charge.serviceDate}`, debitAccount: "Tax Payable", creditAccount: "Guest Receivable", amountCents: charge.taxCents });
           }
           await tx`
             delete from nightly_rates where reservation_room_id in (

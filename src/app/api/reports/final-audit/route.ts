@@ -26,9 +26,9 @@ export async function GET(request: Request) {
     `;
     const records = await productionSql()<DailyAudit[]>`
       select day::date::text as date,
-        coalesce((select sum(le.credit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account='Room Revenue'),0)::int as "roomRevenue",
-        coalesce((select sum(le.credit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account like 'Revenue:%'),0)::int as "otherRevenue",
-        coalesce((select sum(le.credit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account='Tax Payable'),0)::int as taxes,
+        coalesce((select sum(le.credit_cents-le.debit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account='Room Revenue'),0)::int as "roomRevenue",
+        coalesce((select sum(le.credit_cents-le.debit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account like 'Revenue:%'),0)::int as "otherRevenue",
+        coalesce((select sum(le.credit_cents-le.debit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account='Tax Payable'),0)::int as taxes,
         coalesce((select sum(le.debit_cents-le.credit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date),0)::int as "ledgerVariance",
         coalesce((select sum(p.amount_cents-coalesce((select sum(ref.amount_cents) from refunds ref where ref.payment_id=p.id),0)) from payments p where p.property_id=${session.propertyId}::uuid and p.effective_date=day::date and p.method not in ('BAD DEBT','OTA COMMISSION')),0)::int as payments,
         coalesce((select sum(cd.amount_cents) from cash_drops cd join cash_shifts cs on cs.id=cd.cash_shift_id join business_days bd on bd.id=cs.business_day_id where cd.property_id=${session.propertyId}::uuid and bd.business_date=day::date),0)::int as "cashDrop",
