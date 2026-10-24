@@ -54,14 +54,14 @@ The first release is employee-only. It supports many hotels, but one owner accou
 - **FR-RES-006:** Staff may change room or room type only after entering a remark. They choose whether to retain or replace the rate. The prior room becomes vacant/available and dirty. A dirty available destination is allowed after a warning; out-of-order rooms are blocked.
 - **FR-RES-007:** All moves appear in a date-filtered Room Move Report.
 - **FR-RES-008:** Early check-in, cancellation fee, late checkout, and no-show fee are supported. A No Show may be marked only for a reservation arriving on the current business date; it releases inventory immediately. Staff may reinstate a cancelled or No Show reservation after the system confirms that the assigned room and room-type inventory are still available; reinstatement restores the stay charges and group-room reservation statuses.
-- **FR-RES-009:** Online/OTA bookings are entered manually. Payment status supports Guest Pays Hotel, Paid Online, and Virtual Card Pending.
+- **FR-RES-009:** Online/OTA bookings are entered manually. Payment status supports Guest Pays Hotel, Paid Online, and Virtual Card Pending. Selecting a commissioned reservation source shows OTA Details in the payment breakdown: OTA Gross Amount (rent + tax), OTA Tax Amount, OTA Commission (percentage of room rent before tax), and OTA Net Amount (gross − commission). For Paid Online and Virtual Card Pending, the OTA deducts its commission: the commission settles automatically on the folio as a non-cash, non-refundable "OTA COMMISSION" entry, so the balance due is the net amount the OTA remits. For Guest Pays Hotel, the hotel collects the gross amount and the commission is payable to the OTA.
 
 ### 3.4 Rates, promotions, taxes, and charges
 
 - **FR-RAT-001:** Staff may apply one nightly rate to the stay or different rates by night. All planned room rent and tax post when the reservation is created.
 - **FR-RAT-002:** Editing room rent recalculates linked tax using the reservation's stored tax rate. Existing reservations retain their original tax rate when settings change.
 - **FR-RAT-003:** Managers configure taxable extra-charge types. Manual tax changes require a reason. Tax-exempt stays require an exemption reason/certificate number.
-- **FR-RAT-004:** Hotels configure booking sources and commissions. OTA commissions post as expenses.
+- **FR-RAT-004:** Hotels configure booking sources and commissions. OTA commissions post as expenses (credited to Commission Payable when the hotel collects, or to Guest Receivable when the OTA deducted it).
 - **FR-RAT-005:** Hotels configure promotions with discount, eligible room types, and date range. Staff manually select promotions and may stack multiple promotions.
 
 ### 3.5 Folios, documents, and checkout

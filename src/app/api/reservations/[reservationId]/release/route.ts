@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { allocateProductionDocumentNumber, postProductionLedger } from "@/server/finance/production-finance";
+import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
 
 const releaseSchema = z.object({
   expectedVersion: z.number().int().positive(),
@@ -135,6 +136,15 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         where property_id=${session.propertyId}::uuid and reservation_room_id in ${tx(rooms.map((room) => room.id))}
       `;
 
+      // A released stay earns the OTA nothing. Reverse an unpaid commission
+      // (and its OTA settlement) so the folio does not go negative; keep the
+      // amount on the lifecycle event so reinstatement restores it exactly.
+      const commission = await readReservationCommission(tx, session.propertyId, reservation.id);
+      const releasedCommissionCents = commission.deducted || commission.paidCents === 0 ? commission.commissionCents : 0;
+      if (releasedCommissionCents > 0) {
+        await setReservationCommission(tx, { propertyId: session.propertyId, reservationId: reservation.id, targetCents: 0, businessDate, reason: `${label} commission reversal` });
+      }
+
       let feeChargeId: string | undefined;
       if (input.feeCents > 0) {
         let [folio] = await tx<Array<{ id: string }>>`
@@ -174,7 +184,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       `;
       const releasedAt = new Date().toISOString();
       await tx`
-        update reservations set status=${status},notes=${addReleaseMetadata(reservation.notes, { action: input.action, feeCents: input.feeCents, note: input.note, roomRentCharges, nightlyRates, at: releasedAt })},version=version+1,updated_at=now()
+        update reservations set status=${status},notes=${addReleaseMetadata(reservation.notes, { action: input.action, feeCents: input.feeCents, note: input.note, roomRentCharges, nightlyRates, commissionCents: releasedCommissionCents, at: releasedAt })},version=version+1,updated_at=now()
         where id=${reservation.id}::uuid and property_id=${session.propertyId}::uuid
       `;
       await tx`

@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { TransactionSql } from "postgres";
 
 import { db } from "@/server/db/client";
-import { calculateCommissionCents } from "@/domain/rules/commission";
+import { calculateCommissionCents, calculateOtaBreakdown } from "@/domain/rules/commission";
 import { applyStackedPromotions, type Promotion } from "@/domain/rules/reservation-lifecycle";
 import { canUseRateCode } from "@/domain/rules/rate-code";
 import { calculateTaxCents } from "@/domain/rules/tax";
@@ -14,6 +14,7 @@ import { recordChange } from "@/server/realtime/change-events";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import type { PropertySession } from "@/server/auth/authorization";
 import { allocateProductionDocumentNumber, postProductionLedger } from "@/server/finance/production-finance";
+import { setReservationCommission } from "@/server/finance/ota-commission";
 
 /**
  * The operational UI needs a real property-scoped read model after refresh.
@@ -27,7 +28,7 @@ export async function GET(request: Request) {
       const records = await productionSql()<Array<{
         id: string; version: number; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null;
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null; otaPaymentStatus: string | null;
-        taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; commissionBasisPoints: number; commissionCents: number;
+        taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number;
         reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; status: string }>;
         extraGuests: Array<{ id: string; name: string; driverLicenseNumber: string | null }>;
       }>>`
@@ -39,7 +40,8 @@ export async function GET(request: Request) {
           coalesce((case when r.notes like '{%' then r.notes::jsonb->>'adults' end)::int,1) as adults,coalesce((case when r.notes like '{%' then r.notes::jsonb->>'children' end)::int,0) as children,
           coalesce((case when r.notes like '{%' then r.notes::jsonb->>'petCount' end)::int,0) as "petCount",coalesce((case when r.notes like '{%' then r.notes::jsonb->>'servicePetCount' end)::int,0) as "servicePetCount",
           coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rrx on rrx.id=nr.reservation_room_id where rrx.reservation_id=r.id),0)::int as "roomRentCents",
-          coalesce((select sum(le.debit_cents) from ledger_entries le where le.property_id=r.property_id and le.resource_type='ota-commission' and le.resource_id=r.id),0)::int as "commissionCents",
+          coalesce((select sum(le.debit_cents-le.credit_cents) from ledger_entries le where le.property_id=r.property_id and le.resource_type='ota-commission' and le.resource_id=r.id and le.account='OTA Commission Expense'),0)::int as "commissionCents",
+          coalesce((select sum(le.debit_cents) from ledger_entries le where le.property_id=r.property_id and le.resource_type='ota-commission-paid' and le.resource_id=r.id and le.account='Commission Payable'),0)::int as "commissionPaidCents",
           (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)
             - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=r.id),0))::int as "balanceCents",
           coalesce((select json_agg(json_build_object('id',rrx.id,'roomNumber',room.number,'roomTypeId',rrx.room_type_id,'status',rrx.status) order by rrx.created_at)
@@ -69,8 +71,8 @@ export async function GET(request: Request) {
         const otaPaymentStatus = record.otaPaymentStatus === "Guest Pays Hotel" || record.otaPaymentStatus === "Paid Online" || record.otaPaymentStatus === "Virtual Card Pending"
           ? record.otaPaymentStatus
           : undefined;
-        const commissionCents = record.commissionCents || calculateCommissionCents(record.roomRentCents, record.commissionBasisPoints / 100);
-        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+        const commissionCents = record.commissionCents;
+        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
     }
     const records = await db.query.reservations.findMany({
@@ -371,8 +373,9 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   `;
   const bookingSource = bookingSources.find((source) => bookingSourceKey(source.name) === bookingSourceKey(payload.source));
   if (!bookingSource) throw new ReservationRequestError("Select an active booking source configured in Settings.", 409);
+  const otaPaymentStatus = bookingSource.type.toLowerCase() === "ota" ? payload.otaPaymentStatus ?? "Guest Pays Hotel" : null;
   const confirmationNumber = `PMS-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900 + 100)}`;
-  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${payload.otaPaymentStatus || null},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: bookingSource.name })}::text) returning id`;
+  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${otaPaymentStatus},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: bookingSource.name })}::text) returning id`;
   for (const [appliedOrder, promotionId] of payload.promotionIds.entries()) {
     await tx`insert into reservation_promotions (property_id,reservation_id,promotion_id,applied_order) values (${session.propertyId}::uuid,${reservation.id}::uuid,${promotionId}::uuid,${appliedOrder})`;
   }
@@ -394,6 +397,7 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   // later split a departing room into its own folio. Single-room stays keep
   // their room-specific folio as before.
   let sharedGroupFolioId: string | null = null;
+  let primaryFolioId: string | null = null;
   if (payload.roomCount > 1) {
     const folioNumber = await allocateProductionDocumentNumber(tx, session.propertyId);
     const [folio] = await tx<Array<{ id: string }>>`
@@ -414,6 +418,7 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
       `;
       folioId = folio.id;
     }
+    primaryFolioId ??= folioId;
     for (let night = 0; night < nights; night += 1) {
       const date = new Date(`${payload.checkInDate}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + night);
       const stayDate = date.toISOString().slice(0, 10);
@@ -461,18 +466,20 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   }
   const roomRentCents = payload.nightlyRatesCents.reduce((sum, rate) => sum + rate, 0) * payload.roomCount;
   const taxCents = payload.taxExempt ? 0 : calculateTaxCents(roomRentCents, payload.taxRatePercentage / 100);
-  const commissionCents = calculateCommissionCents(roomRentCents, bookingSource.commissionBasisPoints / 100);
-  if (commissionCents > 0) await postProductionLedger(tx, {
+  const ota = calculateOtaBreakdown({ roomRentCents, taxCents, commissionPercent: bookingSource.commissionBasisPoints / 100, paymentStatus: otaPaymentStatus });
+  const commissionCents = ota.commissionCents;
+  // Commission is an expense (FR-REV-001). When the OTA collected the stay it
+  // keeps the commission, so the helper settles it on the folio and the guest
+  // balance becomes the net the OTA remits.
+  await setReservationCommission(tx, {
     propertyId: session.propertyId,
+    reservationId: reservation.id,
+    targetCents: commissionCents,
     businessDate: payload.checkInDate,
-    resourceType: "ota-commission",
-    resourceId: reservation.id,
-    description: `Booking-source commission · ${payload.source}`,
-    debitAccount: "OTA Commission Expense",
-    creditAccount: "Commission Payable",
-    amountCents: commissionCents,
+    reason: "Booking commission",
   });
-  return { guestId, reservationId: reservation.id, groupReservation: payload.roomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents, totalCents: roomRentCents + taxCents, version: 1 };
+  const totalCents = roomRentCents + taxCents;
+  return { guestId, reservationId: reservation.id, groupReservation: payload.roomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents, otaNetCents: ota.netCents, otaPaymentStatus, totalCents, balanceCents: ota.commissionDeducted ? ota.netCents : totalCents, version: 1 };
 }
 
 export async function POST(request: Request) {

@@ -20,6 +20,9 @@ const paymentSchema = z.object({
   if (value.method.toUpperCase() === "BAD DEBT" && !value.note?.trim()) {
     context.addIssue({ code: "custom", path: ["note"], message: "A reason is required when recording bad debt." });
   }
+  if (value.method.toUpperCase() === "OTA COMMISSION") {
+    context.addIssue({ code: "custom", path: ["method"], message: "OTA commission is settled automatically from the reservation source." });
+  }
 });
 
 const refundSchema = z.object({ paymentId: z.string().uuid(), folioId: z.string().uuid(), amountCents: z.number().int().positive() });
@@ -51,7 +54,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     const session = await requirePropertySession(request, "reservations.manage");
     const reservationId = await routeParams(context);
     const parsed = paymentSchema.safeParse(await request.json());
-    if (!parsed.success) return Response.json({ error: "Enter a valid payment amount and method." }, { status: 400 });
+    if (!parsed.success) return Response.json({ error: parsed.error.issues.find((issue) => issue.path[0] === "method")?.message ?? "Enter a valid payment amount and method." }, { status: 400 });
     const payment = await productionSql().begin(async (tx) => {
       const [folio] = await tx<Array<{ id: string; balanceCents: number; reservationStatus: string }>>`
         select f.id,r.status as "reservationStatus",(
@@ -107,6 +110,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
       `;
       if (!payment) throw new Error("Payment not found.");
       if (payment.method.toUpperCase() === "BAD DEBT") throw new Error("Bad debt entries cannot be refunded.");
+      if (payment.method.toUpperCase() === "OTA COMMISSION") throw new Error("Payment entries for OTA commission deductions cannot be refunded.");
       if (parsed.data.amountCents > payment.amountCents - payment.refundedCents) throw new Error("Refund cannot exceed the unrefunded payment amount.");
       if (parsed.data.amountCents > payment.allocatedCents) throw new Error("Refund cannot exceed the payment allocated to this folio.");
       await tx`insert into refunds (property_id,payment_id,amount_cents,effective_date,reason) values (${session.propertyId}::uuid,${payment.id}::uuid,${parsed.data.amountCents},current_date,'Guest refund')`;
@@ -130,6 +134,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
       const [payment] = await tx<Array<{ id: string; method: string }>>`select id,method from payments where id=${parsed.data.paymentId}::uuid and reservation_id=${reservationId}::uuid and property_id=${session.propertyId}::uuid for update`;
       if (!payment) return false;
       if (payment.method.toUpperCase() === "BAD DEBT") throw new Error("Bad debt entries cannot be deleted.");
+      if (payment.method.toUpperCase() === "OTA COMMISSION") throw new Error("Payment entries for OTA commission deductions cannot be deleted.");
       await tx`delete from refunds where payment_id=${payment.id}::uuid`;
       await tx`delete from payment_allocations where payment_id=${payment.id}::uuid`;
       await tx`delete from payments where id=${payment.id}::uuid`;
@@ -138,7 +143,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
     if (!deleted) return Response.json({ error: "Payment not found." }, { status: 404 });
     return NextResponse.json({ deleted: true });
   } catch (error) {
-    if (error instanceof Error && /Bad debt/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (error instanceof Error && /Bad debt|OTA commission/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }

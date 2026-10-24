@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { postProductionLedger } from "@/server/finance/production-finance";
+import { setReservationCommission } from "@/server/finance/ota-commission";
 
 const reinstateSchema = z.object({
   expectedVersion: z.number().int().positive(),
@@ -11,7 +12,7 @@ const reinstateSchema = z.object({
 
 type ReleasedCharge = { id: string; serviceDate: string; amountCents: number; taxCents: number };
 type ReleasedNightlyRate = { reservationRoomId: string; stayDate: string; baseRateCents: number; discountCents: number; finalRateCents: number };
-type LifecycleEvent = { action?: string; roomRentCharges?: ReleasedCharge[]; nightlyRates?: ReleasedNightlyRate[] };
+type LifecycleEvent = { action?: string; roomRentCharges?: ReleasedCharge[]; nightlyRates?: ReleasedNightlyRate[]; commissionCents?: number };
 
 function routeParams(context: { params: Promise<{ reservationId: string }> }) {
   return context.params.then(({ reservationId }) => reservationId);
@@ -60,22 +61,41 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       // restore inventory safely; non-zero charges are restored when present.
       if (!release?.nightlyRates?.length) return { error: "This older released reservation does not have enough pricing history to reinstate safely.", httpStatus: 409 } as const;
 
-      const rooms = await tx<Array<{ id: string; roomId: string; number: string; serviceStatus: string }>>`
-        select rr.id,r.id as "roomId",r.number,r.service_status as "serviceStatus"
-        from reservation_rooms rr join rooms r on r.id=rr.room_id
+      // Rooms may be unassigned (FR-RES-001), so inventory is checked per room
+      // type and assigned rooms are additionally checked individually.
+      const rooms = await tx<Array<{ id: string; roomTypeId: string; roomId: string | null; number: string | null; serviceStatus: string | null }>>`
+        select rr.id,rr.room_type_id as "roomTypeId",r.id as "roomId",r.number,r.service_status as "serviceStatus"
+        from reservation_rooms rr left join rooms r on r.id=rr.room_id
         where rr.reservation_id=${reservation.id}::uuid and rr.property_id=${session.propertyId}::uuid
-        for update of rr,r
+        for update of rr
       `;
-      if (!rooms.length || rooms.some((room) => room.serviceStatus !== "rentable")) return { error: "A previously assigned room is no longer rentable.", httpStatus: 409 } as const;
-      const conflicts = await tx<Array<{ roomId: string }>>`
-        select distinct rr.room_id as "roomId"
-        from reservation_rooms rr join reservations other on other.id=rr.reservation_id
-        where rr.property_id=${session.propertyId}::uuid and rr.room_id in ${tx(rooms.map((room) => room.roomId))}
-          and rr.status in ('reserved','checked_in') and other.status in ('reserved','checked_in')
-          and other.id<>${reservation.id}::uuid
-          and other.arrival_date<${reservation.departureDate}::date and other.departure_date>${reservation.arrivalDate}::date
-      `;
-      if (conflicts.length) return { error: "A previously assigned room is no longer available for these dates.", httpStatus: 409 } as const;
+      if (!rooms.length) return { error: "The reservation has no rooms to reinstate.", httpStatus: 409 } as const;
+      const assignedRooms = rooms.filter((room) => room.roomId);
+      if (assignedRooms.some((room) => room.serviceStatus !== "rentable")) return { error: "A previously assigned room is no longer rentable.", httpStatus: 409 } as const;
+      if (assignedRooms.length) {
+        const conflicts = await tx<Array<{ roomId: string }>>`
+          select distinct rr.room_id as "roomId"
+          from reservation_rooms rr join reservations other on other.id=rr.reservation_id
+          where rr.property_id=${session.propertyId}::uuid and rr.room_id in ${tx(assignedRooms.map((room) => room.roomId!))}
+            and rr.status in ('reserved','checked_in') and other.status in ('reserved','checked_in')
+            and other.id<>${reservation.id}::uuid
+            and other.arrival_date<${reservation.departureDate}::date and other.departure_date>${reservation.arrivalDate}::date
+        `;
+        if (conflicts.length) return { error: "A previously assigned room is no longer available for these dates.", httpStatus: 409 } as const;
+      }
+      const neededByType = new Map<string, number>();
+      rooms.forEach((room) => neededByType.set(room.roomTypeId, (neededByType.get(room.roomTypeId) ?? 0) + 1));
+      for (const [roomTypeId, needed] of neededByType) {
+        const [inventory] = await tx<Array<{ rentable: number; booked: number }>>`
+          select
+            (select count(*) from rooms where property_id=${session.propertyId}::uuid and room_type_id=${roomTypeId}::uuid and service_status='rentable')::int as rentable,
+            (select count(*) from reservation_rooms rr join reservations other on other.id=rr.reservation_id
+              where rr.property_id=${session.propertyId}::uuid and rr.room_type_id=${roomTypeId}::uuid
+                and rr.status in ('reserved','checked_in') and other.status in ('reserved','checked_in') and other.id<>${reservation.id}::uuid
+                and other.arrival_date<${reservation.departureDate}::date and other.departure_date>${reservation.arrivalDate}::date)::int as booked
+        `;
+        if (inventory.rentable - inventory.booked < needed) return { error: "That room type no longer has enough inventory for these dates.", httpStatus: 409 } as const;
+      }
 
       const chargeIds = release.roomRentCharges ?? [];
       const chargeIdValues = chargeIds.map((charge) => charge.id);
@@ -99,6 +119,9 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         `;
       }
       await tx`update reservation_rooms set status='reserved',updated_at=now() where reservation_id=${reservation.id}::uuid and property_id=${session.propertyId}::uuid`;
+      if (release.commissionCents && release.commissionCents > 0) {
+        await setReservationCommission(tx, { propertyId: session.propertyId, reservationId: reservation.id, targetCents: release.commissionCents, businessDate: new Date().toISOString().slice(0, 10), reason: "Reinstated commission" });
+      }
       await tx`update reservations set status='reserved',notes=${addReinstatementMetadata(reservation.notes, parsed.data.note)} ,version=version+1,updated_at=now() where id=${reservation.id}::uuid`;
       await tx`insert into change_events (property_id,actor_auth_user_id,entity_type,entity_id,action,entity_version,payload) values (${session.propertyId}::uuid,${session.authUserId}::uuid,'reservation',${reservation.id}::uuid,'updated',${reservation.version + 1},${tx.json({ changes: { status: "Reserved" } })})`;
       const [balance] = await tx<Array<{ balanceCents: number }>>`
