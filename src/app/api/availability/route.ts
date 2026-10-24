@@ -62,7 +62,10 @@ export async function GET(request: Request) {
     const activeRateCodes = (settings.rateCodes ?? []).filter((rateCode) => rateCode.active !== false);
     const selectedRateCode = parsed.data.rateCode
       ? activeRateCodes.find((rateCode) => rateCode.name === parsed.data.rateCode)
-      : activeRateCodes.find((rateCode) => rateCode.isAvailabilityDefault) ?? activeRateCodes[0];
+      : activeRateCodes.find((rateCode) => rateCode.isAvailabilityDefault)
+        // An exemption code is never the silent default: it prices rooms at $0.
+        ?? activeRateCodes.find((rateCode) => !/rate (exception|exemption)/i.test(rateCode.name))
+        ?? activeRateCodes[0];
     if (parsed.data.rateCode && !selectedRateCode) return Response.json({ error: "Select an active rate code." }, { status: 409 });
 
     const availableRooms = await productionSql()<Array<{ number: string; roomTypeName: string }>>`
