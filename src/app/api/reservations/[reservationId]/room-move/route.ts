@@ -5,6 +5,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 
 type Tx = TransactionSql<Record<string, never>>;
 
@@ -181,6 +182,10 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         `;
       }
       await tx`update reservations set version=version+1,updated_at=now() where id=${reservation.id}::uuid`;
+      const rateNote = input.data.rateDecision === "keep" ? "kept the existing rate" : input.data.rateDecision === "custom" ? `new rate ${money(input.data.newRateCents!)} per night` : `room type rate ${money(destination.baseRateCents)} per night`;
+      await logReservationActivity(tx, session, reservation.id, "Room", reservationRoom.roomNumber
+        ? `Room moved ${reservationRoom.roomNumber} → ${destination.number} · ${rateNote} · ${input.data.remark}`
+        : `Room ${destination.number} assigned · ${input.data.remark}`);
       const [totals] = await tx<Array<{ roomRentCents: number; taxCents: number; totalCents: number; paidCents: number }>>`
         select
           coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rr on rr.id=nr.reservation_room_id where rr.reservation_id=${reservation.id}::uuid),0)::int as "roomRentCents",

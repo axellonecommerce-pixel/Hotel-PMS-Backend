@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { recordChange } from "@/server/realtime/change-events";
+import { logReservationActivity } from "@/server/activity/reservation-activity";
 
 const bodySchema = z.object({
   guestId: z.string().uuid(),
@@ -45,6 +46,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         returning id
       `;
       if (!attached) throw new Error("This guest is already attached to the reservation.");
+      await logReservationActivity(tx, session, reservationId, "Guest", `Extra guest added · ${guest.name}`);
       return guest;
     });
     try {
@@ -82,6 +84,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
           and guest_id=${parsed.data.guestId}::uuid and "primary"=false
         returning id
       `;
+      if (relationship) await logReservationActivity(tx, session, reservationId, "Guest", "Extra guest removed");
       return Boolean(relationship);
     });
     if (!removed) return Response.json({ error: "Extra guest is not attached to this reservation." }, { status: 404 });

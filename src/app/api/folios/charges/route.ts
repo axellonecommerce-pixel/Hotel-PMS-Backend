@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
+import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 
 const createSchema = z.object({
   // Older clients hold a display folio label and a configured charge-type
@@ -111,6 +112,7 @@ export async function POST(request: Request) {
           - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios all_folios on all_folios.id=pa.folio_id where all_folios.reservation_id=${context.reservationId}::uuid),0)
         )::int as "balanceCents"
       `;
+      await logReservationActivity(tx, session, context.reservationId, "Charge", `Charge added · ${input.description} · ${money(input.amountCents)}${taxCents ? ` + tax ${money(taxCents)}` : ""}`);
       return { id: created.id, folioId: context.folioId, reservationRoomId: input.reservationRoomId ?? null, description: input.description, amountCents: input.amountCents, type: context.typeName, taxable: context.taxable && !context.taxExempt, taxCents, totalCents: input.amountCents + taxCents, balanceCents: balance?.balanceCents ?? input.amountCents + taxCents };
     });
     return Response.json({ charge }, { status: 201 });
@@ -198,6 +200,9 @@ export async function PATCH(request: Request) {
           - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios all_folios on all_folios.id=pa.folio_id where all_folios.reservation_id=${current.reservationId}::uuid),0)
         )::int as "balanceCents"
       `;
+      if (amountCents !== current.amountCents || description !== current.description || folioId !== current.folioId) {
+        await logReservationActivity(tx, session, current.reservationId, "Charge", `Charge edited · ${current.description}${description !== current.description ? ` → ${description}` : ""} · ${money(current.amountCents)}${amountCents !== current.amountCents ? ` → ${money(amountCents)}` : ""}${folioId !== current.folioId ? " · moved to another folio" : ""}`);
+      }
       return { id: current.id, folioId, description, amountCents, taxCents: nextTax, totalCents: amountCents + nextTax, balanceCents: balance?.balanceCents ?? amountCents + nextTax };
     });
     return Response.json({ charge: updated });
@@ -229,6 +234,7 @@ export async function DELETE(request: Request) {
       `;
       if (!current) throw new Error("Charge not found or cannot be removed.");
       await tx`update charges set status='voided', updated_at=now() where id=${current.id}::uuid`;
+      await logReservationActivity(tx, session, current.reservationId, "Charge", `Charge removed · ${current.description} · ${money(current.amountCents + current.taxCents)}`);
       const businessDate = await propertyBusinessDate(tx, session.propertyId);
       await postProductionLedger(tx, {
         propertyId: session.propertyId, businessDate: reversalBusinessDate(businessDate, current.serviceDate), resourceType: "charge-void", resourceId: current.id,

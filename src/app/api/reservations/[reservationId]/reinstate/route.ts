@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { setReservationCommission } from "@/server/finance/ota-commission";
+import { logReservationActivity } from "@/server/activity/reservation-activity";
 
 const reinstateSchema = z.object({
   expectedVersion: z.number().int().positive(),
@@ -134,6 +135,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       const [balance] = await tx<Array<{ balanceCents: number }>>`
         select (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios f on f.id=c.folio_id where f.reservation_id=${reservation.id}::uuid and c.status='posted'),0)-coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=${reservation.id}::uuid),0))::int as "balanceCents"
       `;
+      await logReservationActivity(tx, session, reservation.id, "Status", `Reinstated to Reserved · ${chargeIds.length} room night(s) restored${releasedRoomIds.size ? ` · ${releasedRoomIds.size} room(s) now unassigned (taken or blocked)` : ""}${parsed.data.note ? ` · ${parsed.data.note}` : ""}`);
       return { status: "Reserved", balanceCents: balance?.balanceCents ?? 0, version: reservation.version + 1, unassignedRooms: releasedRoomIds.size } as const;
     });
     if ("error" in result) return Response.json(result, { status: result.httpStatus });

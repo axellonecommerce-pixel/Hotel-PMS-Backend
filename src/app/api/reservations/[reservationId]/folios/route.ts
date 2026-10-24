@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { allocateProductionDocumentNumber } from "@/server/finance/production-finance";
+import { logReservationActivity } from "@/server/activity/reservation-activity";
 
 const createSchema = z.object({ name: z.string().trim().min(1).max(120).optional() });
 const deleteSchema = z.object({ folioId: z.string().uuid() });
@@ -62,6 +63,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         values (${session.propertyId}::uuid,${reservation.id}::uuid,null,${number},${name},'open')
         returning id,number,name
       `;
+      await logReservationActivity(tx, session, reservation.id, "Folio", `Folio added · ${created.number} ${created.name}`);
       return created;
     });
     return Response.json({ folio }, { status: 201 });
@@ -92,6 +94,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
       `;
       if (activity.chargeCount || activity.paymentCount) throw new Error("This folio has financial activity and cannot be deleted.");
       await tx`delete from folios where id=${folio.id}::uuid and property_id=${session.propertyId}::uuid`;
+      await logReservationActivity(tx, session, reservationId, "Folio", "Empty folio removed");
       return true;
     });
     return Response.json({ deleted });
@@ -123,6 +126,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
           returning id,sent_at::text as "sentAt"
         `;
         if (!updated) throw new Error("The folio is unavailable.");
+        await logReservationActivity(tx, session, reservationId, "Folio", "Folio marked as sent to the guest");
         return updated;
       });
       return Response.json({ folio });
@@ -160,6 +164,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
         update charges set folio_id=${targetFolio.id}::uuid,updated_at=now()
         where id in ${tx(charges.map((charge) => charge.id))}
       `;
+      await logReservationActivity(tx, session, reservationId, "Folio", `Room charges moved to folio ${targetFolio.number}`);
       return { folioId: targetFolio.id, folioNumber: targetFolio.number, movedChargeIds: charges.map((charge) => charge.id) };
     });
     return Response.json(result);

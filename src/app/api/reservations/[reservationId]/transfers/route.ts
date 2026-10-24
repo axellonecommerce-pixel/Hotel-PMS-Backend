@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
+import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 import { recordChange } from "@/server/realtime/change-events";
 
 // HotelKey "Transfer Charges / Transfer a Payment": move a posted charge, or
@@ -91,6 +92,9 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
             updated_at=now()
           where id=${charge.id}::uuid
         `;
+        const [names] = await tx<Array<{ fromConf: string; toConf: string }>>`select (select confirmation_number from reservations where id=${from.reservationId}::uuid) as "fromConf", (select confirmation_number from reservations where id=${to.reservationId}::uuid) as "toConf"`;
+        await logReservationActivity(tx, session, from.reservationId, "Charge", `Charge transferred out · ${money(charge.amountCents + charge.taxCents)}${to.reservationId !== from.reservationId ? ` to ${names.toConf}` : " to another folio"} · ${input.reason}`);
+        if (to.reservationId !== from.reservationId) await logReservationActivity(tx, session, to.reservationId, "Charge", `Charge transferred in · ${money(charge.amountCents + charge.taxCents)} from ${names.fromConf} · ${input.reason}`);
         await tx`insert into folio_transfers (property_id,kind,charge_id,from_folio_id,to_folio_id,amount_cents,reason,business_date)
           values (${session.propertyId}::uuid,'charge',${charge.id}::uuid,${from.id}::uuid,${to.id}::uuid,${charge.amountCents + charge.taxCents},${input.reason},${businessDate}::date)`;
         return { reservationIds: [...new Set([from.reservationId, to.reservationId])], amountCents: charge.amountCents + charge.taxCents };
@@ -112,6 +116,9 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       if (input.amountCents === allocation.amountCents) await tx`delete from payment_allocations where id=${allocation.id}::uuid`;
       else await tx`update payment_allocations set amount_cents=amount_cents-${input.amountCents} where id=${allocation.id}::uuid`;
       await tx`insert into payment_allocations (property_id,payment_id,folio_id,amount_cents) values (${session.propertyId}::uuid,${input.paymentId}::uuid,${to.id}::uuid,${input.amountCents})`;
+      const [names] = await tx<Array<{ fromConf: string; toConf: string }>>`select (select confirmation_number from reservations where id=${from.reservationId}::uuid) as "fromConf", (select confirmation_number from reservations where id=${to.reservationId}::uuid) as "toConf"`;
+      await logReservationActivity(tx, session, from.reservationId, "Payment", `Payment transferred out · ${money(input.amountCents)} ${allocation.method}${to.reservationId !== from.reservationId ? ` to ${names.toConf}` : " to another folio"} · ${input.reason}`);
+      if (to.reservationId !== from.reservationId) await logReservationActivity(tx, session, to.reservationId, "Payment", `Payment transferred in · ${money(input.amountCents)} ${allocation.method} from ${names.fromConf} · ${input.reason}`);
       await tx`insert into folio_transfers (property_id,kind,payment_id,from_folio_id,to_folio_id,amount_cents,reason,business_date)
         values (${session.propertyId}::uuid,'payment',${input.paymentId}::uuid,${from.id}::uuid,${to.id}::uuid,${input.amountCents},${input.reason},${businessDate}::date)`;
       return { reservationIds: [...new Set([from.reservationId, to.reservationId])], amountCents: input.amountCents };

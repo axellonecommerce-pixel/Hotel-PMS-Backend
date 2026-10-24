@@ -3,6 +3,7 @@ import type { TransactionSql } from "postgres";
 import { nightAuditBlockers } from "@/domain/rules/reservation-lifecycle";
 import { postProductionLedger, reversalBusinessDate } from "@/server/finance/production-finance";
 import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
+import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 
 type Tx = TransactionSql<Record<string, never>>;
 
@@ -108,6 +109,7 @@ async function releaseUnarrivedReservations(tx: Tx, propertyId: string, business
       update reservations set status='no_show',notes=${addNightAuditNoShowMetadata(reservation.notes, { roomRentCharges, nightlyRates, commissionCents, at: new Date().toISOString() })},version=version+1,updated_at=now()
       where id=${reservation.id}::uuid and property_id=${propertyId}::uuid
     `;
+    await logReservationActivity(tx, { propertyId, systemName: "Night Audit" }, reservation.id, "Status", `Marked No Show by Night Audit for ${businessDate} · ${roomRentCharges.length} room night(s) reversed${commissionCents > 0 ? ` · OTA commission ${money(commissionCents)} reversed` : ""}`);
   }
   return reservations.length;
 }

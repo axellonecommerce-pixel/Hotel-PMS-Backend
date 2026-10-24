@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { allocateProductionDocumentNumber, propertyBusinessDate } from "@/server/finance/production-finance";
 import { transferBalanceToCompany } from "@/server/finance/direct-bill";
+import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 import { recordChange } from "@/server/realtime/change-events";
 
 const checkoutSchema = z.object({
@@ -176,12 +177,15 @@ export async function POST(request: Request) {
             `;
           }
           invoiceId = invoice.id;
-          await transferBalanceToCompany(tx, {
+          const transferredCents = await transferBalanceToCompany(tx, {
             propertyId: session.propertyId, reservationId: reservation.id, companyId: reservation.companyId,
             invoiceId: invoice.id, invoiceNumber: invoice.number, companyName: company?.name ?? "the company", businessDate,
           });
+          await logReservationActivity(tx, session, reservation.id, "Billing", `Balance ${money(transferredCents)} transferred to ${company?.name ?? "the company"} invoice ${invoice.number}`);
         }
       }
+      const checkedOutNumbers = await tx<Array<{ number: string }>>`select room.number from reservation_rooms rr join rooms room on room.id=rr.room_id where rr.id in ${tx(input.reservationRoomIds)} order by room.number`;
+      await logReservationActivity(tx, session, reservation.id, "Status", `Checked out${checkedOutNumbers.length ? ` · Room ${checkedOutNumbers.map((room) => room.number).join(", ")}` : ""}${remaining.count ? ` · ${remaining.count} room(s) still in house` : ""}`);
       return { checkedOutRoomIds: input.reservationRoomIds, reservationCheckedOut: remaining.count === 0, invoiceId };
     });
     await recordChange({

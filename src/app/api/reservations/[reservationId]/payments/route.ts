@@ -4,6 +4,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 
 const paymentSchema = z.object({
   // The existing workspace uses a client folio handle. The authoritative
@@ -94,6 +95,9 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         creditAccount: "Guest Receivable",
         amountCents: parsed.data.amountCents,
       });
+      await logReservationActivity(tx, session, reservationId, "Payment", isBadDebt
+        ? `Bad debt written off ${money(parsed.data.amountCents)} · ${parsed.data.note}`
+        : `Payment ${money(parsed.data.amountCents)} · ${parsed.data.method}${parsed.data.last4 ? ` •••• ${parsed.data.last4}` : ""}${parsed.data.reference ? ` · Ref ${parsed.data.reference}` : ""}${parsed.data.note ? ` · ${parsed.data.note}` : ""}`);
       return { id: created.id, amountCents: parsed.data.amountCents, method: parsed.data.method, folioId: folio.id, note: parsed.data.note, last4: parsed.data.last4, reference: parsed.data.reference, refundedCents: 0, createdAt: created.createdAt };
     });
     return Response.json({ payment }, { status: 201 });
@@ -125,6 +129,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
       if (parsed.data.amountCents > payment.allocatedCents) throw new Error("Refund cannot exceed the payment allocated to this folio.");
       await tx`insert into refunds (property_id,payment_id,amount_cents,effective_date,reason) values (${session.propertyId}::uuid,${payment.id}::uuid,${parsed.data.amountCents},${await propertyBusinessDate(tx, session.propertyId)}::date,'Guest refund')`;
       await tx`update payment_allocations set amount_cents=${payment.allocatedCents - parsed.data.amountCents} where payment_id=${payment.id}::uuid and folio_id=${payment.folioId}::uuid`;
+      await logReservationActivity(tx, session, reservationId, "Payment", `Refund ${money(parsed.data.amountCents)} of ${payment.method} payment`);
       return { paymentId: payment.id, refundedCents: payment.refundedCents + parsed.data.amountCents };
     });
     return Response.json({ refund });
@@ -141,7 +146,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
     const parsed = deleteSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Select a payment to delete." }, { status: 400 });
     const deleted = await productionSql().begin(async (tx) => {
-      const [payment] = await tx<Array<{ id: string; method: string }>>`select id,method from payments where id=${parsed.data.paymentId}::uuid and reservation_id=${reservationId}::uuid and property_id=${session.propertyId}::uuid for update`;
+      const [payment] = await tx<Array<{ id: string; method: string; amountCents: number }>>`select id,method,amount_cents as "amountCents" from payments where id=${parsed.data.paymentId}::uuid and reservation_id=${reservationId}::uuid and property_id=${session.propertyId}::uuid for update`;
       if (!payment) return false;
       if (payment.method.toUpperCase() === "BAD DEBT") throw new Error("Bad debt entries cannot be deleted.");
       if (payment.method.toUpperCase() === "OTA COMMISSION") throw new Error("Payment entries for OTA commission deductions cannot be deleted.");
@@ -149,6 +154,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
       await tx`delete from refunds where payment_id=${payment.id}::uuid`;
       await tx`delete from payment_allocations where payment_id=${payment.id}::uuid`;
       await tx`delete from payments where id=${payment.id}::uuid`;
+      await logReservationActivity(tx, session, reservationId, "Payment", `Payment deleted · ${money(payment.amountCents)} ${payment.method}`);
       return true;
     });
     if (!deleted) return Response.json({ error: "Payment not found." }, { status: 404 });

@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { allocateProductionDocumentNumber, postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
+import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 
 const releaseSchema = z.object({
   expectedVersion: z.number().int().positive(),
@@ -193,6 +194,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
           - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=${reservation.id}::uuid),0)
         )::int as "balanceCents"
       `;
+      await logReservationActivity(tx, session, reservation.id, "Status", `${input.action === "no-show" ? "Marked No Show" : "Cancelled"}${input.feeCents > 0 ? ` · ${label.toLowerCase()} fee ${money(input.feeCents)}` : ""}${roomRentCharges.length ? ` · ${roomRentCharges.length} room night(s) reversed` : ""}${input.note ? ` · ${input.note}` : ""}`);
       return { status: input.action === "no-show" ? "No Show" : "Cancelled", balanceCents: balance?.balanceCents ?? input.feeCents, feeChargeId, version: reservation.version + 1 } as const;
     });
     if ("error" in result) return Response.json(result, { status: result.httpStatus });

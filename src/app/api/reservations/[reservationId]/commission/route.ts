@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { OtaCommissionError, setReservationCommission } from "@/server/finance/ota-commission";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
+import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 
 const commissionSchema = z.object({
   commissionCents: z.number().int().min(0).max(100_000_000),
@@ -27,6 +28,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
       if (!reservation) return { error: "Reservation not found.", httpStatus: 404 } as const;
       if (reservation.status === "cancelled" || reservation.status === "no_show") return { error: "Reinstate the reservation before changing its commission.", httpStatus: 409 } as const;
       if (parsed.data.commissionCents > reservation.grossCents) return { error: "Commission cannot exceed the reservation's gross room amount.", httpStatus: 400 } as const;
+      await logReservationActivity(tx, session, reservationId, "Commission", `OTA commission set to ${money(parsed.data.commissionCents)} · ${parsed.data.reason}`);
       return setReservationCommission(tx, {
         propertyId: session.propertyId,
         reservationId,

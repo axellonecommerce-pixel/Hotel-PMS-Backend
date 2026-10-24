@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { OtaCommissionError, payReservationCommission } from "@/server/finance/ota-commission";
+import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 
 const paySchema = z.object({
   reservationIds: z.array(z.string().uuid()).min(1).max(500),
@@ -25,6 +26,7 @@ export async function POST(request: Request) {
         if (!owned) throw new OtaCommissionError("A selected reservation was not found.");
         const result = await payReservationCommission(tx, { propertyId: session.propertyId, reservationId, paymentMethod: parsed.data.paymentMethod, paidOn: parsed.data.paidOn, reference: parsed.data.reference });
         totalCents += result.paidCents;
+        if (result.paidCents > 0) await logReservationActivity(tx, session, reservationId, "Commission", `OTA commission paid ${money(result.paidCents)} · ${parsed.data.paymentMethod} on ${parsed.data.paidOn}${parsed.data.reference ? ` · Ref ${parsed.data.reference}` : ""}`);
       }
       return { paidCents: totalCents, count: parsed.data.reservationIds.length };
     });

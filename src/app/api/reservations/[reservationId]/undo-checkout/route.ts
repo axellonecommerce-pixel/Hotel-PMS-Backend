@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { DIRECT_BILL_METHOD } from "@/server/finance/direct-bill";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
+import { logReservationActivity } from "@/server/activity/reservation-activity";
 import { recordChange } from "@/server/realtime/change-events";
 
 const undoSchema = z.object({ reason: z.string().trim().min(3).max(500) });
@@ -72,6 +73,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         notes = `${reservation.notes ?? ""}\ncheckout undone: ${parsed.data.reason}`.trim();
       }
       await tx`update reservations set status='checked_in', notes=${notes}, version=version+1, updated_at=now() where id=${reservation.id}::uuid`;
+      await logReservationActivity(tx, session, reservation.id, "Status", `Checkout undone · back In House${invoice ? " · company invoice draft removed" : ""} · Reason: ${parsed.data.reason}`);
       return { reservationId: reservation.id, rooms: rooms.map((room) => room.number).filter(Boolean) };
     });
     await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "reservation", entityId: result.reservationId, action: "updated", entityVersion: Math.floor(Date.now() / 1000), payload: { change: "checkout-undone" } });

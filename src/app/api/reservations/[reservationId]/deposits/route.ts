@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 
 const DEPOSITS_HELD = "Security Deposits Held";
 /** Cash sits in the drawer; any other method is a card authorization. */
@@ -107,6 +108,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
           values (${session.propertyId}::uuid,${reservationRoomId}::uuid,${input.method},${input.amountCents},'held',true)
           returning id
         `;
+        await logReservationActivity(tx, session, reservationId, "Deposit", `Security deposit collected · ${money(input.amountCents)} ${input.method}`);
         // A deposit is a liability, not revenue (FR-REV-001).
         await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: await propertyBusinessDate(tx, session.propertyId), resourceType: "deposit-collect", resourceId: created.id, description: `Security deposit collected · ${input.method}`, debitAccount: holdingAccount(input.method), creditAccount: DEPOSITS_HELD, amountCents: input.amountCents });
       } else {
@@ -142,6 +144,8 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
           `;
           await postProductionLedger(tx, { propertyId: session.propertyId, businessDate, resourceType: "deposit-release", resourceId: release.id, description: `Security deposit released · ${deposit.method}`, debitAccount: DEPOSITS_HELD, creditAccount: holdingAccount(deposit.method), amountCents: input.releaseCents });
         }
+        const deducted = input.deductions.map((deduction) => `${deduction.reason} ${money(deduction.amountCents)}`).join(", ");
+        await logReservationActivity(tx, session, reservationId, "Deposit", [deducted ? `Deposit charged · ${deducted}` : "", input.releaseCents ? `Deposit released · ${money(input.releaseCents)}` : ""].filter(Boolean).join(" · "));
         if (requestedCents === availableCents) await tx`update security_deposits set status='settled',updated_at=now() where id=${deposit.id}::uuid`;
       }
       return { ok: true } as const;

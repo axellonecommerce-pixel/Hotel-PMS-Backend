@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger } from "@/server/finance/production-finance";
+import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 
 const updateSchema = z.object({
   roomRentCents: z.number().int().nonnegative().optional(),
@@ -84,6 +85,8 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
         });
       }
       const roomRentCents = nextAmounts.reduce((sum, amount) => sum + amount, 0);
+      const rentBefore = charges.reduce((sum, charge) => sum + charge.amountCents, 0);
+      if (roomRentCents !== rentBefore) await logReservationActivity(tx, session, reservationId, "Rate", `Room rent changed ${money(rentBefore)} → ${money(roomRentCents)}`);
       const taxCents = nextTaxes.reduce((sum, amount) => sum + amount, 0);
       const [balance] = await tx<Array<{ balanceCents: number }>>`
         select (

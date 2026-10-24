@@ -16,6 +16,7 @@ import type { PropertySession } from "@/server/auth/authorization";
 import { allocateProductionDocumentNumber, postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
 import { addDays, rateCalendarDays, rateCalendarRestriction } from "@/server/rates/rate-calendar";
+import { describeNoteChanges, logReservationActivity, money } from "@/server/activity/reservation-activity";
 
 /**
  * The operational UI needs a real property-scoped read model after refresh.
@@ -29,7 +30,7 @@ export async function GET(request: Request) {
       const records = await productionSql()<Array<{
         id: string; version: number; confirmationNumber: string; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null; companyName: string | null;
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null; otaPaymentStatus: string | null;
-        taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; checkedOutDate: string | null; bookedDate: string; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number;
+        taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; checkedOutDate: string | null; bookedDate: string; rawNotes: string | null; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number;
         reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; roomTypeName: string | null; status: string }>;
         extraGuests: Array<{ id: string; name: string; driverLicenseNumber: string | null }>;
       }>>`
@@ -37,6 +38,7 @@ export async function GET(request: Request) {
           rr.room_number as room,r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
           (select to_char(max(rrx.checked_out_at at time zone p.timezone),'YYYY-MM-DD') from reservation_rooms rrx join properties p on p.id=r.property_id where rrx.reservation_id=r.id) as "checkedOutDate",
           (select to_char(r.created_at at time zone p.timezone,'YYYY-MM-DD') from properties p where p.id=r.property_id) as "bookedDate",
+          r.notes as "rawNotes",
           coalesce(bs.name,case when r.notes like '{%' then r.notes::jsonb->>'source' end,'Direct') as source,
           case when r.notes like '{%' then r.notes::jsonb->>'rateCode' end as "rateCode",
           r.status,r.ota_payment_status as "otaPaymentStatus",r.tax_rate_basis_points as "taxRateBasisPoints",r.tax_exempt as "taxExempt",coalesce(bs.commission_basis_points,0)::int as "commissionBasisPoints",
@@ -86,7 +88,17 @@ export async function GET(request: Request) {
           ? record.otaPaymentStatus
           : undefined;
         const commissionCents = record.commissionCents;
-        return { id: record.id, version: record.version, confirmationNumber: record.confirmationNumber, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkedOutDate: record.checkedOutDate ?? undefined, bookedDate: record.bookedDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", companyId: record.companyId ?? undefined, company: record.companyName ?? undefined, roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+        // Department remarks saved through PATCH { remark } live in notes.
+        let remarks: Record<string, Array<{ id: string; text: string; createdAt: string }>> = {};
+        try {
+          const parsedNotes = record.rawNotes ? JSON.parse(record.rawNotes) : null;
+          if (parsedNotes?.remarks && typeof parsedNotes.remarks === "object") remarks = parsedNotes.remarks;
+        } catch {
+          // Legacy plain-text notes have no structured remarks.
+        }
+        return {
+          bookingRemarkEntries: remarks.booking ?? [], stayRemarkEntries: remarks.stay ?? [],
+          housekeepingRemarkEntries: remarks.housekeeping ?? [], otherRemarkEntries: remarks.other ?? [], id: record.id, version: record.version, confirmationNumber: record.confirmationNumber, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkedOutDate: record.checkedOutDate ?? undefined, bookedDate: record.bookedDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", companyId: record.companyId ?? undefined, company: record.companyName ?? undefined, roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
     }
     const records = await db.query.reservations.findMany({
@@ -510,6 +522,11 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
     reason: "Booking commission",
   });
   const totalCents = roomRentCents + taxCents;
+  const [roomTypeName] = await tx<Array<{ name: string }>>`select name from room_types where id=${roomType.id}::uuid`;
+  const roomLabel = selectedRooms.length ? `Room ${selectedRooms.map((room) => room!.number).join(", ")}` : "room unassigned";
+  await logReservationActivity(tx, session, reservation.id, "Reservation", `Reservation created · ${confirmationNumber} · ${payload.firstName} ${payload.lastName} · ${payload.checkInDate} → ${payload.checkoutDate}${dayUse ? " (day use)" : ""} · ${payload.roomCount} × ${roomTypeName?.name ?? "room"}, ${roomLabel} · ${payload.rateCode} · ${bookingSource.name} · total ${money(totalCents)}${payload.companyId ? " · direct bill" : ""}${payload.taxExempt ? " · tax exempt" : ""}`);
+  if (commissionCents > 0) await logReservationActivity(tx, session, reservation.id, "Commission", `OTA commission ${money(commissionCents)} (${bookingSource.commissionBasisPoints / 100}%) · ${otaPaymentStatus ?? "payable by hotel"}`);
+  if (identity?.guestStatus === "do_not_rent" && payload.dnrOverrideReason) await logReservationActivity(tx, session, reservation.id, "Guest", `Do Not Rent override approved: ${payload.dnrOverrideReason}`);
   return { guestId, reservationId: reservation.id, groupReservation: payload.roomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents, otaNetCents: ota.netCents, otaPaymentStatus, totalCents, balanceCents: ota.commissionDeducted ? ota.netCents : totalCents, version: 1 };
 }
 
@@ -766,6 +783,15 @@ const updateSchema = z.object({
   arrivalDate: z.string().optional(),
   departureDate: z.string().optional(),
   extensionNightlyRateCents: z.number().int().nonnegative().optional(),
+  // Occupancy and pets are stay details kept in the reservation notes.
+  details: z.object({
+    adults: z.number().int().min(1).max(20).optional(),
+    children: z.number().int().min(0).max(20).optional(),
+    petCount: z.number().int().min(0).max(10).optional(),
+    servicePetCount: z.number().int().min(0).max(10).optional(),
+  }).optional(),
+  // One new dated remark for a department section.
+  remark: z.object({ section: z.enum(["booking", "stay", "housekeeping", "other"]), text: z.string().trim().min(1).max(2_000) }).optional(),
   // Group check-in sends the rooms with their intended status so only the
   // selected rooms change.
   reservationRooms: z.array(z.object({ id: z.string().min(1), status: z.string() }).passthrough()).optional(),
@@ -783,8 +809,8 @@ async function updateProductionReservation(
 ) {
   try {
     const outcome = await productionSql().begin(async (tx) => {
-      const [current] = await tx<Array<{ id: string; version: number; status: string; arrivalDate: string; departureDate: string; taxExempt: boolean; taxRateBasisPoints: number }>>`
-        select id,version,status,arrival_date::text as "arrivalDate",departure_date::text as "departureDate",tax_exempt as "taxExempt",tax_rate_basis_points as "taxRateBasisPoints"
+      const [current] = await tx<Array<{ id: string; version: number; status: string; arrivalDate: string; departureDate: string; taxExempt: boolean; taxRateBasisPoints: number; notes: string | null }>>`
+        select id,version,status,arrival_date::text as "arrivalDate",departure_date::text as "departureDate",tax_exempt as "taxExempt",tax_rate_basis_points as "taxRateBasisPoints",notes
         from reservations where id=${id}::uuid and property_id=${session.propertyId}::uuid for update
       `;
       if (!current) return { kind: "not-found" as const };
@@ -952,17 +978,48 @@ async function updateProductionReservation(
         if (toCheckIn.some((room) => !room.roomId)) throw new ReservationRequestError("Assign a room number before checking this room in.", 409);
         if (toCheckIn.length) {
           await tx`
-            update reservation_rooms set status='checked_in',updated_at=now()
+            update reservation_rooms set status='checked_in',checked_in_at=now(),updated_at=now()
             where id in ${tx(toCheckIn.map((room) => room.id))} and property_id=${session.propertyId}::uuid
           `;
+          const numbers = await tx<Array<{ number: string }>>`select number from rooms where id in ${tx(toCheckIn.map((room) => room.roomId!))} order by number`;
+          await logReservationActivity(tx, session, id, "Status", `Checked in · Room ${numbers.map((room) => room.number).join(", ")}`);
         }
+      }
+      // Stay details and remarks live in the notes JSON; merge rather than
+      // overwrite so lifecycle history and booking details are kept.
+      let nextNotes = changes.notes !== undefined ? changes.notes ?? null : current.notes;
+      if (changes.details || changes.remark) {
+        let stored: Record<string, unknown> = {};
+        try {
+          const parsed = nextNotes ? JSON.parse(nextNotes) : {};
+          stored = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : { legacyNotes: nextNotes };
+        } catch {
+          stored = { legacyNotes: nextNotes };
+        }
+        if (changes.details) stored = { ...stored, ...changes.details };
+        if (changes.remark) {
+          const remarks = (stored.remarks && typeof stored.remarks === "object" ? stored.remarks : {}) as Record<string, Array<{ id: string; text: string; createdAt: string }>>;
+          const list = Array.isArray(remarks[changes.remark.section]) ? remarks[changes.remark.section] : [];
+          stored.remarks = { ...remarks, [changes.remark.section]: [...list, { id: crypto.randomUUID(), text: changes.remark.text, createdAt: new Date().toISOString() }].slice(-200) };
+          await logReservationActivity(tx, session, id, "Reservation", `Remark added (${changes.remark.section}): ${changes.remark.text.slice(0, 300)}`);
+        }
+        nextNotes = JSON.stringify(stored);
+      }
+      for (const change of describeNoteChanges(current.notes, nextNotes)) await logReservationActivity(tx, session, id, "Stay", change);
+      if (nextArrival !== current.arrivalDate || nextDeparture !== current.departureDate) {
+        const parts = [
+          nextArrival !== current.arrivalDate ? `arrival ${current.arrivalDate} → ${nextArrival}` : "",
+          nextDeparture !== current.departureDate ? `departure ${current.departureDate} → ${nextDeparture}` : "",
+        ].filter(Boolean).join(", ");
+        const extended = nextDeparture > current.departureDate && changes.extensionNightlyRateCents !== undefined ? ` · added nights at ${money(changes.extensionNightlyRateCents)}` : "";
+        await logReservationActivity(tx, session, id, "Stay", `${nextDeparture > current.departureDate ? "Stay extended" : nextDeparture < current.departureDate ? "Stay shortened" : "Stay dates changed"}: ${parts}${extended}`);
       }
       await tx`
         update reservations set
           arrival_date=${nextArrival}::date,
           departure_date=${nextDeparture}::date,
           status=coalesce(${databaseStatus},status),
-          notes=case when ${changes.notes !== undefined} then ${changes.notes ?? null} else notes end,
+          notes=${nextNotes},
           version=version+1,
           updated_at=now()
         where id=${id}::uuid and property_id=${session.propertyId}::uuid
