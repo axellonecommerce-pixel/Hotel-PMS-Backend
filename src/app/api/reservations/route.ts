@@ -180,6 +180,19 @@ function normalizePhone(phone: string) {
   return phone.replace(/\D/g, "");
 }
 
+/**
+ * Settings created by older versions used names such as "Walk Inn", while
+ * the reservation UI has always used "Walk-In" (and "Motel Website" for
+ * Website).  A booking source is a user-facing label, so punctuation or the
+ * legacy alias must never make an otherwise valid reservation fail.
+ */
+function bookingSourceKey(value: string) {
+  const compact = value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (compact === "walkin" || compact === "walkinn") return "walkin";
+  if (compact === "website" || compact === "motelwebsite") return "website";
+  return compact;
+}
+
 class ReservationRequestError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
 }
@@ -350,15 +363,16 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   }
   // Booking sources are configured in Settings. Resolve the active record
   // here rather than recreating it with a zero commission on every booking.
-  const [bookingSource] = await tx<Array<{ id: string; type: string; commissionBasisPoints: number }>>`
-    select id,type,commission_basis_points as "commissionBasisPoints"
+  const bookingSources = await tx<Array<{ id: string; name: string; type: string; commissionBasisPoints: number }>>`
+    select id,name,type,commission_basis_points as "commissionBasisPoints"
     from booking_sources
-    where property_id=${session.propertyId}::uuid and name=${payload.source} and active=true
+    where property_id=${session.propertyId}::uuid and active=true
     for update
   `;
+  const bookingSource = bookingSources.find((source) => bookingSourceKey(source.name) === bookingSourceKey(payload.source));
   if (!bookingSource) throw new ReservationRequestError("Select an active booking source configured in Settings.", 409);
   const confirmationNumber = `PMS-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900 + 100)}`;
-  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${payload.otaPaymentStatus || null},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: payload.source })}::text) returning id`;
+  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${payload.otaPaymentStatus || null},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: bookingSource.name })}::text) returning id`;
   for (const [appliedOrder, promotionId] of payload.promotionIds.entries()) {
     await tx`insert into reservation_promotions (property_id,reservation_id,promotion_id,applied_order) values (${session.propertyId}::uuid,${reservation.id}::uuid,${promotionId}::uuid,${appliedOrder})`;
   }
