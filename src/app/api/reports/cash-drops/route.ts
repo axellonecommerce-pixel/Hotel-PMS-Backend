@@ -54,7 +54,7 @@ export async function GET(request: Request) {
         columns: [
           { key: "date", label: "Date", format: "date" },
           { key: "shift", label: "Shift" },
-          { key: "employee", label: "Manager" },
+          { key: "employee", label: "Clerk" },
           { key: "expected", label: "Expected", format: "money", align: "right" },
           { key: "counted", label: "Counted", format: "money", align: "right" },
           { key: "difference", label: "Difference", format: "money", align: "right" },

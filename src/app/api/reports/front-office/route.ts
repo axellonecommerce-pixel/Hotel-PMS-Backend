@@ -12,7 +12,7 @@ const querySchema = z.object({
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   view: z.enum([
     "arrivals", "departures", "in-house-balances", "do-not-rent", "payment-activity",
-    "tax", "direct-bill-aging", "trial-balance", "revenue-by-room-type", "room-status", "paid-outs", "lost-and-found",
+    "tax", "direct-bill-aging", "trial-balance", "revenue-by-room-type", "room-status", "paid-outs", "lost-and-found", "clerk-activity", "clerk-shift",
   ]),
 });
 
@@ -130,16 +130,86 @@ export async function GET(request: Request) {
     }
 
     if (view === "paid-outs") {
-      const records = await sql<Array<{ id: string; date: string; paidTo: string; reason: string; note: string; amountCents: number }>>`
-        select id, business_date::text as date, paid_to as "paidTo", reason, coalesce(note,'') as note, amount_cents as "amountCents"
-        from paid_outs where property_id=${propertyId}::uuid and business_date between ${startDate}::date and ${endDate}::date
-        order by business_date, created_at
+      const records = await sql<Array<{ id: string; date: string; paidTo: string; reason: string; note: string; amountCents: number; time: string; clerk: string }>>`
+        select po.id, po.business_date::text as date, po.paid_to as "paidTo", po.reason, coalesce(po.note,'') as note, po.amount_cents as "amountCents",
+          to_char(po.created_at at time zone p.timezone, 'HH12:MI AM') as time,
+          coalesce((select e.name from employees e join property_memberships m on m.id=e.membership_id where m.auth_user_id=po.created_by_auth_user_id and m.property_id=po.property_id limit 1), 'Staff') as clerk
+        from paid_outs po join properties p on p.id=po.property_id
+        where po.property_id=${propertyId}::uuid and po.business_date between ${startDate}::date and ${endDate}::date
+        order by po.business_date, po.created_at
       `;
       return respond(
         [{ label: "Paid Outs", value: records.length, format: "number" }, { label: "Cash Paid Out", value: sum(records, (row) => row.amountCents), format: "money" }],
-        [{ key: "date", label: "Date", format: "date" }, { key: "paidTo", label: "Paid To" }, { key: "reason", label: "Reason" }, { key: "note", label: "Note" }, money("amountCents", "Amount")],
+        [{ key: "date", label: "Date", format: "date" }, { key: "time", label: "Time" }, { key: "clerk", label: "Clerk" }, { key: "paidTo", label: "Paid To" }, { key: "reason", label: "Reason" }, { key: "note", label: "Note" }, money("amountCents", "Amount")],
         records,
         "Cash paid out of the front-desk drawer. Each paid out lowers the expected cash for that day's Cash Drop.",
+      );
+    }
+
+    if (view === "clerk-activity") {
+      // HotelKey "Clerk Activity": every action staff took, by clerk and time.
+      const records = await sql<Array<{ id: string; date: string; time: string; clerk: string; area: string; reservation: string; activity: string }>>`
+        with tz as (select timezone from properties where id=${propertyId}::uuid),
+        events as (
+          select a.id::text as id, a.created_at as at, a.actor_name as clerk, a.category as area,
+            r.confirmation_number || ' · ' || g.first_name || ' ' || g.last_name as reservation, a.description as activity
+          from reservation_activity a join reservations r on r.id=a.reservation_id join guests g on g.id=r.main_guest_id
+          where a.property_id=${propertyId}::uuid
+          union all
+          select po.id::text, po.created_at,
+            coalesce((select e.name from employees e join property_memberships m on m.id=e.membership_id where m.auth_user_id=po.created_by_auth_user_id and m.property_id=po.property_id limit 1), 'Staff'),
+            'Paid Out', '—', 'Paid out $' || to_char(po.amount_cents/100.0,'FM999999990.00') || ' to ' || po.paid_to || ' · ' || po.reason
+          from paid_outs po where po.property_id=${propertyId}::uuid
+          union all
+          select cs.id::text || '-start', cs.opened_at, e.name, 'Shift', '—', 'Started ' || split_part(cs.status, ':', 2) || ' · opening cash $' || to_char(cs.opening_cents/100.0,'FM999999990.00')
+          from cash_shifts cs join employees e on e.id=cs.employee_id where cs.property_id=${propertyId}::uuid and cs.opened_at < coalesce(cs.closed_at, now())
+          union all
+          select cs.id::text || '-end', cs.closed_at, e.name, 'Shift', '—', 'Ended ' || split_part(cs.status, ':', 2) || ' · counted $' || to_char(coalesce(cs.counted_cents,0)/100.0,'FM999999990.00')
+            || ' vs expected $' || to_char(coalesce(cs.expected_cents,0)/100.0,'FM999999990.00')
+          from cash_shifts cs join employees e on e.id=cs.employee_id where cs.property_id=${propertyId}::uuid and cs.closed_at is not null
+        )
+        select id, to_char(at at time zone (select timezone from tz), 'YYYY-MM-DD') as date, to_char(at at time zone (select timezone from tz), 'HH12:MI AM') as time,
+          clerk, area, reservation, activity
+        from events
+        where (at at time zone (select timezone from tz))::date between ${startDate}::date and ${endDate}::date
+        order by at desc
+        limit 5000
+      `;
+      const clerks = new Set(records.map((row) => row.clerk));
+      return respond(
+        [{ label: "Activities", value: records.length, format: "number" }, { label: "Clerks", value: clerks.size, format: "number" }, { label: "Payments & Refunds", value: records.filter((row) => row.area === "Payment").length, format: "number" }, { label: "Status Changes", value: records.filter((row) => row.area === "Status").length, format: "number" }],
+        [{ key: "date", label: "Date", format: "date" }, { key: "time", label: "Time" }, { key: "clerk", label: "Clerk" }, { key: "area", label: "Area" }, { key: "reservation", label: "Reservation" }, { key: "activity", label: "Activity" }],
+        records,
+        "Every reservation change, payment, paid out, and shift start or end, with the staff member who did it. Times are in the hotel's time zone.",
+      );
+    }
+
+    if (view === "clerk-shift") {
+      // HotelKey "Clerk Shift": each shift's drawer from opening count to drop.
+      const records = await sql<Array<{ id: string; date: string; shift: string; clerk: string; started: string; ended: string; openingCents: number; paymentCents: number; refundCents: number; depositCents: number; paidOutCents: number; expectedCents: number; countedCents: number; differenceCents: number; droppedCents: number; status: string }>>`
+        select cs.id, bd.business_date::text as date, split_part(cs.status, ':', 2) as shift, e.name as clerk,
+          to_char(cs.opened_at at time zone p.timezone, 'MM/DD HH12:MI AM') as started,
+          coalesce(to_char(cs.closed_at at time zone p.timezone, 'MM/DD HH12:MI AM'), 'Open') as ended,
+          cs.opening_cents as "openingCents",
+          coalesce((select sum(pay.amount_cents) from payments pay where pay.property_id=cs.property_id and lower(pay.method) like '%cash%' and pay.created_at >= cs.opened_at and pay.created_at < coalesce(cs.closed_at, now())),0)::int as "paymentCents",
+          coalesce((select sum(r.amount_cents) from refunds r join payments pay on pay.id=r.payment_id where r.property_id=cs.property_id and lower(pay.method) like '%cash%' and r.created_at >= cs.opened_at and r.created_at < coalesce(cs.closed_at, now())),0)::int as "refundCents",
+          coalesce((select sum(le.debit_cents-le.credit_cents) from ledger_entries le where le.property_id=cs.property_id and le.account='Cash' and le.resource_type in ('deposit-collect','deposit-release') and le.created_at >= cs.opened_at and le.created_at < coalesce(cs.closed_at, now())),0)::int as "depositCents",
+          coalesce((select sum(po.amount_cents) from paid_outs po where po.property_id=cs.property_id and po.created_at >= cs.opened_at and po.created_at < coalesce(cs.closed_at, now())),0)::int as "paidOutCents",
+          coalesce(cs.expected_cents,0)::int as "expectedCents", coalesce(cs.counted_cents,0)::int as "countedCents",
+          (coalesce(cs.counted_cents,0) - coalesce(cs.expected_cents,0))::int as "differenceCents",
+          coalesce((select sum(cd.amount_cents) from cash_drops cd where cd.cash_shift_id=cs.id),0)::int as "droppedCents",
+          case when cs.status like 'open:%' then 'Open' when coalesce(cs.counted_cents,0)=coalesce(cs.expected_cents,0) then 'Balanced' when coalesce(cs.counted_cents,0)>coalesce(cs.expected_cents,0) then 'Over' else 'Short' end as status
+        from cash_shifts cs join employees e on e.id=cs.employee_id join business_days bd on bd.id=cs.business_day_id join properties p on p.id=cs.property_id
+        where cs.property_id=${propertyId}::uuid and bd.business_date between ${startDate}::date and ${endDate}::date
+        order by cs.opened_at desc
+      `;
+      return respond(
+        [{ label: "Shifts", value: records.length, format: "number" }, { label: "Cash Taken", value: sum(records, (row) => row.paymentCents), format: "money" }, { label: "Paid Outs", value: sum(records, (row) => row.paidOutCents), format: "money" }, { label: "Over / Short", value: sum(records, (row) => row.status === "Open" ? 0 : row.differenceCents), format: "money" }],
+        [{ key: "date", label: "Business Date", format: "date" }, { key: "shift", label: "Shift" }, { key: "clerk", label: "Clerk" }, { key: "started", label: "Started" }, { key: "ended", label: "Ended" },
+          money("openingCents", "Opening"), money("paymentCents", "Cash Payments"), money("refundCents", "Cash Refunds"), money("depositCents", "Cash Deposits"), money("paidOutCents", "Paid Outs"),
+          money("expectedCents", "Expected"), money("countedCents", "Counted"), money("differenceCents", "Over / Short"), money("droppedCents", "Dropped"), { key: "status", label: "Status", format: "status" }],
+        records,
+        "Each clerk's shift: the opening count, cash taken and paid out during the shift, and the closing count and drop. An open shift shows its activity so far.",
       );
     }
 

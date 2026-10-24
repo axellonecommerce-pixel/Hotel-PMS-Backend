@@ -1,3 +1,4 @@
+import type { TransactionSql } from "postgres";
 import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
@@ -7,7 +8,7 @@ import { recordChange } from "@/server/realtime/change-events";
 const orderSchema = z.object({
   roomNumber: z.string().trim().min(1),
   note: z.string().trim().min(1),
-  priority: z.enum(["Low", "Medium", "High", "Emergency"]),
+  priority: z.preprocess((value) => typeof value === "string" ? value.charAt(0).toUpperCase() + value.slice(1).toLowerCase() : value, z.enum(["Low", "Medium", "High", "Emergency"])),
   assignedWorker: z.string().trim().optional(),
   costCents: z.number().int().nonnegative(),
   notes: z.string().optional(),
@@ -22,6 +23,8 @@ const updateSchema = z.discriminatedUnion("action", [
   z.object({ id: z.string().uuid(), action: z.literal("complete") }),
   z.object({ id: z.string().uuid(), action: z.literal("extend"), blockTo: z.string().min(1) }),
   z.object({ id: z.string().uuid(), action: z.literal("unblock"), reason: z.string().trim().min(1) }),
+  // Correct any field entered wrongly, including the room and block dates.
+  orderSchema.extend({ id: z.string().uuid(), action: z.literal("edit") }),
 ]);
 
 type OrderRow = {
@@ -53,7 +56,7 @@ function toClient(row: OrderRow) {
   };
 }
 
-const selecting = `select m.id,r.number as "roomNumber",m.problem as note,m.priority,m.assigned_worker as "assignedWorker",m.cost_cents as "costCents",m.rentable,m.status,m.notes,m.created_at as "createdAt",m.completed_at as "completedAt",m.returned_to_service_at as "returnedToServiceAt" from maintenance_orders m join rooms r on r.id=m.room_id`;
+const selecting = `select m.id,r.number as "roomNumber",m.problem as note,initcap(m.priority) as priority,m.assigned_worker as "assignedWorker",m.cost_cents as "costCents",m.rentable,m.status,m.notes,m.created_at as "createdAt",m.completed_at as "completedAt",m.returned_to_service_at as "returnedToServiceAt" from maintenance_orders m join rooms r on r.id=m.room_id`;
 
 export async function GET(request: Request) {
   try {
@@ -66,6 +69,33 @@ export async function GET(request: Request) {
 
 class MaintenanceConflict extends Error {}
 
+type Tx = TransactionSql<Record<string, never>>;
+
+/** A room cannot be blocked while a guest is in it or booked into the block dates. */
+async function assertRoomCanBeBlocked(tx: Tx, roomId: string, roomNumber: string, blockFrom: string, blockTo: string) {
+  const [conflict] = await tx<Array<{ guest: string; status: string; departure: string }>>`
+    select concat(g.first_name,' ',g.last_name) as guest,rr.status,rs.departure_date::text as departure
+    from reservation_rooms rr join reservations rs on rs.id=rr.reservation_id join guests g on g.id=rs.main_guest_id
+    where rr.room_id=${roomId}::uuid and rr.status in ('reserved','checked_in') and rs.status in ('reserved','checked_in')
+      and (rr.status='checked_in' or (rs.arrival_date <= ${blockTo}::date and greatest(rs.departure_date, rs.arrival_date + 1) > ${blockFrom}::date))
+    order by rr.status desc limit 1
+  `;
+  if (conflict) {
+    throw new MaintenanceConflict(conflict.status === "checked_in"
+      ? `Room ${roomNumber} is occupied by ${conflict.guest} until ${conflict.departure}. Move the guest before blocking the room.`
+      : `Room ${roomNumber} is reserved for ${conflict.guest} during these dates. Move that reservation before blocking the room.`);
+  }
+}
+
+/** Return a room to rentable only when no other open non-rentable issue holds it. */
+async function releaseRoomIfUnblocked(tx: Tx, propertyId: string, roomNumber: string, exceptOrderId: string, markDirty: boolean) {
+  await tx`
+    update rooms set service_status='rentable', cleanliness_status=case when ${markDirty} then 'dirty' else cleanliness_status end, updated_at=now()
+    where property_id=${propertyId}::uuid and number=${roomNumber}
+      and not exists (select 1 from maintenance_orders mo where mo.room_id=rooms.id and mo.id<>${exceptOrderId}::uuid and mo.rentable=false and mo.status not in ('resolved','cancelled'))
+  `;
+}
+
 export async function POST(request: Request) {
   try {
     const session = await requirePropertySession(request, "maintenance.manage");
@@ -77,22 +107,7 @@ export async function POST(request: Request) {
     const workOrder = await productionSql().begin(async (tx) => {
       const [room] = await tx<Array<{ id: string }>>`select id from rooms where property_id=${session.propertyId}::uuid and number=${parsed.data.roomNumber} limit 1 for update`;
       if (!room) return null;
-      if (parsed.data.blockRoom) {
-        // Blocking a room a guest is in (or is booked into for the block
-        // dates) would strand that stay; staff must move the guest first.
-        const [conflict] = await tx<Array<{ guest: string; status: string; departure: string }>>`
-          select concat(g.first_name,' ',g.last_name) as guest,rr.status,rs.departure_date::text as departure
-          from reservation_rooms rr join reservations rs on rs.id=rr.reservation_id join guests g on g.id=rs.main_guest_id
-          where rr.room_id=${room.id}::uuid and rr.status in ('reserved','checked_in') and rs.status in ('reserved','checked_in')
-            and (rr.status='checked_in' or (rs.arrival_date <= ${parsed.data.blockTo}::date and greatest(rs.departure_date, rs.arrival_date + 1) > ${parsed.data.blockFrom}::date))
-          order by rr.status desc limit 1
-        `;
-        if (conflict) {
-          throw new MaintenanceConflict(conflict.status === "checked_in"
-            ? `Room ${parsed.data.roomNumber} is occupied by ${conflict.guest} until ${conflict.departure}. Move the guest before blocking the room.`
-            : `Room ${parsed.data.roomNumber} is reserved for ${conflict.guest} during these dates. Move that reservation before blocking the room.`);
-        }
-      }
+      if (parsed.data.blockRoom) await assertRoomCanBeBlocked(tx, room.id, parsed.data.roomNumber, parsed.data.blockFrom, parsed.data.blockTo);
       const [created] = await tx<OrderRow[]>`
         insert into maintenance_orders (property_id,room_id,problem,priority,assigned_worker,cost_cents,rentable,status,notes)
         values (${session.propertyId}::uuid,${room.id}::uuid,${parsed.data.note},${parsed.data.priority.toLowerCase()},${parsed.data.assignedWorker ?? null},${parsed.data.costCents},${!parsed.data.blockRoom},'open',${tx.json({ additionalNotes: parsed.data.notes, attachmentNames: parsed.data.attachmentNames ?? [], blockReason: parsed.data.blockReason, blockFrom: parsed.data.blockFrom, blockTo: parsed.data.blockTo })}::text)
@@ -138,6 +153,33 @@ export async function PATCH(request: Request) {
       const [existing] = await tx<OrderRow[]>`${tx.unsafe(selecting)} where m.id=${parsed.data.id}::uuid and m.property_id=${session.propertyId}::uuid for update`;
       if (!existing) return null;
       const extra = metadata(existing.notes);
+      if (parsed.data.action === "edit") {
+        const input = parsed.data;
+        if (input.blockTo < input.blockFrom) throw new MaintenanceConflict("The end date must not be before the start date.");
+        if (input.blockRoom && !input.blockReason?.trim()) throw new MaintenanceConflict("A blocking reason is required.");
+        if (existing.status === "resolved" && (input.roomNumber !== existing.roomNumber || input.blockRoom !== !existing.rentable)) {
+          throw new MaintenanceConflict("This issue is already resolved; only its details and cost can be corrected.");
+        }
+        const [room] = await tx<Array<{ id: string }>>`select id from rooms where property_id=${session.propertyId}::uuid and number=${input.roomNumber} limit 1 for update`;
+        if (!room) throw new MaintenanceConflict(`Room ${input.roomNumber} does not exist.`);
+        const wasBlocking = !existing.rentable && existing.status !== "resolved";
+        const blocks = input.blockRoom && existing.status !== "resolved";
+        const blockChanged = blocks && (!wasBlocking || input.roomNumber !== existing.roomNumber || input.blockFrom !== extra.blockFrom || input.blockTo !== extra.blockTo);
+        if (blockChanged) await assertRoomCanBeBlocked(tx, room.id, input.roomNumber, input.blockFrom, input.blockTo);
+        const nextExtra = { ...extra, additionalNotes: input.notes, attachmentNames: input.attachmentNames ?? extra.attachmentNames ?? [], blockReason: input.blockReason, blockFrom: input.blockFrom, blockTo: input.blockTo };
+        const [row] = await tx<OrderRow[]>`
+          update maintenance_orders set room_id=${room.id}::uuid, problem=${input.note}, priority=${input.priority.toLowerCase()},
+            assigned_worker=${input.assignedWorker || null}, cost_cents=${input.costCents}, rentable=${!input.blockRoom},
+            notes=${tx.json(JSON.parse(JSON.stringify(nextExtra)))}::text, updated_at=now()
+          where id=${existing.id}::uuid
+          returning id,(select number from rooms where id=room_id) as "roomNumber",problem as note,initcap(priority) as priority,assigned_worker as "assignedWorker",cost_cents as "costCents",rentable,status,notes,created_at as "createdAt",completed_at as "completedAt",returned_to_service_at as "returnedToServiceAt"
+        `;
+        // Keep room inventory in step: the old room is released if nothing
+        // else blocks it, and a blocking issue blocks its (new) room.
+        if (wasBlocking && (!blocks || input.roomNumber !== existing.roomNumber)) await releaseRoomIfUnblocked(tx, session.propertyId, existing.roomNumber, existing.id, false);
+        if (blocks) await tx`update rooms set service_status='non-rentable', updated_at=now() where id=${room.id}::uuid`;
+        return row;
+      }
       if (parsed.data.action === "extend") {
         if (typeof extra.blockTo !== "string" || parsed.data.blockTo <= extra.blockTo) return "invalid-date" as const;
         extra.blockTo = parsed.data.blockTo;
@@ -158,13 +200,7 @@ export async function PATCH(request: Request) {
       // "Make Available" is the controlled return-to-service action. A
       // repaired room becomes rentable but dirty, so it cannot be treated as
       // guest-ready until Housekeeping completes the clean.
-      if (parsed.data.action === "unblock") {
-        await tx`
-          update rooms
-          set service_status='rentable', cleanliness_status='dirty', updated_at=now()
-          where property_id=${session.propertyId}::uuid and number=${existing.roomNumber}
-        `;
-      }
+      if (parsed.data.action === "unblock") await releaseRoomIfUnblocked(tx, session.propertyId, existing.roomNumber, existing.id, true);
       return row;
     });
     if (updated === "invalid-date") return Response.json({ error: "Choose a later block end date." }, { status: 400 });
@@ -179,5 +215,8 @@ export async function PATCH(request: Request) {
       payload: { source: "maintenance" },
     });
     return Response.json({ workOrder: toClient(updated) });
-  } catch (error) { return propertyAccessResponse(error); }
+  } catch (error) {
+    if (error instanceof MaintenanceConflict) return Response.json({ error: error.message }, { status: 409 });
+    return propertyAccessResponse(error);
+  }
 }

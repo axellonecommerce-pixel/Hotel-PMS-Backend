@@ -142,7 +142,9 @@ export async function runNightAudit(tx: Tx, input: { propertyId: string; trigger
         where d.property_id=${input.propertyId}::uuid
           and (rr.status='checked_out' or r.departure_date<=${day.businessDate}::date)
           and d.amount_cents > coalesce((select sum(dt.amount_cents) from deposit_transactions dt where dt.deposit_id=d.id and dt.type in ('release','charge')),0))::int as "unresolvedDeposits",
-      (select count(*) from cash_shifts where property_id=${input.propertyId}::uuid and status='open')::int as "openCashShifts",
+      -- Shifts are clerk sessions counted by time, not by business day, so the
+      -- night clerk's open shift does not block the audit.
+      0 as "openCashShifts",
       (select count(*) from maintenance_orders where property_id=${input.propertyId}::uuid and status not in ('completed','cancelled') and priority='critical')::int as "operationalIssues"
   `;
   const blockers = nightAuditBlockers({
