@@ -58,13 +58,30 @@ async function openShift(db: Db, propertyId: string) {
   return shift ?? null;
 }
 
-/** The signed-in user's employee record (the clerk). */
+/**
+ * The signed-in user's employee record (the clerk). Any staff login can run a
+ * shift; a login without an employee record gets one named from its account.
+ */
 async function clerkFor(db: Db, propertyId: string, authUserId: string) {
   const [employee] = await db<Array<{ id: string; name: string }>>`
     select e.id, e.name from employees e join property_memberships m on m.id=e.membership_id
     where m.auth_user_id=${authUserId}::uuid and m.property_id=${propertyId}::uuid and e.active order by e.created_at limit 1
   `;
-  return employee ?? null;
+  if (employee) return employee;
+  const [membership] = await db<Array<{ id: string; role: string; name: string; email: string | null }>>`
+    select m.id, m.role,
+      coalesce(nullif(u.raw_user_meta_data->>'full_name',''), nullif(u.raw_user_meta_data->>'name',''), split_part(u.email,'@',1), initcap(replace(m.role,'_',' '))) as name,
+      u.email
+    from property_memberships m left join auth.users u on u.id=m.auth_user_id
+    where m.auth_user_id=${authUserId}::uuid and m.property_id=${propertyId}::uuid and m.active limit 1
+  `;
+  if (!membership) return null;
+  const [created] = await db<Array<{ id: string; name: string }>>`
+    insert into employees (property_id, membership_id, name, email, job_role, pay_method)
+    values (${propertyId}::uuid, ${membership.id}::uuid, ${membership.name}, ${membership.email}, ${membership.role === "front_desk" ? "Front Desk" : membership.role.charAt(0).toUpperCase() + membership.role.slice(1)}, 'hourly')
+    returning id, name
+  `;
+  return created;
 }
 
 export async function GET(request: Request) {
@@ -119,6 +136,9 @@ export async function POST(request: Request) {
         return { started: { id: created.id, clerk: clerk.name, shiftName: input.shiftName, openedAt: created.openedAt } };
       }
       if (!current) throw new ShiftError("There is no open shift to end.");
+      // The drawer always holds at least the float, so an empty count means
+      // the clerk has not counted yet.
+      if (input.countedCents <= 0) throw new ShiftError("Count the cash in the drawer before ending the shift.");
       const activity = await cashActivityBetween(tx, session.propertyId, current.openedAt, null);
       const expectedCents = Math.max(0, current.openingCents + activity.netCents);
       const [settings] = await tx<Array<{ value: { property?: { cashFloatCents?: number } } | null }>>`

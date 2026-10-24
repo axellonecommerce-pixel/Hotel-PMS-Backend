@@ -5,6 +5,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
+import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 
 const paymentSchema = z.object({
   // The existing workspace uses a client folio handle. The authoritative
@@ -63,6 +64,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     const parsed = paymentSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: parsed.error.issues.find((issue) => issue.path[0] === "method")?.message ?? "Enter a valid payment amount and method." }, { status: 400 });
     const payment = await productionSql().begin(async (tx) => {
+      if (parsed.data.method.toUpperCase() !== "BAD DEBT") await requireOpenShift(tx, session.propertyId, "collect a payment");
       const [folio] = await tx<Array<{ id: string; balanceCents: number; reservationStatus: string; companyName: string | null }>>`
         select f.id,r.status as "reservationStatus",(select c.name from companies c where c.id=r.company_id) as "companyName",(
           coalesce((select sum(c.amount_cents + coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c where c.folio_id=f.id and c.status='posted'),0)
@@ -102,6 +104,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     });
     return Response.json({ payment }, { status: 201 });
   } catch (error) {
+    if (error instanceof ShiftRequiredError) return Response.json({ error: error.message }, { status: 409 });
     if (error instanceof Error && /Folio|Payment|Bad debt/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
@@ -114,6 +117,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
     const parsed = refundSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Enter a valid refund amount." }, { status: 400 });
     const refund = await productionSql().begin(async (tx) => {
+      await requireOpenShift(tx, session.propertyId, "refund a payment");
       const [payment] = await tx<Array<{ id: string; method: string; amountCents: number; folioId: string; allocatedCents: number; refundedCents: number }>>`
         select p.id,p.method,p.amount_cents as "amountCents",pa.folio_id as "folioId",pa.amount_cents as "allocatedCents",
           coalesce((select sum(r.amount_cents) from refunds r where r.payment_id=p.id),0)::int as "refundedCents"
@@ -134,6 +138,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
     });
     return Response.json({ refund });
   } catch (error) {
+    if (error instanceof ShiftRequiredError) return Response.json({ error: error.message }, { status: 409 });
     if (error instanceof Error && /Payment|Refund|Bad debt/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }

@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { recordChange } from "@/server/realtime/change-events";
+import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 
 const companyQuerySchema = z.object({ companyId: z.string().uuid() });
 const sendInvoiceSchema = z.discriminatedUnion("action", [
@@ -139,6 +140,7 @@ export async function POST(request: Request) {
     const allocatedCents = input.allocations.reduce((sum, allocation) => sum + allocation.amountCents, 0);
     if (allocatedCents > input.amountCents) return Response.json({ error: "Invoice allocations cannot exceed the payment received." }, { status: 400 });
     const payment = await productionSql().begin(async (tx) => {
+      await requireOpenShift(tx, session.propertyId, "record a company payment");
       const [company] = await tx<Array<{ id: string }>>`select id from companies where id=${input.companyId}::uuid and property_id=${session.propertyId}::uuid for update`;
       if (!company) throw new Error("Company not found.");
       const invoiceIds = input.allocations.map((allocation) => allocation.invoiceId);
@@ -173,6 +175,7 @@ export async function POST(request: Request) {
     await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "company", entityId: input.companyId, action: "updated", entityVersion: Math.floor(Date.now() / 1000), payload: { paymentId: payment.id } });
     return Response.json({ payment }, { status: 201 });
   } catch (error) {
+    if (error instanceof ShiftRequiredError) return Response.json({ error: error.message }, { status: 409 });
     if (error instanceof Error && /Company|invoice|allocation/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }

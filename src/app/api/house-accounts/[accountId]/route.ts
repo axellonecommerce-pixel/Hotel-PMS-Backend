@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 
 const entrySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("charge"), chargeType: z.string().trim().min(1).max(80), description: z.string().trim().min(1).max(200), amountCents: z.number().int().positive().max(10_000_000) }),
@@ -41,6 +42,7 @@ export async function POST(request: Request, context: { params: Promise<{ accoun
     if (!parsed.success) return Response.json({ error: "Enter the charge or payment details." }, { status: 400 });
     const input = parsed.data;
     const created = await productionSql().begin(async (tx) => {
+      if (input.kind === "payment") await requireOpenShift(tx, session.propertyId, "take a payment");
       const [account] = await tx<Array<{ id: string; status: string; name: string; balanceCents: number }>>`
         select ha.id, ha.status, ha.name,
           (coalesce((select sum(c.amount_cents) from house_account_charges c where c.house_account_id=ha.id and c.status='posted'),0)
@@ -73,6 +75,7 @@ export async function POST(request: Request, context: { params: Promise<{ accoun
     });
     return Response.json(created, { status: 201 });
   } catch (error) {
+    if (error instanceof ShiftRequiredError) return Response.json({ error: error.message }, { status: 409 });
     if (error instanceof HouseAccountError) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }

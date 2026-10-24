@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
+import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 
 const DEPOSITS_HELD = "Security Deposits Held";
 /** Cash sits in the drawer; any other method is a card authorization. */
@@ -93,6 +94,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     if (!parsed.success) return Response.json({ error: "Deposit details are invalid." }, { status: 400 });
     const input = parsed.data;
     const result = await productionSql().begin(async (tx) => {
+      await requireOpenShift(tx, session.propertyId, input.action === "collect" ? "collect a deposit" : "settle a deposit");
       const rooms = await tx<Array<{ id: string }>>`
         select id from reservation_rooms where reservation_id=${reservationId}::uuid and property_id=${session.propertyId}::uuid order by created_at for update
       `;
@@ -153,6 +155,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     if ("error" in result) return Response.json({ error: result.error }, { status: 409 });
     return Response.json({ deposit: await depositView(session.propertyId, reservationId) });
   } catch (error) {
+    if (error instanceof ShiftRequiredError) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }

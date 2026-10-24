@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 
 // HotelKey "Paid Outs": cash handed out of the front-desk drawer (supplies,
 // a cash refund to a walk-up, petty expenses). Each one lowers the expected
@@ -39,6 +40,7 @@ export async function POST(request: Request) {
     const parsed = createSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Enter an amount, who was paid, and the reason." }, { status: 400 });
     const paidOut = await productionSql().begin(async (tx) => {
+      await requireOpenShift(tx, session.propertyId, "pay cash out of the drawer");
       const businessDate = await propertyBusinessDate(tx, session.propertyId);
       const [created] = await tx<Array<{ id: string; businessDate: string; createdAt: string }>>`
         insert into paid_outs (property_id, business_date, amount_cents, paid_to, reason, note, created_by_auth_user_id)
@@ -53,6 +55,7 @@ export async function POST(request: Request) {
     });
     return Response.json({ paidOut }, { status: 201 });
   } catch (error) {
+    if (error instanceof ShiftRequiredError) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
