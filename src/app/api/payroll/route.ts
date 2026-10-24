@@ -41,8 +41,7 @@ export async function GET(request: Request) {
     const result = await productionSql().begin(async (tx) => {
       const [configured] = await tx<Array<{ value: StoredPayroll }>>`select value from property_settings where property_id=${session.propertyId}::uuid and key='application_settings'`;
       const frequency = configured?.value?.payroll?.frequency ?? "Biweekly";
-      const [businessDay] = await tx<Array<{ date: string }>>`select business_date::text as date from business_days where property_id=${session.propertyId}::uuid order by business_date desc limit 1`;
-      const periodDates = datesForPeriod(businessDay?.date ?? new Date().toISOString().slice(0, 10), frequency);
+      const periodDates = datesForPeriod(await propertyBusinessDate(tx, session.propertyId), frequency);
       const payDate = new Date(`${periodDates.end}T12:00:00Z`); payDate.setUTCDate(payDate.getUTCDate() + 3);
       const [period] = await tx<Array<{ id: string; start: string; end: string; payDate: string; status: string }>>`
         insert into pay_periods (property_id,starts_on,ends_on,scheduled_pay_date,status)

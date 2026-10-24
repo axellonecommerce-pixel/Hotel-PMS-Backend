@@ -1,17 +1,32 @@
+import type { TransactionSql } from "postgres";
 import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
-import { postProductionLedger } from "@/server/finance/production-finance";
+import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
+import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+
+type Tx = TransactionSql<Record<string, never>>;
+
+async function reservationRentCents(tx: Tx, reservationId: string) {
+  const [row] = await tx<Array<{ cents: number }>>`
+    select coalesce(sum(c.amount_cents),0)::int as cents from charges c join reservation_rooms rr on rr.id=c.reservation_room_id
+    where rr.reservation_id=${reservationId}::uuid and c.type='Room Rent' and c.status='posted'
+  `;
+  return row.cents;
+}
 
 const requestSchema = z.object({
   expectedVersion: z.number().int().positive(),
   destinationRoomNumber: z.string().trim().min(1).max(80),
   remark: z.string().trim().min(1).max(2_000),
-  rateDecision: z.enum(["keep", "change"]),
+  // keep: current rate; change: destination room type's rate; custom: a
+  // nightly rate the front desk enters for the remaining nights.
+  rateDecision: z.enum(["keep", "change", "custom"]),
+  newRateCents: z.number().int().nonnegative().max(10_000_000).optional(),
   // A group can move any one of its rooms; defaults to the first active room.
   reservationRoomId: z.string().uuid().optional(),
-});
+}).refine((value) => value.rateDecision !== "custom" || value.newRateCents !== undefined, { message: "Enter the new nightly rate." });
 
 function routeParams(context: { params: Promise<{ reservationId: string }> }) {
   return context.params.then(({ reservationId }) => reservationId);
@@ -83,12 +98,10 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       // room's rate changes only the open business day and future nights,
       // updating the matching Room Rent and tax postings in the same
       // transaction as the physical room change.
-      if (input.data.rateDecision === "change") {
-        const [businessDay] = await tx<Array<{ date: string }>>`
-          select business_date::text as date from business_days
-          where property_id=${session.propertyId}::uuid order by business_date desc limit 1
-        `;
-        const effectiveDate = businessDay?.date ?? new Date().toISOString().slice(0, 10);
+      if (input.data.rateDecision !== "keep") {
+        const effectiveDate = await propertyBusinessDate(tx, session.propertyId);
+        const newRateCents = input.data.rateDecision === "custom" ? input.data.newRateCents! : destination.baseRateCents;
+        const rentBeforeCents = await reservationRentCents(tx, reservation.id);
         // Capture the existing folio amounts before changing them. A room move
         // must adjust the accounting ledger by the same difference as the
         // visible charge, otherwise Revenue and the guest folio diverge.
@@ -103,23 +116,23 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
           for update of c
         `;
         await tx`
-          update nightly_rates set base_rate_cents=${destination.baseRateCents},discount_cents=0,final_rate_cents=${destination.baseRateCents}
+          update nightly_rates set base_rate_cents=${newRateCents},discount_cents=0,final_rate_cents=${newRateCents}
           where reservation_room_id=${reservationRoom.id}::uuid and stay_date>=${effectiveDate}::date
         `;
         await tx`
-          update charges set amount_cents=${destination.baseRateCents}
+          update charges set amount_cents=${newRateCents}
           where reservation_room_id=${reservationRoom.id}::uuid and type='Room Rent' and service_date>=${effectiveDate}::date and status='posted'
         `;
         if (!reservation.taxExempt) {
           await tx`
-            update charge_taxes ct set amount_cents=round(${destination.baseRateCents} * ct.rate_basis_points / 10000.0)::int
+            update charge_taxes ct set amount_cents=round(${newRateCents} * ct.rate_basis_points / 10000.0)::int
             from charges c
             where ct.charge_id=c.id and c.reservation_room_id=${reservationRoom.id}::uuid
               and c.type='Room Rent' and c.service_date>=${effectiveDate}::date and c.status='posted'
           `;
         }
         for (const charge of affectedCharges) {
-          const roomRentDifference = destination.baseRateCents - charge.amountCents;
+          const roomRentDifference = newRateCents - charge.amountCents;
           if (roomRentDifference !== 0) await postProductionLedger(tx, {
             propertyId: session.propertyId,
             businessDate: charge.serviceDate,
@@ -131,7 +144,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
             amountCents: Math.abs(roomRentDifference),
           });
           if (!reservation.taxExempt) {
-            const nextTaxCents = Math.round(destination.baseRateCents * reservation.taxRateBasisPoints / 10_000);
+            const nextTaxCents = Math.round(newRateCents * reservation.taxRateBasisPoints / 10_000);
             const taxDifference = nextTaxCents - charge.taxCents;
             if (taxDifference !== 0) await postProductionLedger(tx, {
               propertyId: session.propertyId,
@@ -144,6 +157,15 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
               amountCents: Math.abs(taxDifference),
             });
           }
+        }
+        // An OTA commission on unpaid rent follows the new room rent.
+        const commission = await readReservationCommission(tx, session.propertyId, reservation.id);
+        if (rentBeforeCents > 0 && commission.commissionCents > 0 && (commission.deducted || commission.paidCents === 0)) {
+          await setReservationCommission(tx, {
+            propertyId: session.propertyId, reservationId: reservation.id,
+            targetCents: Math.round(commission.commissionCents * await reservationRentCents(tx, reservation.id) / rentBeforeCents),
+            businessDate: effectiveDate, reason: "Room move rate change",
+          });
         }
       }
       // Assigning a room to an unassigned booking is not a move; a move from
