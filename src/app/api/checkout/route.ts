@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { allocateProductionDocumentNumber, propertyBusinessDate } from "@/server/finance/production-finance";
+import { transferBalanceToCompany } from "@/server/finance/direct-bill";
 import { recordChange } from "@/server/realtime/change-events";
 
 const checkoutSchema = z.object({
@@ -153,20 +154,19 @@ export async function POST(request: Request) {
       if (remaining.count === 0) {
         await tx`update reservations set status='checked_out', updated_at=now() where id=${reservation.id}::uuid`;
         if (reservation.companyId) {
-          const [existing] = await tx<Array<{ id: string }>>`select id from invoices where reservation_id=${reservation.id}::uuid limit 1`;
-          if (existing) invoiceId = existing.id;
-          else {
-            const [company] = await tx<Array<{ paymentTermsDays: number }>>`
-              select payment_terms_days as "paymentTermsDays" from companies
-              where id=${reservation.companyId}::uuid and property_id=${session.propertyId}::uuid
-            `;
+          const businessDate = await propertyBusinessDate(tx, session.propertyId);
+          const [company] = await tx<Array<{ name: string; paymentTermsDays: number }>>`
+            select name, payment_terms_days as "paymentTermsDays" from companies
+            where id=${reservation.companyId}::uuid and property_id=${session.propertyId}::uuid
+          `;
+          let [invoice] = await tx<Array<{ id: string; number: string }>>`select id, number from invoices where reservation_id=${reservation.id}::uuid limit 1`;
+          if (!invoice) {
             const number = await allocateProductionDocumentNumber(tx, session.propertyId);
-            const [invoice] = await tx<Array<{ id: string }>>`
+            [invoice] = await tx<Array<{ id: string; number: string }>>`
               insert into invoices (property_id,company_id,reservation_id,number,status,due_date)
-              values (${session.propertyId}::uuid,${reservation.companyId}::uuid,${reservation.id}::uuid,${number},'draft',(${await propertyBusinessDate(tx, session.propertyId)}::date + ${company?.paymentTermsDays ?? 30}::int))
-              returning id
+              values (${session.propertyId}::uuid,${reservation.companyId}::uuid,${reservation.id}::uuid,${number},'draft',(${businessDate}::date + ${company?.paymentTermsDays ?? 30}::int))
+              returning id, number
             `;
-            invoiceId = invoice.id;
             await tx`
               insert into invoice_lines (property_id,invoice_id,folio_id,charge_id,description,amount_cents)
               select ${session.propertyId}::uuid,${invoice.id}::uuid,c.folio_id,c.id,c.description,
@@ -175,6 +175,11 @@ export async function POST(request: Request) {
               where f.reservation_id=${reservation.id}::uuid and c.status='posted'
             `;
           }
+          invoiceId = invoice.id;
+          await transferBalanceToCompany(tx, {
+            propertyId: session.propertyId, reservationId: reservation.id, companyId: reservation.companyId,
+            invoiceId: invoice.id, invoiceNumber: invoice.number, companyName: company?.name ?? "the company", businessDate,
+          });
         }
       }
       return { checkedOutRoomIds: input.reservationRoomIds, reservationCheckedOut: remaining.count === 0, invoiceId };

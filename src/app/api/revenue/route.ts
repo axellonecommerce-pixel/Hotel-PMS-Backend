@@ -32,7 +32,7 @@ export async function GET(request: Request) {
           coalesce(sum(p.amount_cents - coalesce((select sum(r.amount_cents) from refunds r where r.payment_id=p.id),0)),0)::int as cents,
           count(*)::int as count
         from payments p
-        where p.property_id=${session.propertyId}::uuid and p.method not in ('BAD DEBT','OTA COMMISSION')
+        where p.property_id=${session.propertyId}::uuid and p.method not in ('BAD DEBT','OTA COMMISSION','DIRECT BILL')
           and p.effective_date between ${parsed.data.start}::date and ${parsed.data.end}::date
         group by p.method order by cents desc,label
       `,

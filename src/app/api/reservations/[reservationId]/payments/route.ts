@@ -23,6 +23,9 @@ const paymentSchema = z.object({
   if (value.method.toUpperCase() === "OTA COMMISSION") {
     context.addIssue({ code: "custom", path: ["method"], message: "OTA commission is settled automatically from the reservation source." });
   }
+  if (value.method.toUpperCase() === "DIRECT BILL") {
+    context.addIssue({ code: "custom", path: ["method"], message: "Direct bill balances move to the company invoice automatically at checkout." });
+  }
 });
 
 const refundSchema = z.object({ paymentId: z.string().uuid(), folioId: z.string().uuid(), amountCents: z.number().int().positive() });
@@ -56,8 +59,8 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     const parsed = paymentSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: parsed.error.issues.find((issue) => issue.path[0] === "method")?.message ?? "Enter a valid payment amount and method." }, { status: 400 });
     const payment = await productionSql().begin(async (tx) => {
-      const [folio] = await tx<Array<{ id: string; balanceCents: number; reservationStatus: string }>>`
-        select f.id,r.status as "reservationStatus",(
+      const [folio] = await tx<Array<{ id: string; balanceCents: number; reservationStatus: string; companyName: string | null }>>`
+        select f.id,r.status as "reservationStatus",(select c.name from companies c where c.id=r.company_id) as "companyName",(
           coalesce((select sum(c.amount_cents + coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c where c.folio_id=f.id and c.status='posted'),0)
           - coalesce((select sum(pa.amount_cents) from payment_allocations pa where pa.folio_id=f.id),0)
         )::int as "balanceCents"
@@ -66,6 +69,8 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         for update
       `;
       if (!folio) throw new Error("Folio not found.");
+      // FR-COM-002: a company stay is billed to the company, never the guest.
+      if (folio.companyName) throw new Error(`Payment is not collected from the guest. This stay is billed to ${folio.companyName}; the balance moves to the company invoice at checkout.`);
       if (parsed.data.amountCents > folio.balanceCents) throw new Error("Payment cannot exceed the folio balance.");
       const isBadDebt = parsed.data.method.toUpperCase() === "BAD DEBT";
       if (isBadDebt && folio.reservationStatus !== "checked_in") throw new Error("Bad debt can only be recorded for an in-house stay.");
@@ -112,6 +117,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
       if (!payment) throw new Error("Payment not found.");
       if (payment.method.toUpperCase() === "BAD DEBT") throw new Error("Bad debt entries cannot be refunded.");
       if (payment.method.toUpperCase() === "OTA COMMISSION") throw new Error("Payment entries for OTA commission deductions cannot be refunded.");
+      if (payment.method.toUpperCase() === "DIRECT BILL") throw new Error("Payment entries for a direct bill transfer cannot be refunded.");
       if (parsed.data.amountCents > payment.amountCents - payment.refundedCents) throw new Error("Refund cannot exceed the unrefunded payment amount.");
       if (parsed.data.amountCents > payment.allocatedCents) throw new Error("Refund cannot exceed the payment allocated to this folio.");
       await tx`insert into refunds (property_id,payment_id,amount_cents,effective_date,reason) values (${session.propertyId}::uuid,${payment.id}::uuid,${parsed.data.amountCents},${await propertyBusinessDate(tx, session.propertyId)}::date,'Guest refund')`;
@@ -136,6 +142,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
       if (!payment) return false;
       if (payment.method.toUpperCase() === "BAD DEBT") throw new Error("Bad debt entries cannot be deleted.");
       if (payment.method.toUpperCase() === "OTA COMMISSION") throw new Error("Payment entries for OTA commission deductions cannot be deleted.");
+      if (payment.method.toUpperCase() === "DIRECT BILL") throw new Error("Payment entries for a direct bill transfer cannot be deleted.");
       await tx`delete from refunds where payment_id=${payment.id}::uuid`;
       await tx`delete from payment_allocations where payment_id=${payment.id}::uuid`;
       await tx`delete from payments where id=${payment.id}::uuid`;
@@ -144,7 +151,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
     if (!deleted) return Response.json({ error: "Payment not found." }, { status: 404 });
     return NextResponse.json({ deleted: true });
   } catch (error) {
-    if (error instanceof Error && /Bad debt|OTA commission/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (error instanceof Error && /Bad debt|OTA commission|direct bill/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
