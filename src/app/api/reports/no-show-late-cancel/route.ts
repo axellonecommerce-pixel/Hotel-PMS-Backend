@@ -41,7 +41,7 @@ export async function GET(request: Request) {
       left join companies c on c.id=r.company_id
       where r.property_id=${session.propertyId}::uuid
         and r.status in ('no_show','cancelled')
-        and r.updated_at::date between ${input.data.startDate}::date and ${input.data.endDate}::date
+        and (r.updated_at at time zone coalesce((select timezone from properties where id=${session.propertyId}::uuid),'UTC'))::date between ${input.data.startDate}::date and ${input.data.endDate}::date
       order by r.updated_at desc
     `;
     const isNoShow = (record: typeof records[number]) => record.status === "no_show";

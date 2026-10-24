@@ -26,13 +26,13 @@ export async function GET(request: Request) {
     const session = await requirePropertySession(request, "reservations.manage");
     if (hasProductionDatabase()) {
       const records = await productionSql()<Array<{
-        id: string; version: number; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null;
+        id: string; version: number; confirmationNumber: string; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null;
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null; otaPaymentStatus: string | null;
         taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number;
-        reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; status: string }>;
+        reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; roomTypeName: string | null; status: string }>;
         extraGuests: Array<{ id: string; name: string; driverLicenseNumber: string | null }>;
       }>>`
-        select r.id,r.version,r.company_id as "companyId",g.first_name as "firstName",g.last_name as "lastName",g.phone,
+        select r.id,r.version,r.confirmation_number as "confirmationNumber",r.company_id as "companyId",g.first_name as "firstName",g.last_name as "lastName",g.phone,
           rr.room_number as room,r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
           coalesce(bs.name,case when r.notes like '{%' then r.notes::jsonb->>'source' end,'Direct') as source,
           case when r.notes like '{%' then r.notes::jsonb->>'rateCode' end as "rateCode",
@@ -44,8 +44,8 @@ export async function GET(request: Request) {
           coalesce((select sum(le.debit_cents) from ledger_entries le where le.property_id=r.property_id and le.resource_type='ota-commission-paid' and le.resource_id=r.id and le.account='Commission Payable'),0)::int as "commissionPaidCents",
           (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)
             - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=r.id),0))::int as "balanceCents",
-          coalesce((select json_agg(json_build_object('id',rrx.id,'roomNumber',room.number,'roomTypeId',rrx.room_type_id,'status',rrx.status) order by rrx.created_at)
-            from reservation_rooms rrx left join rooms room on room.id=rrx.room_id where rrx.reservation_id=r.id),'[]'::json) as "reservationRooms"
+          coalesce((select json_agg(json_build_object('id',rrx.id,'roomNumber',room.number,'roomTypeId',rrx.room_type_id,'roomTypeName',rt.name,'status',rrx.status) order by rrx.created_at)
+            from reservation_rooms rrx left join rooms room on room.id=rrx.room_id left join room_types rt on rt.id=rrx.room_type_id where rrx.reservation_id=r.id),'[]'::json) as "reservationRooms"
           ,coalesce((select json_agg(json_build_object('id',extra_guest.id,'name',concat(extra_guest.first_name,' ',extra_guest.last_name),'driverLicenseNumber',identity.id_number) order by reservation_guest.id)
             from reservation_guests reservation_guest
             join guests extra_guest on extra_guest.id=reservation_guest.guest_id
@@ -57,12 +57,23 @@ export async function GET(request: Request) {
         left join lateral (select coalesce(room.number,'Unassigned') as room_number from reservation_rooms rrx left join rooms room on room.id=rrx.room_id where rrx.reservation_id=r.id order by rrx.created_at limit 1) rr on true
         where r.property_id=${session.propertyId}::uuid order by r.created_at desc
       `;
+      // The client compares room types with Settings ids ("room-type-…"), not
+      // database uuids. Map each room through its configured room (exact,
+      // including smoking variants) and fall back to the type name.
+      const [settingsRecord] = await productionSql()<Array<{ value: StoredApplicationSettings | string }>>`
+        select value from property_settings where property_id=${session.propertyId}::uuid and key='application_settings'
+      `;
+      const configured = storedSettings(settingsRecord?.value);
+      const settingsRoomTypeId = (room: { roomNumber: string | null; roomTypeId: string; roomTypeName: string | null }) =>
+        configured?.rooms?.find((item) => item.number === room.roomNumber)?.roomTypeId
+        ?? configured?.roomTypes?.find((type) => type.name === room.roomTypeName)?.id
+        ?? room.roomTypeId;
       return Response.json({ reservations: records.map((record) => {
         const nights = Math.max(0, Math.round((new Date(`${record.checkoutDate}T12:00:00Z`).getTime() - new Date(`${record.checkInDate}T12:00:00Z`).getTime()) / 86_400_000));
         const taxCents = record.taxExempt ? 0 : Math.round(record.roomRentCents * record.taxRateBasisPoints / 10_000);
         const status = record.status === "reserved" ? "Reserved" : record.status === "checked_in" ? "Checked In" : record.status === "checked_out" ? "Checked Out" : record.status === "no_show" ? "No Show" : record.status === "cancelled" ? "Cancelled" : record.status;
         const roomStatus = (value: string) => value === "reserved" ? "Reserved" : value === "checked_in" ? "Checked In" : value === "checked_out" ? "Checked Out" : value === "no_show" ? "No Show" : "Cancelled";
-        const reservationRooms = (record.reservationRooms ?? []).map((room) => ({ id: room.id, roomNumber: room.roomNumber ?? undefined, roomTypeId: room.roomTypeId, status: roomStatus(room.status), nightlyRatesCents: [] }));
+        const reservationRooms = (record.reservationRooms ?? []).map((room) => ({ id: room.id, roomNumber: room.roomNumber ?? undefined, roomTypeId: settingsRoomTypeId(room), status: roomStatus(room.status), nightlyRatesCents: [] }));
         const extraGuests = (record.extraGuests ?? []).map((guest) => ({
           id: guest.id,
           name: guest.name,
@@ -72,7 +83,7 @@ export async function GET(request: Request) {
           ? record.otaPaymentStatus
           : undefined;
         const commissionCents = record.commissionCents;
-        return { id: record.id, version: record.version, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+        return { id: record.id, version: record.version, confirmationNumber: record.confirmationNumber, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
     }
     const records = await db.query.reservations.findMany({
@@ -328,8 +339,17 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   const selectedRooms = payload.roomNumbers.length
     ? payload.roomNumbers.map((number) => roomsForType.find((room) => room.number === number))
     : [];
-  if (payload.roomNumbers.length !== payload.roomCount || new Set(payload.roomNumbers).size !== payload.roomNumbers.length || selectedRooms.some((room) => !room)) throw new ReservationRequestError("Select one unique rentable room number for every requested room.", 409);
-  if (roomsForType.length < payload.roomCount) throw new ReservationRequestError("That room type no longer has enough inventory for those dates.", 409);
+  // Rooms may be assigned later (FR-RES-001), so 0..roomCount numbers are valid.
+  if (payload.roomNumbers.length > payload.roomCount || new Set(payload.roomNumbers).size !== payload.roomNumbers.length || selectedRooms.some((room) => !room)) throw new ReservationRequestError("Select unique rentable room numbers, no more than the rooms requested.", 409);
+  // Unassigned bookings hold room-type inventory without a room, so they must
+  // be subtracted from the free rooms or the type could be overbooked.
+  const [unassigned] = await tx<Array<{ count: number }>>`
+    select count(*)::int as count from reservation_rooms rr join reservations rs on rs.id=rr.reservation_id
+    where rr.property_id=${session.propertyId}::uuid and rr.room_type_id=${roomType.id}::uuid and rr.room_id is null
+      and rr.status in ('reserved','checked_in') and rs.status in ('reserved','checked_in')
+      and rs.arrival_date < ${payload.checkoutDate}::date and rs.departure_date > ${payload.checkInDate}::date
+  `;
+  if (roomsForType.length - unassigned.count < payload.roomCount) throw new ReservationRequestError("That room type no longer has enough inventory for those dates.", 409);
   if (payload.companyId) {
     const [company] = await tx<Array<{ id: string; status: string }>>`select id,status from companies where id=${payload.companyId}::uuid and property_id=${session.propertyId}::uuid`;
     if (!company || company.status !== "active") throw new ReservationRequestError("Select an active company for Direct Bill.");
@@ -735,6 +755,9 @@ const updateSchema = z.object({
   arrivalDate: z.string().optional(),
   departureDate: z.string().optional(),
   extensionNightlyRateCents: z.number().int().nonnegative().optional(),
+  // Group check-in sends the rooms with their intended status so only the
+  // selected rooms change.
+  reservationRooms: z.array(z.object({ id: z.string().min(1), status: z.string() }).passthrough()).optional(),
 });
 
 function productionReservationStatus(status: NonNullable<z.infer<typeof updateSchema>["status"]>) {
@@ -749,12 +772,27 @@ async function updateProductionReservation(
 ) {
   try {
     const outcome = await productionSql().begin(async (tx) => {
-      const [current] = await tx<Array<{ id: string; version: number; arrivalDate: string; departureDate: string; taxExempt: boolean; taxRateBasisPoints: number }>>`
-        select id,version,arrival_date::text as "arrivalDate",departure_date::text as "departureDate",tax_exempt as "taxExempt",tax_rate_basis_points as "taxRateBasisPoints"
+      const [current] = await tx<Array<{ id: string; version: number; status: string; arrivalDate: string; departureDate: string; taxExempt: boolean; taxRateBasisPoints: number }>>`
+        select id,version,status,arrival_date::text as "arrivalDate",departure_date::text as "departureDate",tax_exempt as "taxExempt",tax_rate_basis_points as "taxRateBasisPoints"
         from reservations where id=${id}::uuid and property_id=${session.propertyId}::uuid for update
       `;
       if (!current) return { kind: "not-found" as const };
       if (current.version !== expectedVersion) return { kind: "conflict" as const, currentVersion: current.version };
+      // Lifecycle changes with financial effects have dedicated workflows
+      // (checkout, cancel/no-show, reinstate). PATCH may only check guests in.
+      if (changes.status && changes.status !== "Checked In" && productionReservationStatus(changes.status) !== current.status) {
+        throw new ReservationRequestError(
+          changes.status === "Checked Out" ? "Use Check Out so the balance and deposits are verified."
+            : changes.status === "Reserved" ? "Use Reinstate to restore a cancelled or No Show reservation."
+            : "Use Cancel Reservation or Mark No Show so room charges are reversed.",
+          409,
+        );
+      }
+      if (changes.status === "Checked In") {
+        if (current.status !== "reserved" && current.status !== "checked_in") throw new ReservationRequestError("Only a reserved stay can be checked in.", 409);
+        const [openDay] = await tx<Array<{ date: string }>>`select business_date::text as date from business_days where property_id=${session.propertyId}::uuid and status='open' order by business_date limit 1`;
+        if (openDay && current.arrivalDate > openDay.date) throw new ReservationRequestError("This reservation cannot be checked in before its arrival date.", 409);
+      }
 
       const nextArrival = changes.arrivalDate ?? current.arrivalDate;
       const nextDeparture = changes.departureDate ?? current.departureDate;
@@ -831,12 +869,20 @@ async function updateProductionReservation(
       }
 
       const databaseStatus = changes.status ? productionReservationStatus(changes.status) : null;
-      if (databaseStatus) {
-        await tx`
-          update reservation_rooms set status=${databaseStatus},updated_at=now()
-          where reservation_id=${id}::uuid and property_id=${session.propertyId}::uuid
-            and status in ('reserved','checked_in')
+      if (databaseStatus === "checked_in") {
+        const requested = changes.reservationRooms?.filter((room) => room.status === "Checked In").map((room) => room.id);
+        const rooms = await tx<Array<{ id: string; roomId: string | null; status: string }>>`
+          select id,room_id as "roomId",status from reservation_rooms
+          where reservation_id=${id}::uuid and property_id=${session.propertyId}::uuid for update
         `;
+        const toCheckIn = rooms.filter((room) => room.status === "reserved" && (!requested || requested.includes(room.id)));
+        if (toCheckIn.some((room) => !room.roomId)) throw new ReservationRequestError("Assign a room number before checking this room in.", 409);
+        if (toCheckIn.length) {
+          await tx`
+            update reservation_rooms set status='checked_in',updated_at=now()
+            where id in ${tx(toCheckIn.map((room) => room.id))} and property_id=${session.propertyId}::uuid
+          `;
+        }
       }
       await tx`
         update reservations set

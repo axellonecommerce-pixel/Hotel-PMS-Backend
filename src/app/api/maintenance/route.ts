@@ -64,6 +64,8 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
+class MaintenanceConflict extends Error {}
+
 export async function POST(request: Request) {
   try {
     const session = await requirePropertySession(request, "maintenance.manage");
@@ -73,8 +75,24 @@ export async function POST(request: Request) {
     if (parsed.data.blockRoom && !parsed.data.blockReason?.trim()) return Response.json({ error: "A blocking reason is required." }, { status: 400 });
     if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
     const workOrder = await productionSql().begin(async (tx) => {
-      const [room] = await tx<Array<{ id: string }>>`select id from rooms where property_id=${session.propertyId}::uuid and number=${parsed.data.roomNumber} limit 1`;
+      const [room] = await tx<Array<{ id: string }>>`select id from rooms where property_id=${session.propertyId}::uuid and number=${parsed.data.roomNumber} limit 1 for update`;
       if (!room) return null;
+      if (parsed.data.blockRoom) {
+        // Blocking a room a guest is in (or is booked into for the block
+        // dates) would strand that stay; staff must move the guest first.
+        const [conflict] = await tx<Array<{ guest: string; status: string; departure: string }>>`
+          select concat(g.first_name,' ',g.last_name) as guest,rr.status,rs.departure_date::text as departure
+          from reservation_rooms rr join reservations rs on rs.id=rr.reservation_id join guests g on g.id=rs.main_guest_id
+          where rr.room_id=${room.id}::uuid and rr.status in ('reserved','checked_in') and rs.status in ('reserved','checked_in')
+            and (rr.status='checked_in' or (rs.arrival_date <= ${parsed.data.blockTo}::date and rs.departure_date > ${parsed.data.blockFrom}::date))
+          order by rr.status desc limit 1
+        `;
+        if (conflict) {
+          throw new MaintenanceConflict(conflict.status === "checked_in"
+            ? `Room ${parsed.data.roomNumber} is occupied by ${conflict.guest} until ${conflict.departure}. Move the guest before blocking the room.`
+            : `Room ${parsed.data.roomNumber} is reserved for ${conflict.guest} during these dates. Move that reservation before blocking the room.`);
+        }
+      }
       const [created] = await tx<OrderRow[]>`
         insert into maintenance_orders (property_id,room_id,problem,priority,assigned_worker,cost_cents,rentable,status,notes)
         values (${session.propertyId}::uuid,${room.id}::uuid,${parsed.data.note},${parsed.data.priority.toLowerCase()},${parsed.data.assignedWorker ?? null},${parsed.data.costCents},${!parsed.data.blockRoom},'open',${tx.json({ additionalNotes: parsed.data.notes, attachmentNames: parsed.data.attachmentNames ?? [], blockReason: parsed.data.blockReason, blockFrom: parsed.data.blockFrom, blockTo: parsed.data.blockTo })}::text)
@@ -104,7 +122,10 @@ export async function POST(request: Request) {
       payload: { source: "maintenance" },
     });
     return Response.json({ workOrder: toClient(workOrder) }, { status: 201 });
-  } catch (error) { return propertyAccessResponse(error); }
+  } catch (error) {
+    if (error instanceof MaintenanceConflict) return Response.json({ error: error.message }, { status: 409 });
+    return propertyAccessResponse(error);
+  }
 }
 
 export async function PATCH(request: Request) {

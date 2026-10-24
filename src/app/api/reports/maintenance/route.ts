@@ -19,11 +19,11 @@ export async function GET(request: Request) {
       id: string; createdAt: string; room: string; issue: string; priority: string;
       worker: string | null; costCents: number; rentable: boolean; status: string; completedAt: string | null;
     }>>`
-      select m.id,m.created_at as "createdAt",r.number as room,m.problem as issue,m.priority,
-        m.assigned_worker as worker,m.cost_cents as "costCents",m.rentable,m.status,m.completed_at as "completedAt"
+      select m.id,(m.created_at at time zone coalesce((select timezone from properties where id=${session.propertyId}::uuid),'UTC'))::date::text as "createdAt",r.number as room,m.problem as issue,m.priority,
+        m.assigned_worker as worker,m.cost_cents as "costCents",m.rentable,m.status,(m.completed_at at time zone coalesce((select timezone from properties where id=${session.propertyId}::uuid),'UTC'))::date::text as "completedAt"
       from maintenance_orders m join rooms r on r.id=m.room_id
       where m.property_id=${session.propertyId}::uuid
-        and m.created_at::date between ${input.data.startDate}::date and ${input.data.endDate}::date
+        and (m.created_at at time zone coalesce((select timezone from properties where id=${session.propertyId}::uuid),'UTC'))::date between ${input.data.startDate}::date and ${input.data.endDate}::date
       order by m.created_at desc
     `;
     const completed = records.filter((record) => record.status === "completed" || record.status === "resolved");
@@ -48,9 +48,9 @@ export async function GET(request: Request) {
         { key: "cost", label: "Cost", format: "money", align: "right" },
       ],
       rows: records.map((record) => ({
-        id: record.id, created: record.createdAt.slice(0, 10), room: record.room, issue: record.issue,
+        id: record.id, created: record.createdAt, room: record.room, issue: record.issue,
         priority: record.priority, worker: record.worker ?? "—", rentable: record.rentable ? "Rentable" : "Non-Rentable",
-        status: record.status, completed: record.completedAt?.slice(0, 10) ?? "—", cost: record.costCents,
+        status: record.status, completed: record.completedAt ?? "", cost: record.costCents,
       })),
       note: "Maintenance records are tenant-scoped work orders created in the selected date range. Room availability is shown as the work order's recorded rental state.",
     } });

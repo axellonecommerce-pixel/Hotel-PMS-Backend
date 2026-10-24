@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
+import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { recordChange } from "@/server/realtime/change-events";
 
 const companyQuerySchema = z.object({ companyId: z.string().uuid() });
@@ -28,7 +29,7 @@ export async function GET(request: Request) {
     const sql = productionSql();
     const invoices = await sql<Array<Record<string, unknown>>>`
       select i.id, i.company_id as "companyId", i.number as "invoiceNumber",
-        i.created_at::date::text as "invoiceDate", i.sent_at::text as "sentAt", i.due_date::text as "dueDate", i.status,
+        (i.created_at at time zone coalesce((select timezone from properties where id=i.property_id),'UTC'))::date::text as "invoiceDate", i.sent_at::text as "sentAt", i.due_date::text as "dueDate", i.status,
         coalesce((select sum(il.amount_cents) from invoice_lines il where il.invoice_id=i.id),0)::int as "totalCents",
         coalesce((select sum(ipa.amount_cents) from invoice_payment_allocations ipa where ipa.invoice_id=i.id),0)::int as "paymentsCreditsCents",
         r.id as "reservationId", concat(g.first_name, ' ', g.last_name) as "guestName"
@@ -113,7 +114,7 @@ export async function POST(request: Request) {
       }
       const [created] = await tx<Array<{ id: string; effectiveDate: string }>>`
         insert into payments (property_id,company_id,method,amount_cents,currency_code,effective_date,external_reference)
-        values (${session.propertyId}::uuid,${input.companyId}::uuid,${input.method},${input.amountCents},'USD',current_date,${input.reference ?? null})
+        values (${session.propertyId}::uuid,${input.companyId}::uuid,${input.method},${input.amountCents},'USD',${await propertyBusinessDate(tx, session.propertyId)}::date,${input.reference ?? null})
         returning id,effective_date::text as "effectiveDate"
       `;
       for (const allocation of input.allocations) {

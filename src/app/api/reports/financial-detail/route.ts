@@ -40,12 +40,12 @@ export async function GET(request: Request) {
     }
     if (input.data.view === "folios") {
       const records = await sql<Array<{ id: string; number: string; guest: string; created: string; type: string; totalCents: number; allocatedCents: number }>>`
-        select f.id,f.number,coalesce(g.first_name||' '||g.last_name,'Unassigned guest') as guest,f.created_at::date::text as created,
+        select f.id,f.number,coalesce(g.first_name||' '||g.last_name,'Unassigned guest') as guest,(f.created_at at time zone coalesce((select timezone from properties where id=${session.propertyId}::uuid),'UTC'))::date::text as created,
           case when r.company_id is null then 'General' else 'Direct Bill' end as type,
-          coalesce((select sum(c.amount_cents) from charges c where c.folio_id=f.id and c.status='posted'),0)::int as "totalCents",
+          coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c where c.folio_id=f.id and c.status='posted'),0)::int as "totalCents",
           coalesce((select sum(pa.amount_cents) from payment_allocations pa where pa.folio_id=f.id),0)::int as "allocatedCents"
         from folios f join reservations r on r.id=f.reservation_id left join reservation_guests rg on rg.reservation_id=r.id and rg.primary=true left join guests g on g.id=rg.guest_id
-        where f.property_id=${session.propertyId}::uuid and f.created_at::date between ${input.data.startDate}::date and ${input.data.endDate}::date
+        where f.property_id=${session.propertyId}::uuid and (f.created_at at time zone coalesce((select timezone from properties where id=${session.propertyId}::uuid),'UTC'))::date between ${input.data.startDate}::date and ${input.data.endDate}::date
         order by f.created_at desc
       `;
       return Response.json({ report: { metrics: [{ label: "Folios", value: records.length, format: "number" }, { label: "Total Charges", value: records.reduce((sum, record) => sum + record.totalCents, 0), format: "money" }, { label: "Payments / Credits", value: records.reduce((sum, record) => sum + record.allocatedCents, 0), format: "money" }, { label: "Balance", value: records.reduce((sum, record) => sum + record.totalCents - record.allocatedCents, 0), format: "money" }], columns: [{ key: "folio", label: "Folio Number" }, { key: "guest", label: "Guest" }, { key: "date", label: "Created", format: "date" }, { key: "type", label: "Type" }, { key: "total", label: "Total", format: "money", align: "right" }, { key: "balance", label: "Balance", format: "money", align: "right" }], rows: records.map((record) => ({ id: record.id, folio: record.number, guest: record.guest, date: record.created, type: record.type, total: record.totalCents, balance: record.totalCents-record.allocatedCents })), note: "Folio balances are posted charges less payment allocations. Company invoices are reported separately." } });

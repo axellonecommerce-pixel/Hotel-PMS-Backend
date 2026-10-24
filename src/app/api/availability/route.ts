@@ -86,6 +86,17 @@ export async function GET(request: Request) {
         )
       order by r.number
     `;
+    // Unassigned bookings hold room-type inventory without a specific room.
+    const unassigned = await productionSql()<Array<{ roomTypeName: string; count: number }>>`
+      select rt.name as "roomTypeName",count(*)::int as count
+      from reservation_rooms rr
+      join reservations rs on rs.id=rr.reservation_id
+      join room_types rt on rt.id=rr.room_type_id
+      where rr.property_id=${session.propertyId}::uuid and rr.room_id is null
+        and rr.status in ('reserved','checked_in') and rs.status in ('reserved','checked_in')
+        and rs.arrival_date < ${parsed.data.checkout}::date and rs.departure_date > ${parsed.data.checkIn}::date
+      group by rt.name
+    `;
     const nights = Math.round((new Date(`${parsed.data.checkout}T12:00:00Z`).getTime() - new Date(`${parsed.data.checkIn}T12:00:00Z`).getTime()) / 86_400_000);
     const taxPercentage = Math.max(0, settings.tax?.percentage ?? 0);
     return Response.json({
@@ -103,7 +114,7 @@ export async function GET(request: Request) {
           name: roomType.name,
           shortLabel: roomType.shortLabel || roomType.name.slice(0, 4).toUpperCase(),
           availableRoomNumbers,
-          roomCount: availableRoomNumbers.length,
+          roomCount: Math.max(0, availableRoomNumbers.length - (unassigned.find((item) => item.roomTypeName === roomType.name)?.count ?? 0)),
           nightlyRateCents: rateCents,
           roomRentCents,
           taxCents,

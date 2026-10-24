@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
-import { postProductionLedger } from "@/server/finance/production-finance";
+import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
 import { setReservationCommission } from "@/server/finance/ota-commission";
 
 const reinstateSchema = z.object({
@@ -107,9 +107,10 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         : [];
       if (existingCharges.length !== chargeIdValues.length) return { error: "The original room-rent audit trail has changed and cannot be reinstated automatically.", httpStatus: 409 } as const;
       if (chargeIdValues.length) await tx`update charges set status='posted',updated_at=now() where property_id=${session.propertyId}::uuid and id in ${tx(chargeIdValues)}`;
+      const businessDate = await propertyBusinessDate(tx, session.propertyId);
       for (const charge of chargeIds) {
-        if (charge.amountCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: new Date().toISOString().slice(0, 10), resourceType: "reservation-reinstatement", resourceId: reservation.id, description: `Reinstated room rent · ${charge.serviceDate}`, debitAccount: "Guest Receivable", creditAccount: "Room Revenue", amountCents: charge.amountCents });
-        if (charge.taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: new Date().toISOString().slice(0, 10), resourceType: "reservation-reinstatement-tax", resourceId: reservation.id, description: `Reinstated room tax · ${charge.serviceDate}`, debitAccount: "Guest Receivable", creditAccount: "Tax Payable", amountCents: charge.taxCents });
+        if (charge.amountCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate, resourceType: "reservation-reinstatement", resourceId: reservation.id, description: `Reinstated room rent · ${charge.serviceDate}`, debitAccount: "Guest Receivable", creditAccount: "Room Revenue", amountCents: charge.amountCents });
+        if (charge.taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate, resourceType: "reservation-reinstatement-tax", resourceId: reservation.id, description: `Reinstated room tax · ${charge.serviceDate}`, debitAccount: "Guest Receivable", creditAccount: "Tax Payable", amountCents: charge.taxCents });
       }
       for (const rate of release.nightlyRates) {
         await tx`
@@ -120,7 +121,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       }
       await tx`update reservation_rooms set status='reserved',updated_at=now() where reservation_id=${reservation.id}::uuid and property_id=${session.propertyId}::uuid`;
       if (release.commissionCents && release.commissionCents > 0) {
-        await setReservationCommission(tx, { propertyId: session.propertyId, reservationId: reservation.id, targetCents: release.commissionCents, businessDate: new Date().toISOString().slice(0, 10), reason: "Reinstated commission" });
+        await setReservationCommission(tx, { propertyId: session.propertyId, reservationId: reservation.id, targetCents: release.commissionCents, businessDate, reason: "Reinstated commission" });
       }
       await tx`update reservations set status='reserved',notes=${addReinstatementMetadata(reservation.notes, parsed.data.note)} ,version=version+1,updated_at=now() where id=${reservation.id}::uuid`;
       await tx`insert into change_events (property_id,actor_auth_user_id,entity_type,entity_id,action,entity_version,payload) values (${session.propertyId}::uuid,${session.authUserId}::uuid,'reservation',${reservation.id}::uuid,'updated',${reservation.version + 1},${tx.json({ changes: { status: "Reserved" } })})`;

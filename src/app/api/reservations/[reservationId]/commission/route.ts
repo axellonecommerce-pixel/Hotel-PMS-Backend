@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { OtaCommissionError, setReservationCommission } from "@/server/finance/ota-commission";
+import { propertyBusinessDate } from "@/server/finance/production-finance";
 
 const commissionSchema = z.object({
   commissionCents: z.number().int().min(0).max(100_000_000),
@@ -26,12 +27,11 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
       if (!reservation) return { error: "Reservation not found.", httpStatus: 404 } as const;
       if (reservation.status === "cancelled" || reservation.status === "no_show") return { error: "Reinstate the reservation before changing its commission.", httpStatus: 409 } as const;
       if (parsed.data.commissionCents > reservation.grossCents) return { error: "Commission cannot exceed the reservation's gross room amount.", httpStatus: 400 } as const;
-      const [day] = await tx<Array<{ date: string }>>`select business_date::text as date from business_days where property_id=${session.propertyId}::uuid and status='open' order by business_date limit 1`;
       return setReservationCommission(tx, {
         propertyId: session.propertyId,
         reservationId,
         targetCents: parsed.data.commissionCents,
-        businessDate: day?.date ?? new Date().toISOString().slice(0, 10),
+        businessDate: await propertyBusinessDate(tx, session.propertyId),
         reason: `Commission edited: ${parsed.data.reason}`,
       });
     });

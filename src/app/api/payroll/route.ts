@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { propertyBusinessDate } from "@/server/finance/production-finance";
 
 const updateSchema = z.object({ id: z.string().uuid(), status: z.enum(["Pending", "Approved", "Paid"]).optional(), adjustmentCents: z.number().int().min(-10_000_000).max(10_000_000).optional() });
 type StoredPayroll = { payroll?: { frequency?: string } };
@@ -110,7 +111,7 @@ export async function PATCH(request: Request) {
       const meta = parseDescription(current.description);
       const status = parsed.data.status ?? (current.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending");
       const adjustmentCents = parsed.data.adjustmentCents ?? meta.adjustmentCents ?? 0;
-      await tx`update payroll_entries set paid=${status === "Paid"},paid_on=case when ${status === "Paid"} then current_date else null end,description=${tx.json({ adjustmentCents, status })}::text,updated_at=now() where id=${parsed.data.id}::uuid and property_id=${session.propertyId}::uuid`;
+      await tx`update payroll_entries set paid=${status === "Paid"},paid_on=case when ${status === "Paid"} then ${await propertyBusinessDate(tx, session.propertyId)}::date else null end,description=${tx.json({ adjustmentCents, status })}::text,updated_at=now() where id=${parsed.data.id}::uuid and property_id=${session.propertyId}::uuid`;
       return true;
     });
     if (!updated) return Response.json({ error: "Payroll entry not found." }, { status: 404 });

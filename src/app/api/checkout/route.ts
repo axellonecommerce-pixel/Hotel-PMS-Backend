@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
-import { allocateProductionDocumentNumber } from "@/server/finance/production-finance";
+import { allocateProductionDocumentNumber, propertyBusinessDate } from "@/server/finance/production-finance";
 import { recordChange } from "@/server/realtime/change-events";
 
 const checkoutSchema = z.object({
@@ -163,7 +163,7 @@ export async function POST(request: Request) {
             const number = await allocateProductionDocumentNumber(tx, session.propertyId);
             const [invoice] = await tx<Array<{ id: string }>>`
               insert into invoices (property_id,company_id,reservation_id,number,status,due_date)
-              values (${session.propertyId}::uuid,${reservation.companyId}::uuid,${reservation.id}::uuid,${number},'draft',(current_date + ${company?.paymentTermsDays ?? 30}))::date)
+              values (${session.propertyId}::uuid,${reservation.companyId}::uuid,${reservation.id}::uuid,${number},'draft',(${await propertyBusinessDate(tx, session.propertyId)}::date + ${company?.paymentTermsDays ?? 30}::int))
               returning id
             `;
             invoiceId = invoice.id;

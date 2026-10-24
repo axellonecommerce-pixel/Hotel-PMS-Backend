@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
-import { postProductionLedger } from "@/server/finance/production-finance";
+import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
 
 const paymentSchema = z.object({
   // The existing workspace uses a client folio handle. The authoritative
@@ -69,15 +69,16 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       if (parsed.data.amountCents > folio.balanceCents) throw new Error("Payment cannot exceed the folio balance.");
       const isBadDebt = parsed.data.method.toUpperCase() === "BAD DEBT";
       if (isBadDebt && folio.reservationStatus !== "checked_in") throw new Error("Bad debt can only be recorded for an in-house stay.");
+      const businessDate = await propertyBusinessDate(tx, session.propertyId);
       const [created] = await tx<Array<{ id: string; createdAt: string }>>`
         insert into payments (property_id,reservation_id,method,amount_cents,currency_code,effective_date,last4,external_reference,note)
-        values (${session.propertyId}::uuid,${reservationId}::uuid,${parsed.data.method},${parsed.data.amountCents},'USD',current_date,${parsed.data.last4 ?? null},${parsed.data.reference ?? null},${parsed.data.note ?? null})
+        values (${session.propertyId}::uuid,${reservationId}::uuid,${parsed.data.method},${parsed.data.amountCents},'USD',${businessDate}::date,${parsed.data.last4 ?? null},${parsed.data.reference ?? null},${parsed.data.note ?? null})
         returning id,created_at::text as "createdAt"
       `;
       await tx`insert into payment_allocations (property_id,payment_id,folio_id,amount_cents) values (${session.propertyId}::uuid,${created.id}::uuid,${folio.id}::uuid,${parsed.data.amountCents})`;
       if (isBadDebt) await postProductionLedger(tx, {
         propertyId: session.propertyId,
-        businessDate: new Date().toISOString().slice(0, 10),
+        businessDate,
         resourceType: "bad-debt",
         resourceId: created.id,
         description: `Bad debt write-off: ${parsed.data.note!.trim()}`,
@@ -113,7 +114,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
       if (payment.method.toUpperCase() === "OTA COMMISSION") throw new Error("Payment entries for OTA commission deductions cannot be refunded.");
       if (parsed.data.amountCents > payment.amountCents - payment.refundedCents) throw new Error("Refund cannot exceed the unrefunded payment amount.");
       if (parsed.data.amountCents > payment.allocatedCents) throw new Error("Refund cannot exceed the payment allocated to this folio.");
-      await tx`insert into refunds (property_id,payment_id,amount_cents,effective_date,reason) values (${session.propertyId}::uuid,${payment.id}::uuid,${parsed.data.amountCents},current_date,'Guest refund')`;
+      await tx`insert into refunds (property_id,payment_id,amount_cents,effective_date,reason) values (${session.propertyId}::uuid,${payment.id}::uuid,${parsed.data.amountCents},${await propertyBusinessDate(tx, session.propertyId)}::date,'Guest refund')`;
       await tx`update payment_allocations set amount_cents=${payment.allocatedCents - parsed.data.amountCents} where payment_id=${payment.id}::uuid and folio_id=${payment.folioId}::uuid`;
       return { paymentId: payment.id, refundedCents: payment.refundedCents + parsed.data.amountCents };
     });

@@ -1,4 +1,4 @@
-import type { TransactionSql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 
 import { balancedLedgerLines, formatDocumentNumber } from "@/domain/rules/accounting";
 
@@ -52,4 +52,19 @@ export async function postProductionLedger(tx: Tx, input: {
       )
     `;
   }
+}
+
+/**
+ * The property's current business date: the open Night Audit day, or today in
+ * the property's timezone. Never the database's UTC `current_date`, which is
+ * already tomorrow during a West Coast evening.
+ */
+export async function propertyBusinessDate(tx: Tx | Sql, propertyId: string) {
+  const [row] = await tx<Array<{ date: string }>>`
+    select coalesce(
+      (select business_date::text from business_days where property_id=${propertyId}::uuid and status='open' order by business_date limit 1),
+      (now() at time zone coalesce((select timezone from properties where id=${propertyId}::uuid),'UTC'))::date::text
+    ) as date
+  `;
+  return row.date;
 }

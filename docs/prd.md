@@ -61,7 +61,7 @@ The first release is employee-only. It supports many hotels, but one owner accou
 - **FR-RAT-001:** Staff may apply one nightly rate to the stay or different rates by night. All planned room rent and tax post when the reservation is created.
 - **FR-RAT-002:** Editing room rent recalculates linked tax using the reservation's stored tax rate. Existing reservations retain their original tax rate when settings change.
 - **FR-RAT-003:** Managers configure taxable extra-charge types. Manual tax changes require a reason. Tax-exempt stays require an exemption reason/certificate number.
-- **FR-RAT-004:** Hotels configure booking sources and commissions. OTA commissions post as expenses (credited to Commission Payable when the hotel collects, or to Guest Receivable when the OTA deducted it).
+- **FR-RAT-004:** Hotels configure booking sources and commissions. OTA commissions post as expenses (credited to Commission Payable when the hotel collects, or to Guest Receivable when the OTA deducted it). Commission deducted by the OTA is recorded as an "OTA Commission" expense immediately; commission on Guest Pays Hotel bookings shows as payable on Expenses until staff pay it, which records the expense. Staff may edit a reservation's total commission with a reason until a payable commission has been paid. Cancel/No Show reverses an unpaid commission and reinstatement restores it. The OTA Commission report shows gross, tax, commission, net, settlement, paid and payable per reservation.
 - **FR-RAT-005:** Hotels configure promotions with discount, eligible room types, and date range. Staff manually select promotions and may stack multiple promotions.
 
 ### 3.5 Folios, documents, and checkout
