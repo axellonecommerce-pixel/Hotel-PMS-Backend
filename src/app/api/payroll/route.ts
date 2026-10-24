@@ -56,22 +56,27 @@ export async function GET(request: Request) {
       const employees = await tx<Array<{ id: string; name: string | null; role: string | null; hourlyRateCents: number | null; active: boolean }>>`
         select id,name,job_role as role,hourly_rate_cents as "hourlyRateCents",active from employees where property_id=${session.propertyId}::uuid order by active desc,name
       `;
-      for (const employee of employees) {
-        const [minutes] = await tx<Array<{ minutes: number }>>`
-          select coalesce(sum(greatest(0,extract(epoch from (clock_out_at-clock_in_at))/60-break_minutes)),0)::int as minutes
-          from time_entries where property_id=${session.propertyId}::uuid and employee_id=${employee.id}::uuid and work_date between ${period.start} and ${period.end} and clock_out_at is not null
-        `;
-        const rate = employee.hourlyRateCents ?? 0;
-        const gross = Math.round(minutes.minutes * rate / 60);
-        await tx`
-          insert into payroll_entries (property_id,pay_period_id,employee_id,calculation_type,regular_minutes,overtime_minutes,rate_cents,description,gross_pay_cents,paid)
-          values (${session.propertyId}::uuid,${period.id}::uuid,${employee.id}::uuid,'hourly',${minutes.minutes},0,${rate},'{"adjustmentCents":0,"status":"Pending"}',${gross},false)
-          on conflict (pay_period_id,employee_id) do update set regular_minutes=excluded.regular_minutes,rate_cents=excluded.rate_cents,gross_pay_cents=excluded.gross_pay_cents,updated_at=now()
-          where payroll_entries.paid=false
-        `;
-      }
-      const entries = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; hourlyRateCents: number | null; description: string | null; paid: boolean; periodId: string }>>`
-        select pe.id,pe.employee_id as "employeeId",pe.regular_minutes as "regularMinutes",pe.rate_cents as "hourlyRateCents",pe.description,pe.paid,pe.pay_period_id as "periodId"
+      // One statement for every employee (was two round trips each, which
+      // made Payroll take several seconds to open).
+      await tx`
+        insert into payroll_entries (property_id,pay_period_id,employee_id,calculation_type,regular_minutes,overtime_minutes,rate_cents,description,gross_pay_cents,paid)
+        select ${session.propertyId}::uuid,${period.id}::uuid,e.id,'hourly',coalesce(t.minutes,0),0,coalesce(e.hourly_rate_cents,0),
+          '{"adjustmentCents":0,"status":"Pending"}',round(coalesce(t.minutes,0)*coalesce(e.hourly_rate_cents,0)/60.0)::int,false
+        from employees e
+        left join lateral (
+          select sum(greatest(0,extract(epoch from (te.clock_out_at-te.clock_in_at))/60-te.break_minutes))::int as minutes
+          from time_entries te
+          where te.property_id=e.property_id and te.employee_id=e.id and te.clock_out_at is not null
+            and te.work_date between ${period.start}::date and ${period.end}::date
+        ) t on true
+        where e.property_id=${session.propertyId}::uuid
+        on conflict (pay_period_id,employee_id) do update set regular_minutes=excluded.regular_minutes,rate_cents=excluded.rate_cents,gross_pay_cents=excluded.gross_pay_cents,updated_at=now()
+        where payroll_entries.paid=false
+      `;
+      const entries = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; hourlyRateCents: number | null; description: string | null; paid: boolean; periodId: string; roomsCleaned?: number }>>`
+        select pe.id,pe.employee_id as "employeeId",pe.regular_minutes as "regularMinutes",pe.rate_cents as "hourlyRateCents",pe.description,pe.paid,pe.pay_period_id as "periodId",
+          (select count(*) from housekeeping_records h where h.property_id=pe.property_id and h.housekeeper_employee_id=pe.employee_id
+            and h.assignment_status='completed' and h.service_date between ${period.start}::date and ${period.end}::date)::int as "roomsCleaned"
         from payroll_entries pe where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id=${period.id}::uuid order by pe.created_at
       `;
       const history = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; hourlyRateCents: number | null; description: string | null; paid: boolean; periodId: string; startsOn: string; endsOn: string }>>`
@@ -79,7 +84,7 @@ export async function GET(request: Request) {
         from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id
         where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id<>${period.id}::uuid order by pp.ends_on desc limit 100
       `;
-      const mapEntry = (entry: typeof entries[number]) => { const meta = parseDescription(entry.description); return { id: entry.id, payrollPeriodId: entry.periodId, employeeId: entry.employeeId, regularMinutes: entry.regularMinutes, hourlyRateCents: entry.hourlyRateCents ?? 0, adjustmentCents: meta.adjustmentCents ?? 0, paymentStatus: entry.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending" }; };
+      const mapEntry = (entry: typeof entries[number]) => { const meta = parseDescription(entry.description); return { id: entry.id, payrollPeriodId: entry.periodId, employeeId: entry.employeeId, regularMinutes: entry.regularMinutes, hourlyRateCents: entry.hourlyRateCents ?? 0, adjustmentCents: meta.adjustmentCents ?? 0, paymentStatus: entry.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending", ...("roomsCleaned" in entry ? { roomsCleaned: Number(entry.roomsCleaned) } : {}) }; };
       return {
         period: { id: period.id, label: `${period.start} to ${period.end}`, startDate: period.start, endDate: period.end, payDate: period.payDate },
         employees: employees.map((employee) => {
@@ -87,7 +92,8 @@ export async function GET(request: Request) {
           return {
             ...employee,
             name: employee.name?.trim() || "Unnamed employee",
-            role: role === "housekeeper" ? "Housekeeper" : role === "manager" || role === "owner" ? "Manager" : "Other Employee",
+            // Titles vary ("Owner/Admin", "General Manager").
+            role: /housekeep/.test(role) ? "Housekeeper" : /(^|[^a-z])(manager|owner)([^a-z]|$)/.test(role) ? "Manager" : "Other Employee",
             status: employee.active ? "Active" : "Inactive",
           };
         }),

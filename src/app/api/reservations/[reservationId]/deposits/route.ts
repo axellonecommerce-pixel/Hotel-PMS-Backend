@@ -2,6 +2,11 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
+import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+
+const DEPOSITS_HELD = "Security Deposits Held";
+/** Cash sits in the drawer; any other method is a card authorization. */
+const holdingAccount = (method: string) => (/cash/i.test(method) ? "Cash" : "Card Authorizations");
 
 const reasonSchema = z.enum(["Damage", "Late Checkout", "Smoking", "Missing Item", "Other"]);
 const collectSchema = z.object({
@@ -97,13 +102,16 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
           select d.id from security_deposits d where d.property_id=${session.propertyId}::uuid and d.reservation_room_id=${reservationRoomId}::uuid and d.status='held' for update
         `;
         if (open) return { error: "Resolve the existing held deposit before collecting another one." } as const;
-        await tx`
+        const [created] = await tx<Array<{ id: string }>>`
           insert into security_deposits (property_id,reservation_room_id,method,amount_cents,status,show_on_folio)
           values (${session.propertyId}::uuid,${reservationRoomId}::uuid,${input.method},${input.amountCents},'held',true)
+          returning id
         `;
+        // A deposit is a liability, not revenue (FR-REV-001).
+        await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: await propertyBusinessDate(tx, session.propertyId), resourceType: "deposit-collect", resourceId: created.id, description: `Security deposit collected · ${input.method}`, debitAccount: holdingAccount(input.method), creditAccount: DEPOSITS_HELD, amountCents: input.amountCents });
       } else {
-        const [deposit] = await tx<Array<{ id: string; amountCents: number }>>`
-          select d.id,d.amount_cents as "amountCents" from security_deposits d
+        const [deposit] = await tx<Array<{ id: string; amountCents: number; method: string }>>`
+          select d.id,d.amount_cents as "amountCents",d.method from security_deposits d
           join reservation_rooms rr on rr.id=d.reservation_room_id
           where d.property_id=${session.propertyId}::uuid and rr.reservation_id=${reservationId}::uuid and d.status='held'
           order by d.created_at desc limit 1 for update
@@ -116,16 +124,24 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         const requestedCents = input.deductions.reduce((sum, deduction) => sum + deduction.amountCents, 0) + input.releaseCents;
         const availableCents = deposit.amountCents - used.amountCents;
         if (requestedCents <= 0 || requestedCents > availableCents) return { error: "Deposit deductions and release cannot exceed the held amount." } as const;
+        const businessDate = await propertyBusinessDate(tx, session.propertyId);
         for (const deduction of input.deductions) {
-          await tx`
+          const [charge] = await tx<Array<{ id: string }>>`
             insert into deposit_transactions (property_id,deposit_id,type,amount_cents,reason,note)
             values (${session.propertyId}::uuid,${deposit.id}::uuid,'charge',${deduction.amountCents},${deduction.reason},${deduction.note ?? null})
+            returning id
           `;
+          // Kept deposit money becomes revenue of its deduction reason (FR-REV-001).
+          await postProductionLedger(tx, { propertyId: session.propertyId, businessDate, resourceType: "deposit-charge", resourceId: charge.id, description: `Deposit deduction · ${deduction.reason}${deduction.note ? ` · ${deduction.note}` : ""}`, debitAccount: DEPOSITS_HELD, creditAccount: `Revenue:Deposit ${deduction.reason}`, amountCents: deduction.amountCents });
         }
-        if (input.releaseCents) await tx`
-          insert into deposit_transactions (property_id,deposit_id,type,amount_cents,reason)
-          values (${session.propertyId}::uuid,${deposit.id}::uuid,'release',${input.releaseCents},'Unused security deposit')
-        `;
+        if (input.releaseCents) {
+          const [release] = await tx<Array<{ id: string }>>`
+            insert into deposit_transactions (property_id,deposit_id,type,amount_cents,reason)
+            values (${session.propertyId}::uuid,${deposit.id}::uuid,'release',${input.releaseCents},'Unused security deposit')
+            returning id
+          `;
+          await postProductionLedger(tx, { propertyId: session.propertyId, businessDate, resourceType: "deposit-release", resourceId: release.id, description: `Security deposit released · ${deposit.method}`, debitAccount: DEPOSITS_HELD, creditAccount: holdingAccount(deposit.method), amountCents: input.releaseCents });
+        }
         if (requestedCents === availableCents) await tx`update security_deposits set status='settled',updated_at=now() where id=${deposit.id}::uuid`;
       }
       return { ok: true } as const;

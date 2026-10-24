@@ -6,7 +6,11 @@ import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { recordChange } from "@/server/realtime/change-events";
 
 const companyQuerySchema = z.object({ companyId: z.string().uuid() });
-const sendInvoiceSchema = z.object({ action: z.literal("send"), invoiceId: z.string().uuid() });
+const sendInvoiceSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("send"), invoiceId: z.string().uuid() }),
+  // FR-COM-004: staff choose when to apply a company's credit to an invoice.
+  z.object({ action: z.literal("apply-credit"), invoiceId: z.string().uuid(), amountCents: z.number().int().positive() }),
+]);
 const paymentSchema = z.object({
   companyId: z.string().uuid(),
   amountCents: z.number().int().positive(),
@@ -29,7 +33,7 @@ export async function GET(request: Request) {
     const sql = productionSql();
     const invoices = await sql<Array<Record<string, unknown>>>`
       select i.id, i.company_id as "companyId", i.number as "invoiceNumber",
-        (i.created_at at time zone coalesce((select timezone from properties where id=i.property_id),'UTC'))::date::text as "invoiceDate", i.sent_at::text as "sentAt", i.due_date::text as "dueDate", i.status,
+        (i.created_at at time zone coalesce((select timezone from properties where id=i.property_id),'UTC'))::date::text as "invoiceDate", (i.sent_at at time zone coalesce((select timezone from properties where id=i.property_id),'UTC'))::date::text as "sentAt", i.due_date::text as "dueDate", i.status,
         coalesce((select sum(il.amount_cents) from invoice_lines il where il.invoice_id=i.id),0)::int as "totalCents",
         coalesce((select sum(ipa.amount_cents) from invoice_payment_allocations ipa where ipa.invoice_id=i.id),0)::int as "paymentsCreditsCents",
         r.id as "reservationId", concat(g.first_name, ' ', g.last_name) as "guestName"
@@ -52,7 +56,12 @@ export async function GET(request: Request) {
       where p.property_id=${session.propertyId}::uuid and p.company_id=${companyId}::uuid
       order by p.created_at desc, ipa.created_at desc
     `;
+    const [credit] = await sql<Array<{ cents: number }>>`
+      select coalesce(sum(remaining_amount_cents),0)::int as cents from company_credits
+      where property_id=${session.propertyId}::uuid and company_id=${companyId}::uuid
+    `;
     return Response.json({
+      creditCents: credit?.cents ?? 0,
       invoices: invoices.map((invoice) => {
         const totalCents = Number(invoice.totalCents ?? 0);
         const paymentsCreditsCents = Number(invoice.paymentsCreditsCents ?? 0);
@@ -71,6 +80,39 @@ export async function PATCH(request: Request) {
     const session = await requirePropertySession(request, "companies.manage");
     const parsed = sendInvoiceSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Invoice action is invalid." }, { status: 400 });
+    if (parsed.data.action === "apply-credit") {
+      const input = parsed.data;
+      const applied = await productionSql().begin(async (tx) => {
+        const [invoice] = await tx<Array<{ id: string; companyId: string; dueCents: number }>>`
+          select i.id,i.company_id as "companyId",
+            (coalesce((select sum(il.amount_cents) from invoice_lines il where il.invoice_id=i.id),0)
+              - coalesce((select sum(ipa.amount_cents) from invoice_payment_allocations ipa where ipa.invoice_id=i.id),0))::int as "dueCents"
+          from invoices i where i.id=${input.invoiceId}::uuid and i.property_id=${session.propertyId}::uuid
+            and i.status not in ('void','draft','paid') for update
+        `;
+        if (!invoice) throw new Error("Send the invoice before applying company credit.");
+        if (input.amountCents > invoice.dueCents) throw new Error("Credit cannot exceed the invoice amount due.");
+        const credits = await tx<Array<{ id: string; sourcePaymentId: string; remainingCents: number }>>`
+          select id,source_payment_id as "sourcePaymentId",remaining_amount_cents as "remainingCents" from company_credits
+          where property_id=${session.propertyId}::uuid and company_id=${invoice.companyId}::uuid and remaining_amount_cents>0
+          order by created_at for update
+        `;
+        if (credits.reduce((sum, item) => sum + item.remainingCents, 0) < input.amountCents) throw new Error("Not enough company credit is available.");
+        let left = input.amountCents;
+        for (const item of credits) {
+          if (!left) break;
+          const take = Math.min(left, item.remainingCents);
+          // The credit came from an earlier payment; allocate that payment.
+          await tx`insert into invoice_payment_allocations (property_id,payment_id,invoice_id,amount_cents) values (${session.propertyId}::uuid,${item.sourcePaymentId}::uuid,${invoice.id}::uuid,${take})`;
+          await tx`update company_credits set remaining_amount_cents=remaining_amount_cents-${take} where id=${item.id}::uuid`;
+          left -= take;
+        }
+        await tx`update invoices set status=${invoice.dueCents === input.amountCents ? "paid" : "partially_paid"},updated_at=now() where id=${invoice.id}::uuid`;
+        return { invoiceId: invoice.id, companyId: invoice.companyId, appliedCents: input.amountCents };
+      });
+      await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "company", entityId: applied.companyId, action: "updated", entityVersion: Math.floor(Date.now() / 1000), payload: { invoiceId: applied.invoiceId } });
+      return Response.json(applied);
+    }
     const [invoice] = await productionSql()<Array<{ id: string; status: string; sentAt: string }>>`
       update invoices
       set status=case when status='draft' then 'sent' else status end,
@@ -83,6 +125,7 @@ export async function PATCH(request: Request) {
     await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "invoice", entityId: invoice.id, action: "updated", entityVersion: Math.floor(Date.now() / 1000), payload: { status: invoice.status, sentAt: invoice.sentAt } });
     return Response.json({ invoice: { id: invoice.id, status: invoiceStatus(invoice.status), sentAt: invoice.sentAt } });
   } catch (error) {
+    if (error instanceof Error && /credit|invoice/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }

@@ -3,7 +3,10 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 
-const rateSchema = z.object({ companyId: z.string().uuid(), roomTypeId: z.string().uuid(), rateCents: z.number().int().nonnegative() });
+// roomTypeId may be a Settings id ("room-type-…"); the name resolves the
+// relational room type (smoking variants share one rate).
+const rateSchema = z.object({ companyId: z.string().uuid(), roomTypeId: z.string().min(1), roomTypeName: z.string().trim().optional(), rateCents: z.number().int().nonnegative() });
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function PUT(request: Request) {
   try {
@@ -16,7 +19,10 @@ export async function PUT(request: Request) {
       select ${session.propertyId}::uuid, c.id, rt.id, ${input.rateCents}
       from companies c cross join room_types rt
       where c.id=${input.companyId}::uuid and c.property_id=${session.propertyId}::uuid
-        and rt.id=${input.roomTypeId}::uuid and rt.property_id=${session.propertyId}::uuid
+        and rt.property_id=${session.propertyId}::uuid
+        and (rt.id=${uuidPattern.test(input.roomTypeId) ? input.roomTypeId : null}::uuid or rt.name=${input.roomTypeName ?? null})
+      order by (rt.id=${uuidPattern.test(input.roomTypeId) ? input.roomTypeId : null}::uuid) desc nulls last
+      limit 1
       on conflict (company_id,room_type_id) do update set rate_cents=excluded.rate_cents
       returning id,company_id as "companyId",room_type_id as "roomTypeId",rate_cents as "rateCents"
     `;

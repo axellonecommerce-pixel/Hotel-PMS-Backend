@@ -71,7 +71,9 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       `;
       if (!rooms.length) return { error: "The reservation has no rooms to reinstate.", httpStatus: 409 } as const;
       const assignedRooms = rooms.filter((room) => room.roomId);
-      if (assignedRooms.some((room) => room.serviceStatus !== "rentable")) return { error: "A previously assigned room is no longer rentable.", httpStatus: 409 } as const;
+      // If the old room is now blocked or taken, reinstate into the room type
+      // with the room unassigned (as HotelKey does); staff assign one later.
+      const releasedRoomIds = new Set(assignedRooms.filter((room) => room.serviceStatus !== "rentable").map((room) => room.id));
       if (assignedRooms.length) {
         const conflicts = await tx<Array<{ roomId: string }>>`
           select distinct rr.room_id as "roomId"
@@ -81,8 +83,11 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
             and other.id<>${reservation.id}::uuid
             and other.arrival_date<${reservation.departureDate}::date and other.departure_date>${reservation.arrivalDate}::date
         `;
-        if (conflicts.length) return { error: "A previously assigned room is no longer available for these dates.", httpStatus: 409 } as const;
+        const taken = new Set(conflicts.map((conflict) => conflict.roomId));
+        assignedRooms.filter((room) => taken.has(room.roomId!)).forEach((room) => releasedRoomIds.add(room.id));
       }
+      // The type-inventory check below must treat released rooms as unassigned.
+      rooms.forEach((room) => { if (releasedRoomIds.has(room.id)) room.roomId = null; });
       const neededByType = new Map<string, number>();
       rooms.forEach((room) => neededByType.set(room.roomTypeId, (neededByType.get(room.roomTypeId) ?? 0) + 1));
       for (const [roomTypeId, needed] of neededByType) {
@@ -119,6 +124,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
           on conflict (reservation_room_id,stay_date) do update set base_rate_cents=excluded.base_rate_cents,discount_cents=excluded.discount_cents,final_rate_cents=excluded.final_rate_cents
         `;
       }
+      if (releasedRoomIds.size) await tx`update reservation_rooms set room_id=null,updated_at=now() where id in ${tx([...releasedRoomIds])}`;
       await tx`update reservation_rooms set status='reserved',updated_at=now() where reservation_id=${reservation.id}::uuid and property_id=${session.propertyId}::uuid`;
       if (release.commissionCents && release.commissionCents > 0) {
         await setReservationCommission(tx, { propertyId: session.propertyId, reservationId: reservation.id, targetCents: release.commissionCents, businessDate, reason: "Reinstated commission" });
@@ -128,7 +134,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       const [balance] = await tx<Array<{ balanceCents: number }>>`
         select (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios f on f.id=c.folio_id where f.reservation_id=${reservation.id}::uuid and c.status='posted'),0)-coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=${reservation.id}::uuid),0))::int as "balanceCents"
       `;
-      return { status: "Reserved", balanceCents: balance?.balanceCents ?? 0, version: reservation.version + 1 } as const;
+      return { status: "Reserved", balanceCents: balance?.balanceCents ?? 0, version: reservation.version + 1, unassignedRooms: releasedRoomIds.size } as const;
     });
     if ("error" in result) return Response.json(result, { status: result.httpStatus });
     return Response.json(result);

@@ -52,7 +52,7 @@ function inventoryFingerprint(value: unknown) {
   const rooms = Array.isArray(settings.rooms)
     ? (settings.rooms as Array<Record<string, unknown>>).map(({ housekeepingStatus: _h, serviceStatus: _s, ...room }) => room)
     : [];
-  return JSON.stringify([settings.roomTypes, rooms, settings.employees, settings.promotions, settings.bookingChannels]);
+  return JSON.stringify([settings.roomTypes, rooms, settings.employees, settings.promotions, settings.bookingChannels, settings.chargeTypes]);
 }
 
 async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: string, value: Record<string, unknown>) {
@@ -61,6 +61,20 @@ async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: st
   const configuredEmployees = Array.isArray(value.employees) ? value.employees as ConfiguredEmployee[] : [];
   const configuredPromotions = Array.isArray(value.promotions) ? value.promotions as ConfiguredPromotion[] : [];
   const configuredBookingChannels = Array.isArray(value.bookingChannels) ? value.bookingChannels as ConfiguredBookingChannel[] : [];
+  // Extra-charge types live in Settings as names; folio charges need the
+  // relational rows (taxable flag, revenue category). Removed types are
+  // deactivated so posted charges keep their history.
+  const chargeTypeNames = Array.isArray(value.chargeTypes) ? (value.chargeTypes as unknown[]).filter((name): name is string => typeof name === "string" && Boolean(name.trim())).map((name) => name.trim()) : [];
+  if (chargeTypeNames.length) {
+    // Owner rule: extra charges are never taxed (only room rent is).
+    const rows = chargeTypeNames.map((name) => ({ name, taxable: false }));
+    await tx`
+      insert into charge_types (property_id,name,revenue_category,taxable,active)
+      select ${propertyId}::uuid,x.name,x.name,x.taxable,true from jsonb_to_recordset(${tx.json(rows)}) as x(name text,taxable boolean)
+      on conflict (property_id,name) do update set taxable=excluded.taxable,active=true,updated_at=now()
+    `;
+  }
+  await tx`update charge_types set active=false,updated_at=now() where property_id=${propertyId}::uuid and active=true and not (name = any(${chargeTypeNames}::text[]))`;
   const typeIds = new Map<string, string>();
   const synchronizedPromotionIds = new Set<string>();
   const synchronizedBookingSourceIds = new Set<string>();

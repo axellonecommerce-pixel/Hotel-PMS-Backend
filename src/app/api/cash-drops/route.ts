@@ -1,3 +1,4 @@
+import type { Sql, TransactionSql } from "postgres";
 import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
@@ -34,7 +35,7 @@ type CashRecord = {
 };
 
 type StoredSettings = { property?: { cashFloatCents?: unknown } };
-type CashActivity = { paymentCents: number; refundCents: number; netCents: number };
+type CashActivity = { paymentCents: number; refundCents: number; depositCents: number; previousShiftsCents: number; netCents: number };
 
 function shiftStatus(kind: "open" | "closed", shift: string) {
   return `${kind}:${shift}`;
@@ -95,15 +96,28 @@ async function listRecords(propertyId: string) {
   return rows.map(toRecord);
 }
 
-async function cashActivityForDate(sql: ReturnType<typeof productionSql>, propertyId: string, date: string): Promise<CashActivity> {
-  const [activity] = await sql<Array<{ paymentCents: number; refundCents: number }>>`
+async function cashActivityForDate(sql: Sql | TransactionSql, propertyId: string, date: string): Promise<CashActivity> {
+  const [activity] = await sql<Array<{ paymentCents: number; refundCents: number; depositCents: number; previousShiftsCents: number }>>`
     select
+      -- Cash activity already counted by earlier completed shifts today:
+      -- each stored expected total = float + its activity + its adjustments.
+      coalesce((select sum(cs.expected_cents - cs.drawer_float_cents
+          - coalesce((select sum(t.amount_cents) from cash_shift_transactions t where t.cash_shift_id=cs.id),0))
+        from cash_shifts cs join business_days bd on bd.id=cs.business_day_id
+        where cs.property_id=${propertyId}::uuid and bd.business_date=${date}::date and cs.closed_at is not null),0)::int as "previousShiftsCents",
+      -- Cash security deposits sit in the drawer until released.
+      coalesce((select sum(le.debit_cents-le.credit_cents) from ledger_entries le where le.property_id=${propertyId}::uuid and le.business_date=${date}::date
+        and le.account='Cash' and le.resource_type in ('deposit-collect','deposit-release')),0)::int as "depositCents",
       coalesce((select sum(p.amount_cents) from payments p where p.property_id=${propertyId}::uuid and p.effective_date=${date}::date and lower(p.method) like '%cash%'),0)::int as "paymentCents",
       coalesce((select sum(r.amount_cents) from refunds r join payments p on p.id=r.payment_id where r.property_id=${propertyId}::uuid and r.effective_date=${date}::date and lower(p.method) like '%cash%'),0)::int as "refundCents"
   `;
   const paymentCents = activity?.paymentCents ?? 0;
   const refundCents = activity?.refundCents ?? 0;
-  return { paymentCents, refundCents, netCents: paymentCents - refundCents };
+  const depositCents = activity?.depositCents ?? 0;
+  const previousShiftsCents = activity?.previousShiftsCents ?? 0;
+  // Net is what this shift is responsible for: the day's cash not yet
+  // accounted for by an earlier shift's drop.
+  return { paymentCents, refundCents, depositCents, previousShiftsCents, netCents: paymentCents - refundCents + depositCents - previousShiftsCents };
 }
 
 export async function GET(request: Request) {
@@ -113,7 +127,7 @@ export async function GET(request: Request) {
     const date = new URL(request.url).searchParams.get("date");
     const cashActivity = dateSchema.safeParse(date).success
       ? await cashActivityForDate(productionSql(), session.propertyId, date!)
-      : { paymentCents: 0, refundCents: 0, netCents: 0 };
+      : { paymentCents: 0, refundCents: 0, depositCents: 0, previousShiftsCents: 0, netCents: 0 };
     return Response.json({ records: await listRecords(session.propertyId), cashActivity });
   } catch (error) {
     return propertyAccessResponse(error);
@@ -132,7 +146,10 @@ export async function POST(request: Request) {
         select id from employees
         where property_id=${session.propertyId}::uuid and active=true
           and lower(name)=lower(${input.manager})
-          and lower(job_role) in ('owner','manager')
+          -- Titles vary ("Owner/Admin", "General Manager"); a login membership
+          -- with the owner/manager role also qualifies.
+          and (lower(job_role) ~ '(^|[^a-z])(owner|manager)([^a-z]|$)'
+            or membership_id in (select id from property_memberships where property_id=${session.propertyId}::uuid and role in ('owner','manager') and active))
         limit 1
       `;
       if (!employee) return { error: "Choose an active employee with the Owner or Manager role." } as const;
@@ -141,16 +158,7 @@ export async function POST(request: Request) {
         where property_id=${session.propertyId}::uuid and key='application_settings'
       `;
       const drawerFloatCents = parseFloatCents(settings?.value);
-      const [cashActivityRow] = await tx<Array<{ paymentCents: number; refundCents: number }>>`
-        select
-          coalesce((select sum(p.amount_cents) from payments p where p.property_id=${session.propertyId}::uuid and p.effective_date=${input.date}::date and lower(p.method) like '%cash%'),0)::int as "paymentCents",
-          coalesce((select sum(r.amount_cents) from refunds r join payments p on p.id=r.payment_id where r.property_id=${session.propertyId}::uuid and r.effective_date=${input.date}::date and lower(p.method) like '%cash%'),0)::int as "refundCents"
-      `;
-      const cashActivity = {
-        paymentCents: cashActivityRow?.paymentCents ?? 0,
-        refundCents: cashActivityRow?.refundCents ?? 0,
-        netCents: (cashActivityRow?.paymentCents ?? 0) - (cashActivityRow?.refundCents ?? 0),
-      };
+      const cashActivity = await cashActivityForDate(tx, session.propertyId, input.date);
       const [businessDay] = await tx<Array<{ id: string }>>`
         insert into business_days (property_id,business_date,status,opened_at)
         values (${session.propertyId}::uuid,${input.date},'open',now())

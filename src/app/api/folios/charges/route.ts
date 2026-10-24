@@ -45,14 +45,16 @@ type ChargeContext = {
 
 function taxAmount(context: ChargeContext, amountCents: number, override?: number, reason?: string) {
   if (override !== undefined && !reason) throw new Error("A reason is required when tax is changed manually.");
-  if (context.taxExempt || !context.taxable) return 0;
+  // Owner rule: only room rent is taxed; every extra charge is non-taxable.
+  if (context.taxExempt || !context.taxable || !/room rent/i.test(context.typeName)) return 0;
   return override ?? Math.round((amountCents * context.taxRateBasisPoints) / 10_000);
 }
 
 function revenueAccount(context: Pick<ChargeContext, "revenueCategory" | "typeName">) {
   return /room/i.test(context.revenueCategory) || /room rent/i.test(context.typeName)
     ? "Room Revenue"
-    : "Miscellaneous Revenue";
+    // Revenue reports read misc revenue from "Revenue:*" accounts.
+    : `Revenue:${context.typeName}`;
 }
 
 export async function POST(request: Request) {
@@ -86,7 +88,7 @@ export async function POST(request: Request) {
         ) values (
           ${session.propertyId}::uuid, ${context.folioId}::uuid,
           ${input.reservationRoomId ?? null}::uuid, ${context.typeName}, ${input.description},
-          ${input.serviceDate}::date, ${input.amountCents}, ${context.taxable && !context.taxExempt}, 'posted'
+          ${input.serviceDate}::date, ${input.amountCents}, false, 'posted'
         ) returning id
       `;
       if (taxCents > 0 || input.taxOverrideCents !== undefined) {
