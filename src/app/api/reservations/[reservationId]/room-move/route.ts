@@ -56,7 +56,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         select rr.id from reservation_rooms rr join reservations r on r.id=rr.reservation_id
         where rr.property_id=${session.propertyId}::uuid and rr.room_id=${destination.id}::uuid and rr.id<>${reservationRoom.id}::uuid
           and rr.status in ('reserved','checked_in') and r.status in ('reserved','checked_in')
-          and r.arrival_date<${reservation.departureDate}::date and r.departure_date>${reservation.arrivalDate}::date
+          and r.arrival_date<greatest(${reservation.departureDate}::date, ${reservation.arrivalDate}::date + 1) and greatest(r.departure_date, r.arrival_date + 1)>${reservation.arrivalDate}::date
         limit 1 for update of rr
       `;
       if (occupied) return { error: "The destination room is already booked for these dates.", status: 409 } as const;

@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { addDays, rateCalendarRestriction } from "@/server/rates/rate-calendar";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { calculateAvailabilityRateCents } from "@/domain/rules/availability";
@@ -47,7 +48,8 @@ export async function GET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const parsed = querySchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
-    if (!parsed.success || parsed.data.checkout <= parsed.data.checkIn) {
+    // Equal dates are a day-use (zero-night) stay.
+    if (!parsed.success || parsed.data.checkout < parsed.data.checkIn) {
       return Response.json({ error: "Enter a valid check-in and check-out date." }, { status: 400 });
     }
     if (!hasProductionDatabase()) return Response.json({ error: "Production availability is unavailable." }, { status: 503 });
@@ -68,6 +70,10 @@ export async function GET(request: Request) {
         ?? activeRateCodes[0];
     if (parsed.data.rateCode && !selectedRateCode) return Response.json({ error: "Select an active rate code." }, { status: 409 });
 
+    // A day-use stay occupies its arrival date, so overlap checks treat it as
+    // ending the next morning, and existing day-use stays likewise.
+    const dayUse = parsed.data.checkout === parsed.data.checkIn;
+    const occupiedUntil = dayUse ? addDays(parsed.data.checkIn, 1) : parsed.data.checkout;
     const availableRooms = await productionSql()<Array<{ number: string; roomTypeName: string }>>`
       select r.number,rt.name as "roomTypeName"
       from rooms r
@@ -79,13 +85,13 @@ export async function GET(request: Request) {
           join reservations rs on rs.id=rr.reservation_id
           where rr.room_id=r.id and rr.status in ('reserved','checked_in')
             and rs.status in ('reserved','checked_in')
-            and rs.arrival_date < ${parsed.data.checkout}::date
-            and rs.departure_date > ${parsed.data.checkIn}::date
+            and rs.arrival_date < ${occupiedUntil}::date
+            and greatest(rs.departure_date, rs.arrival_date + 1) > ${parsed.data.checkIn}::date
         )
         and not exists (
           select 1 from maintenance_orders mo
           where mo.room_id=r.id and mo.rentable=false and mo.status not in ('resolved','cancelled')
-            and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockFrom')::date else null end < ${parsed.data.checkout}::date
+            and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockFrom')::date else null end < ${occupiedUntil}::date
             and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockTo')::date else null end >= ${parsed.data.checkIn}::date
         )
       order by r.number
@@ -98,7 +104,7 @@ export async function GET(request: Request) {
       join room_types rt on rt.id=rr.room_type_id
       where rr.property_id=${session.propertyId}::uuid and rr.room_id is null
         and rr.status in ('reserved','checked_in') and rs.status in ('reserved','checked_in')
-        and rs.arrival_date < ${parsed.data.checkout}::date and rs.departure_date > ${parsed.data.checkIn}::date
+        and rs.arrival_date < ${occupiedUntil}::date and greatest(rs.departure_date, rs.arrival_date + 1) > ${parsed.data.checkIn}::date
       group by rt.name
     `;
     // Smoking/non-smoking variants share a database type name, so assign
@@ -108,14 +114,30 @@ export async function GET(request: Request) {
     const unassignedLeft = new Map(unassigned.map((item) => [item.roomTypeName, item.count]));
     const nights = Math.round((new Date(`${parsed.data.checkout}T12:00:00Z`).getTime() - new Date(`${parsed.data.checkIn}T12:00:00Z`).getTime()) / 86_400_000);
     const taxPercentage = Math.max(0, settings.tax?.percentage ?? 0);
+    // Rate calendar: a dated rate replaces the rate plan's price for that
+    // night (except on exemption codes, which stay $0), and closed dates or a
+    // minimum stay restrict the room type.
+    const pricedNights = Math.max(1, nights);
+    const calendarRows = await productionSql()<Array<{ roomTypeId: string; stayDate: string; rateCents: number | null; minStay: number | null; closed: boolean }>>`
+      select room_type_id as "roomTypeId", stay_date::text as "stayDate", rate_cents as "rateCents", min_stay as "minStay", closed
+      from rate_calendar where property_id=${session.propertyId}::uuid and stay_date >= ${parsed.data.checkIn}::date and stay_date < ${occupiedUntil}::date
+    `;
+    const exemptionRate = /rate (exception|exemption)/i.test(selectedRateCode?.name ?? "");
     return Response.json({
       checkIn: parsed.data.checkIn,
       checkout: parsed.data.checkout,
       nights,
       rateCode: selectedRateCode?.name ?? null,
       roomTypes: roomTypes.map((roomType) => {
-        const rateCents = calculateAvailabilityRateCents(roomType, selectedRateCode, parsed.data.adults, parsed.data.children);
-        const roomRentCents = rateCents * nights;
+        const planRateCents = calculateAvailabilityRateCents(roomType, selectedRateCode, parsed.data.adults, parsed.data.children);
+        const days = new Map(calendarRows.filter((row) => row.roomTypeId === roomType.id).map((row) => [row.stayDate, row]));
+        const nightlyRatesCents = Array.from({ length: pricedNights }, (_, night) => {
+          const override = days.get(addDays(parsed.data.checkIn, night))?.rateCents;
+          return override != null && !exemptionRate ? override : planRateCents;
+        });
+        const roomRentCents = nightlyRatesCents.reduce((total, rate) => total + rate, 0);
+        const rateCents = Math.round(roomRentCents / pricedNights);
+        const restriction = rateCalendarRestriction(days, parsed.data.checkIn, nights);
         const taxCents = Math.round(roomRentCents * taxPercentage / 100);
         const availableRoomNumbers = availableRooms
           .filter((room) => configuredTypeByRoom.has(room.number) ? configuredTypeByRoom.get(room.number) === roomType.id : room.roomTypeName === roomType.name)
@@ -129,6 +151,8 @@ export async function GET(request: Request) {
           availableRoomNumbers,
           roomCount: availableRoomNumbers.length - unassignedHere,
           nightlyRateCents: rateCents,
+          nightlyRatesCents,
+          restriction,
           roomRentCents,
           taxCents,
           totalCents: roomRentCents + taxCents,

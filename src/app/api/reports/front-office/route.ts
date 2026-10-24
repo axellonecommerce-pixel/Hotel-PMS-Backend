@@ -12,7 +12,7 @@ const querySchema = z.object({
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   view: z.enum([
     "arrivals", "departures", "in-house-balances", "do-not-rent", "payment-activity",
-    "tax", "direct-bill-aging", "trial-balance", "revenue-by-room-type", "room-status",
+    "tax", "direct-bill-aging", "trial-balance", "revenue-by-room-type", "room-status", "paid-outs", "lost-and-found",
   ]),
 });
 
@@ -109,7 +109,8 @@ export async function GET(request: Request) {
     if (view === "payment-activity") {
       const records = await sql<Array<{ id: string; date: string; payer: string; confirmation: string; method: string; reference: string; amountCents: number; refundedCents: number; netCents: number }>>`
         select p.id, p.effective_date::text as date,
-          coalesce(co.name, g.first_name||' '||g.last_name, 'Unassigned') as payer, coalesce(r.confirmation_number,'Company payment') as confirmation,
+          coalesce(co.name, g.first_name||' '||g.last_name, (select ha.name from house_accounts ha where ha.id=p.house_account_id), 'Unassigned') as payer,
+          coalesce(r.confirmation_number, case when p.house_account_id is not null then 'House account' else 'Company payment' end) as confirmation,
           p.method, coalesce(case when p.last4 is not null then '•••• '||p.last4 end, p.external_reference, '—') as reference,
           p.amount_cents as "amountCents",
           coalesce((select sum(ref.amount_cents) from refunds ref where ref.payment_id=p.id),0)::int as "refundedCents",
@@ -125,6 +126,36 @@ export async function GET(request: Request) {
         [{ key: "date", label: "Date", format: "date" }, { key: "payer", label: "Guest / Company" }, { key: "confirmation", label: "Confirmation" }, { key: "method", label: "Method" }, { key: "reference", label: "Reference" }, money("amountCents", "Amount"), money("refundedCents", "Refunded"), money("netCents", "Net")],
         records,
         "Money received from guests and companies. OTA commission settlements, direct bill transfers, and bad debt write-offs are not payments and are excluded.",
+      );
+    }
+
+    if (view === "paid-outs") {
+      const records = await sql<Array<{ id: string; date: string; paidTo: string; reason: string; note: string; amountCents: number }>>`
+        select id, business_date::text as date, paid_to as "paidTo", reason, coalesce(note,'') as note, amount_cents as "amountCents"
+        from paid_outs where property_id=${propertyId}::uuid and business_date between ${startDate}::date and ${endDate}::date
+        order by business_date, created_at
+      `;
+      return respond(
+        [{ label: "Paid Outs", value: records.length, format: "number" }, { label: "Cash Paid Out", value: sum(records, (row) => row.amountCents), format: "money" }],
+        [{ key: "date", label: "Date", format: "date" }, { key: "paidTo", label: "Paid To" }, { key: "reason", label: "Reason" }, { key: "note", label: "Note" }, money("amountCents", "Amount")],
+        records,
+        "Cash paid out of the front-desk drawer. Each paid out lowers the expected cash for that day's Cash Drop.",
+      );
+    }
+
+    if (view === "lost-and-found") {
+      const records = await sql<Array<{ id: string; date: string; item: string; location: string; foundBy: string; guest: string; storage: string; status: string; closed: string }>>`
+        select l.id, l.found_date::text as date, l.item || coalesce(' — ' || l.description, '') as item, l.location, l.found_by as "foundBy",
+          coalesce(l.guest_name, '—') as guest, coalesce(l.storage_location, '—') as storage, initcap(l.status) as status,
+          coalesce(l.closed_by || coalesce(' · ' || l.closed_note, ''), '') as closed
+        from lost_found_items l where l.property_id=${propertyId}::uuid and l.found_date between ${startDate}::date and ${endDate}::date
+        order by l.found_date, l.created_at
+      `;
+      return respond(
+        [{ label: "Items Found", value: records.length, format: "number" }, { label: "In Storage", value: records.filter((row) => row.status === "Stored").length, format: "number" }, { label: "Returned", value: records.filter((row) => row.status === "Returned").length, format: "number" }, { label: "Disposed", value: records.filter((row) => row.status === "Disposed").length, format: "number" }],
+        [{ key: "date", label: "Found", format: "date" }, { key: "item", label: "Item" }, { key: "location", label: "Where Found" }, { key: "foundBy", label: "Found By" }, { key: "guest", label: "Guest" }, { key: "storage", label: "Stored At" }, { key: "status", label: "Status", format: "status" }, { key: "closed", label: "Returned To / Disposed By" }],
+        records,
+        "Items found in the date range and what happened to each one.",
       );
     }
 

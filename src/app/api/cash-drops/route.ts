@@ -35,7 +35,7 @@ type CashRecord = {
 };
 
 type StoredSettings = { property?: { cashFloatCents?: unknown } };
-type CashActivity = { paymentCents: number; refundCents: number; depositCents: number; previousShiftsCents: number; netCents: number };
+type CashActivity = { paymentCents: number; refundCents: number; depositCents: number; previousShiftsCents: number; paidOutCents: number; netCents: number };
 
 function shiftStatus(kind: "open" | "closed", shift: string) {
   return `${kind}:${shift}`;
@@ -97,7 +97,7 @@ async function listRecords(propertyId: string) {
 }
 
 async function cashActivityForDate(sql: Sql | TransactionSql, propertyId: string, date: string): Promise<CashActivity> {
-  const [activity] = await sql<Array<{ paymentCents: number; refundCents: number; depositCents: number; previousShiftsCents: number }>>`
+  const [activity] = await sql<Array<{ paymentCents: number; refundCents: number; depositCents: number; previousShiftsCents: number; paidOutCents: number }>>`
     select
       -- Cash activity already counted by earlier completed shifts today:
       -- each stored expected total = float + its activity + its adjustments.
@@ -109,15 +109,18 @@ async function cashActivityForDate(sql: Sql | TransactionSql, propertyId: string
       coalesce((select sum(le.debit_cents-le.credit_cents) from ledger_entries le where le.property_id=${propertyId}::uuid and le.business_date=${date}::date
         and le.account='Cash' and le.resource_type in ('deposit-collect','deposit-release')),0)::int as "depositCents",
       coalesce((select sum(p.amount_cents) from payments p where p.property_id=${propertyId}::uuid and p.effective_date=${date}::date and lower(p.method) like '%cash%'),0)::int as "paymentCents",
-      coalesce((select sum(r.amount_cents) from refunds r join payments p on p.id=r.payment_id where r.property_id=${propertyId}::uuid and r.effective_date=${date}::date and lower(p.method) like '%cash%'),0)::int as "refundCents"
+      coalesce((select sum(r.amount_cents) from refunds r join payments p on p.id=r.payment_id where r.property_id=${propertyId}::uuid and r.effective_date=${date}::date and lower(p.method) like '%cash%'),0)::int as "refundCents",
+      -- Paid outs leave the drawer as cash.
+      coalesce((select sum(po.amount_cents) from paid_outs po where po.property_id=${propertyId}::uuid and po.business_date=${date}::date),0)::int as "paidOutCents"
   `;
   const paymentCents = activity?.paymentCents ?? 0;
   const refundCents = activity?.refundCents ?? 0;
   const depositCents = activity?.depositCents ?? 0;
   const previousShiftsCents = activity?.previousShiftsCents ?? 0;
+  const paidOutCents = activity?.paidOutCents ?? 0;
   // Net is what this shift is responsible for: the day's cash not yet
   // accounted for by an earlier shift's drop.
-  return { paymentCents, refundCents, depositCents, previousShiftsCents, netCents: paymentCents - refundCents + depositCents - previousShiftsCents };
+  return { paymentCents, refundCents, depositCents, previousShiftsCents, paidOutCents, netCents: paymentCents - refundCents + depositCents - paidOutCents - previousShiftsCents };
 }
 
 export async function GET(request: Request) {
@@ -127,7 +130,7 @@ export async function GET(request: Request) {
     const date = new URL(request.url).searchParams.get("date");
     const cashActivity = dateSchema.safeParse(date).success
       ? await cashActivityForDate(productionSql(), session.propertyId, date!)
-      : { paymentCents: 0, refundCents: 0, depositCents: 0, previousShiftsCents: 0, netCents: 0 };
+      : { paymentCents: 0, refundCents: 0, depositCents: 0, previousShiftsCents: 0, paidOutCents: 0, netCents: 0 };
     return Response.json({ records: await listRecords(session.propertyId), cashActivity });
   } catch (error) {
     return propertyAccessResponse(error);

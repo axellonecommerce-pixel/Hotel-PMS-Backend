@@ -84,7 +84,7 @@ export async function POST(request: Request) {
           select concat(g.first_name,' ',g.last_name) as guest,rr.status,rs.departure_date::text as departure
           from reservation_rooms rr join reservations rs on rs.id=rr.reservation_id join guests g on g.id=rs.main_guest_id
           where rr.room_id=${room.id}::uuid and rr.status in ('reserved','checked_in') and rs.status in ('reserved','checked_in')
-            and (rr.status='checked_in' or (rs.arrival_date <= ${parsed.data.blockTo}::date and rs.departure_date > ${parsed.data.blockFrom}::date))
+            and (rr.status='checked_in' or (rs.arrival_date <= ${parsed.data.blockTo}::date and greatest(rs.departure_date, rs.arrival_date + 1) > ${parsed.data.blockFrom}::date))
           order by rr.status desc limit 1
         `;
         if (conflict) {

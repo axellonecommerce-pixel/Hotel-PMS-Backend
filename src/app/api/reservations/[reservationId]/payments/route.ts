@@ -39,11 +39,14 @@ export async function GET(request: Request, context: { params: Promise<{ reserva
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const reservationId = await routeParams(context);
-    const payments = await productionSql()<Array<{ id: string; amountCents: number; method: string; folioId: string; note: string | null; last4: string | null; reference: string | null; refundedCents: number; createdAt: string }>>`
-      select p.id,p.amount_cents as "amountCents",p.method,pa.folio_id as "folioId",p.note,p.last4,p.external_reference as reference,
-        coalesce((select sum(r.amount_cents) from refunds r where r.payment_id=p.id),0)::int as "refundedCents",p.created_at::text as "createdAt"
-      from payments p join payment_allocations pa on pa.payment_id=p.id
-      where p.property_id=${session.propertyId}::uuid and p.reservation_id=${reservationId}::uuid
+    // Every payment applied to this stay's folios, including part of another
+    // guest's payment transferred here; allocatedCents is the part applied.
+    const payments = await productionSql()<Array<{ id: string; amountCents: number; allocatedCents: number; method: string; folioId: string; note: string | null; last4: string | null; reference: string | null; refundedCents: number; createdAt: string; transferredFrom: string | null }>>`
+      select p.id,p.amount_cents as "amountCents",pa.amount_cents as "allocatedCents",p.method,pa.folio_id as "folioId",p.note,p.last4,p.external_reference as reference,
+        coalesce((select sum(r.amount_cents) from refunds r where r.payment_id=p.id),0)::int as "refundedCents",p.created_at::text as "createdAt",
+        case when p.reservation_id is distinct from ${reservationId}::uuid then (select src.confirmation_number from reservations src where src.id=p.reservation_id) end as "transferredFrom"
+      from payments p join payment_allocations pa on pa.payment_id=p.id join folios f on f.id=pa.folio_id
+      where p.property_id=${session.propertyId}::uuid and f.reservation_id=${reservationId}::uuid
       order by p.created_at desc
     `;
     return Response.json({ payments });

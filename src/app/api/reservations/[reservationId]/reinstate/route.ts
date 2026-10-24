@@ -81,7 +81,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
           where rr.property_id=${session.propertyId}::uuid and rr.room_id in ${tx(assignedRooms.map((room) => room.roomId!))}
             and rr.status in ('reserved','checked_in') and other.status in ('reserved','checked_in')
             and other.id<>${reservation.id}::uuid
-            and other.arrival_date<${reservation.departureDate}::date and other.departure_date>${reservation.arrivalDate}::date
+            and other.arrival_date<greatest(${reservation.departureDate}::date, ${reservation.arrivalDate}::date + 1) and greatest(other.departure_date, other.arrival_date + 1)>${reservation.arrivalDate}::date
         `;
         const taken = new Set(conflicts.map((conflict) => conflict.roomId));
         assignedRooms.filter((room) => taken.has(room.roomId!)).forEach((room) => releasedRoomIds.add(room.id));
@@ -97,7 +97,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
             (select count(*) from reservation_rooms rr join reservations other on other.id=rr.reservation_id
               where rr.property_id=${session.propertyId}::uuid and rr.room_type_id=${roomTypeId}::uuid
                 and rr.status in ('reserved','checked_in') and other.status in ('reserved','checked_in') and other.id<>${reservation.id}::uuid
-                and other.arrival_date<${reservation.departureDate}::date and other.departure_date>${reservation.arrivalDate}::date)::int as booked
+                and other.arrival_date<greatest(${reservation.departureDate}::date, ${reservation.arrivalDate}::date + 1) and greatest(other.departure_date, other.arrival_date + 1)>${reservation.arrivalDate}::date)::int as booked
         `;
         if (inventory.rentable - inventory.booked < needed) return { error: "That room type no longer has enough inventory for these dates.", httpStatus: 409 } as const;
       }
