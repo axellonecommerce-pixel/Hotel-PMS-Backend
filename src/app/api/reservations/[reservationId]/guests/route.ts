@@ -35,7 +35,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         from guests g
         left join guest_identities identity on identity.guest_id=g.id and identity.deleted_at is null
         where g.id=${parsed.data.guestId}::uuid and g.property_id=${session.propertyId}::uuid
-        for update
+        for update of g
       `;
       if (!guest) throw new Error("Guest not found.");
       const [attached] = await tx<Array<{ id: string }>>`

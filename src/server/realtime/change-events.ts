@@ -32,9 +32,13 @@ export type StreamChangeEvent = {
 export async function recordChange(input: ChangeInput) {
   try {
     if (hasProductionDatabase()) {
+      // entity_version is a 32-bit integer. Several callers pass Date.now()
+      // (milliseconds), which overflowed it and silently dropped the realtime
+      // event; store such stamps in seconds instead.
+      const entityVersion = input.entityVersion > 2_147_483_647 ? Math.floor(input.entityVersion / 1000) : input.entityVersion;
       await productionSql()`
         insert into change_events (property_id,actor_auth_user_id,entity_type,entity_id,action,entity_version,payload)
-        values (${input.propertyId}::uuid,${input.actorAuthUserId}::uuid,${input.entityType},${input.entityId}::uuid,${input.action},${input.entityVersion},${JSON.stringify(input.payload ?? {})}::jsonb)
+        values (${input.propertyId}::uuid,${input.actorAuthUserId}::uuid,${input.entityType},${input.entityId}::uuid,${input.action},${entityVersion},${JSON.stringify(input.payload ?? {})}::jsonb)
       `;
       return;
     }

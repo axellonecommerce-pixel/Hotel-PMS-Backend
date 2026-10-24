@@ -32,6 +32,7 @@ type StoredRateCode = {
 };
 type StoredSettings = {
   roomTypes?: StoredRoomType[];
+  rooms?: Array<{ number: string; roomTypeId: string }>;
   rateCodes?: StoredRateCode[];
   tax?: { percentage?: number };
 };
@@ -97,6 +98,11 @@ export async function GET(request: Request) {
         and rs.arrival_date < ${parsed.data.checkout}::date and rs.departure_date > ${parsed.data.checkIn}::date
       group by rt.name
     `;
+    // Smoking/non-smoking variants share a database type name, so assign
+    // rooms to a variant by the room's configured Settings type, and count
+    // each unassigned booking against only one variant.
+    const configuredTypeByRoom = new Map((settings.rooms ?? []).map((room) => [room.number, room.roomTypeId]));
+    const unassignedLeft = new Map(unassigned.map((item) => [item.roomTypeName, item.count]));
     const nights = Math.round((new Date(`${parsed.data.checkout}T12:00:00Z`).getTime() - new Date(`${parsed.data.checkIn}T12:00:00Z`).getTime()) / 86_400_000);
     const taxPercentage = Math.max(0, settings.tax?.percentage ?? 0);
     return Response.json({
@@ -108,13 +114,17 @@ export async function GET(request: Request) {
         const rateCents = calculateAvailabilityRateCents(roomType, selectedRateCode, parsed.data.adults, parsed.data.children);
         const roomRentCents = rateCents * nights;
         const taxCents = Math.round(roomRentCents * taxPercentage / 100);
-        const availableRoomNumbers = availableRooms.filter((room) => room.roomTypeName === roomType.name).map((room) => room.number);
+        const availableRoomNumbers = availableRooms
+          .filter((room) => configuredTypeByRoom.has(room.number) ? configuredTypeByRoom.get(room.number) === roomType.id : room.roomTypeName === roomType.name)
+          .map((room) => room.number);
+        const unassignedHere = Math.min(availableRoomNumbers.length, unassignedLeft.get(roomType.name) ?? 0);
+        unassignedLeft.set(roomType.name, (unassignedLeft.get(roomType.name) ?? 0) - unassignedHere);
         return {
           roomTypeId: roomType.id,
           name: roomType.name,
           shortLabel: roomType.shortLabel || roomType.name.slice(0, 4).toUpperCase(),
           availableRoomNumbers,
-          roomCount: Math.max(0, availableRoomNumbers.length - (unassigned.find((item) => item.roomTypeName === roomType.name)?.count ?? 0)),
+          roomCount: availableRoomNumbers.length - unassignedHere,
           nightlyRateCents: rateCents,
           roomRentCents,
           taxCents,

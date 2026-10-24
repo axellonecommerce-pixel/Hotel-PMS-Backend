@@ -1,5 +1,6 @@
 import type { TransactionSql } from "postgres";
 
+import { nightAuditBlockers } from "@/domain/rules/reservation-lifecycle";
 import { postProductionLedger } from "@/server/finance/production-finance";
 
 type Tx = TransactionSql<Record<string, never>>;
@@ -111,7 +112,7 @@ export async function runNightAudit(tx: Tx, input: { propertyId: string; trigger
     order by business_date limit 1 for update
   `;
   if (!day) throw new Error("There is no open business day.");
-  const [counts] = await tx<Array<{ unpaidDepartures: number; unpaidInHouse: number; unresolvedDeposits: number; openCashShifts: number; operationalIssues: number }>>`
+  const [counts] = await tx<Array<{ unpaidDepartures: number; unresolvedDeposits: number; openCashShifts: number; operationalIssues: number }>>`
     select
       (select count(distinct r.id) from reservations r
         join reservation_rooms rr on rr.reservation_id=r.id
@@ -122,25 +123,24 @@ export async function runNightAudit(tx: Tx, input: { propertyId: string; trigger
               and (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c where c.folio_id=f.id and c.status='posted'),0)
                 - coalesce((select sum(pa.amount_cents) from payment_allocations pa where pa.folio_id=f.id),0)) <> 0
           ))::int as "unpaidDepartures",
-      (select count(distinct r.id) from reservations r
-        join reservation_rooms rr on rr.reservation_id=r.id
-        where r.property_id=${input.propertyId}::uuid and rr.status='checked_in'
-          and exists (
-            select 1 from folios f where f.reservation_id=r.id
-              and (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c where c.folio_id=f.id and c.status='posted'),0)
-                - coalesce((select sum(pa.amount_cents) from payment_allocations pa where pa.folio_id=f.id),0)) <> 0
-          ))::int as "unpaidInHouse",
-      (select count(*) from security_deposits d where d.property_id=${input.propertyId}::uuid
-        and d.amount_cents > coalesce((select sum(dt.amount_cents) from deposit_transactions dt where dt.deposit_id=d.id and dt.type in ('release','charge')),0))::int as "unresolvedDeposits",
+
+      -- As in HotelKey, in-house guests may carry a balance and a held deposit
+      -- overnight; they must settle at checkout. Only stays that are due out
+      -- (or already departed) with an open deposit block the audit.
+      (select count(*) from security_deposits d
+        join reservation_rooms rr on rr.id=d.reservation_room_id join reservations r on r.id=rr.reservation_id
+        where d.property_id=${input.propertyId}::uuid
+          and (rr.status='checked_out' or r.departure_date<=${day.businessDate}::date)
+          and d.amount_cents > coalesce((select sum(dt.amount_cents) from deposit_transactions dt where dt.deposit_id=d.id and dt.type in ('release','charge')),0))::int as "unresolvedDeposits",
       (select count(*) from cash_shifts where property_id=${input.propertyId}::uuid and status='open')::int as "openCashShifts",
       (select count(*) from maintenance_orders where property_id=${input.propertyId}::uuid and status not in ('completed','cancelled') and priority='critical')::int as "operationalIssues"
   `;
-  const blockers: string[] = [];
-  if (counts.unpaidDepartures) blockers.push("UNPAID_DEPARTURES");
-  if (counts.unpaidInHouse) blockers.push("UNPAID_IN_HOUSE_FOLIOS");
-  if (counts.unresolvedDeposits) blockers.push("UNRESOLVED_DEPOSITS");
-  if (counts.openCashShifts) blockers.push("OPEN_CASH_SHIFTS");
-  if (counts.operationalIssues) blockers.push("OPERATIONAL_ISSUES");
+  const blockers = nightAuditBlockers({
+    unpaidDepartureCount: counts.unpaidDepartures,
+    unresolvedDepositCount: counts.unresolvedDeposits,
+    openCashShiftCount: counts.openCashShifts,
+    unresolvedOperationalIssueCount: counts.operationalIssues,
+  });
   const [run] = await tx<Array<{ id: string }>>`
     insert into night_audit_runs (property_id,business_day_id,trigger,status,blocking_issues,initiated_by_employee_id)
     values (${input.propertyId}::uuid,${day.id}::uuid,${input.trigger},${blockers.length ? "failed" : "completed"},${tx.json(blockers)},${input.employeeId ?? null}::uuid)

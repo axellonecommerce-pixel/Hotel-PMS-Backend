@@ -13,8 +13,8 @@ import { bookingChannels, companies, guests, reservationCharges, reservationRoom
 import { recordChange } from "@/server/realtime/change-events";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import type { PropertySession } from "@/server/auth/authorization";
-import { allocateProductionDocumentNumber, postProductionLedger } from "@/server/finance/production-finance";
-import { setReservationCommission } from "@/server/finance/ota-commission";
+import { allocateProductionDocumentNumber, postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
 
 /**
  * The operational UI needs a real property-scoped read model after refresh.
@@ -26,13 +26,13 @@ export async function GET(request: Request) {
     const session = await requirePropertySession(request, "reservations.manage");
     if (hasProductionDatabase()) {
       const records = await productionSql()<Array<{
-        id: string; version: number; confirmationNumber: string; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null;
+        id: string; version: number; confirmationNumber: string; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null; companyName: string | null;
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null; otaPaymentStatus: string | null;
         taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number;
         reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; roomTypeName: string | null; status: string }>;
         extraGuests: Array<{ id: string; name: string; driverLicenseNumber: string | null }>;
       }>>`
-        select r.id,r.version,r.confirmation_number as "confirmationNumber",r.company_id as "companyId",g.first_name as "firstName",g.last_name as "lastName",g.phone,
+        select r.id,r.version,r.confirmation_number as "confirmationNumber",r.company_id as "companyId",(select c.name from companies c where c.id=r.company_id) as "companyName",g.first_name as "firstName",g.last_name as "lastName",g.phone,
           rr.room_number as room,r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
           coalesce(bs.name,case when r.notes like '{%' then r.notes::jsonb->>'source' end,'Direct') as source,
           case when r.notes like '{%' then r.notes::jsonb->>'rateCode' end as "rateCode",
@@ -83,7 +83,7 @@ export async function GET(request: Request) {
           ? record.otaPaymentStatus
           : undefined;
         const commissionCents = record.commissionCents;
-        return { id: record.id, version: record.version, confirmationNumber: record.confirmationNumber, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+        return { id: record.id, version: record.version, confirmationNumber: record.confirmationNumber, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", companyId: record.companyId ?? undefined, company: record.companyName ?? undefined, roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
     }
     const records = await db.query.reservations.findMany({
@@ -798,11 +798,23 @@ async function updateProductionReservation(
       const nextDeparture = changes.departureDate ?? current.departureDate;
       if (nextDeparture < nextArrival) throw new ReservationRequestError("Check-out cannot be before check-in.");
 
+      const postedRentCents = async () => {
+        const [row] = await tx<Array<{ cents: number }>>`
+          select coalesce(sum(c.amount_cents),0)::int as cents from charges c
+          where c.reservation_room_id in (select id from reservation_rooms where reservation_id=${id}::uuid)
+            and c.type='Room Rent' and c.status='posted'
+        `;
+        return row.cents;
+      };
+      const rentBeforeCents = changes.departureDate && changes.departureDate !== current.departureDate ? await postedRentCents() : 0;
       if (changes.departureDate && changes.departureDate !== current.departureDate) {
         const roomRows = await tx<Array<{ id: string; folioId: string | null }>>`
-          select rr.id, f.id as "folioId" from reservation_rooms rr
+          -- A group shares one folio with no room link; extend onto it rather
+          -- than opening a new folio per room.
+          select rr.id, coalesce(f.id,(select gf.id from folios gf where gf.reservation_id=rr.reservation_id order by gf.created_at limit 1)) as "folioId"
+          from reservation_rooms rr
           left join folios f on f.reservation_room_id=rr.id
-          where rr.reservation_id=${id}::uuid and rr.property_id=${session.propertyId}::uuid for update
+          where rr.reservation_id=${id}::uuid and rr.property_id=${session.propertyId}::uuid for update of rr
         `;
         if (changes.departureDate > current.departureDate) {
           for (const roomRow of roomRows) {
@@ -830,7 +842,7 @@ async function updateProductionReservation(
               `;
               const [existingCharge] = await tx<Array<{ id: string }>>`
                 select id from charges where reservation_room_id=${roomRow.id}::uuid
-                  and type='Room Rent' and service_date=${stayDate}::date limit 1
+                  and type='Room Rent' and status='posted' and service_date=${stayDate}::date limit 1
               `;
               if (!existingCharge) {
                 const [charge] = await tx<Array<{ id: string }>>`
@@ -838,9 +850,13 @@ async function updateProductionReservation(
                   values (${session.propertyId}::uuid,${folioId}::uuid,${roomRow.id}::uuid,'Room Rent',${`Extended stay · ${stayDate}`},${stayDate}::date,${nightlyRateCents},${!current.taxExempt},'posted')
                   returning id
                 `;
+                // Extended nights must reach the ledger like booked nights or
+                // Revenue would never include them.
+                if (nightlyRateCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: stayDate, resourceType: "charge", resourceId: charge.id, description: `Extended stay · ${stayDate}`, debitAccount: "Guest Receivable", creditAccount: "Room Revenue", amountCents: nightlyRateCents });
                 if (!current.taxExempt) {
                   const taxCents = calculateTaxCents(nightlyRateCents, current.taxRateBasisPoints / 10_000);
                   await tx`insert into charge_taxes (property_id,charge_id,name,rate_basis_points,amount_cents) values (${session.propertyId}::uuid,${charge.id}::uuid,'Room Tax',${current.taxRateBasisPoints},${taxCents})`;
+                  if (taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: stayDate, resourceType: "charge-tax", resourceId: charge.id, description: `Extended stay tax · ${stayDate}`, debitAccount: "Guest Receivable", creditAccount: "Tax Payable", amountCents: taxCents });
                 }
               }
               const next = new Date(`${stayDate}T12:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
@@ -848,18 +864,23 @@ async function updateProductionReservation(
             }
           }
         } else {
-          await tx`
-            delete from charge_taxes where charge_id in (
-              select id from charges where reservation_room_id in (
-                select id from reservation_rooms where reservation_id=${id}::uuid
-              ) and type='Room Rent' and service_date >= ${changes.departureDate}::date
-            )
+          // Shortened stay (early departure): void the unused nights and
+          // reverse their revenue/tax, as cancellation does, so Revenue and
+          // the ledger stay in step with the folio.
+          const unused = await tx<Array<{ id: string; serviceDate: string; amountCents: number; taxCents: number }>>`
+            select c.id,c.service_date::text as "serviceDate",c.amount_cents as "amountCents",
+              coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)::int as "taxCents"
+            from charges c
+            where c.reservation_room_id in (select id from reservation_rooms where reservation_id=${id}::uuid)
+              and c.type='Room Rent' and c.status='posted' and c.service_date >= ${changes.departureDate}::date
+            for update
           `;
-          await tx`
-            delete from charges where reservation_room_id in (
-              select id from reservation_rooms where reservation_id=${id}::uuid
-            ) and type='Room Rent' and service_date >= ${changes.departureDate}::date
-          `;
+          if (unused.length) await tx`update charges set status='voided',updated_at=now() where id in ${tx(unused.map((charge) => charge.id))}`;
+          const businessDate = await propertyBusinessDate(tx, session.propertyId);
+          for (const charge of unused) {
+            if (charge.amountCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate, resourceType: "stay-shortened", resourceId: id, description: `Early departure room-rent reversal · ${charge.serviceDate}`, debitAccount: "Room Revenue", creditAccount: "Guest Receivable", amountCents: charge.amountCents });
+            if (charge.taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate, resourceType: "stay-shortened-tax", resourceId: id, description: `Early departure room-tax reversal · ${charge.serviceDate}`, debitAccount: "Tax Payable", creditAccount: "Guest Receivable", amountCents: charge.taxCents });
+          }
           await tx`
             delete from nightly_rates where reservation_room_id in (
               select id from reservation_rooms where reservation_id=${id}::uuid
@@ -868,6 +889,21 @@ async function updateProductionReservation(
         }
       }
 
+      // OTA commission follows the room rent actually stayed: scale an unpaid
+      // commission (including a manual edit) with the change in rent.
+      if (changes.departureDate && changes.departureDate !== current.departureDate && rentBeforeCents > 0) {
+        const commission = await readReservationCommission(tx, session.propertyId, id);
+        if (commission.commissionCents > 0 && (commission.deducted || commission.paidCents === 0)) {
+          const rentAfterCents = await postedRentCents();
+          await setReservationCommission(tx, {
+            propertyId: session.propertyId,
+            reservationId: id,
+            targetCents: Math.round(commission.commissionCents * rentAfterCents / rentBeforeCents),
+            businessDate: await propertyBusinessDate(tx, session.propertyId),
+            reason: "Stay dates changed",
+          });
+        }
+      }
       const databaseStatus = changes.status ? productionReservationStatus(changes.status) : null;
       if (databaseStatus === "checked_in") {
         const requested = changes.reservationRooms?.filter((room) => room.status === "Checked In").map((room) => room.id);

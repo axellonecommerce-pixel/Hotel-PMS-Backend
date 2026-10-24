@@ -41,6 +41,20 @@ function mergeLiveRoomState(value: unknown, liveRooms: LiveRoomState[]) {
   };
 }
 
+/**
+ * The parts of Settings that are mirrored into relational tables. Room
+ * cleanliness/service status are excluded: they are operational state and
+ * the sync never overwrites them for existing rooms.
+ */
+function inventoryFingerprint(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  const settings = value as Record<string, unknown>;
+  const rooms = Array.isArray(settings.rooms)
+    ? (settings.rooms as Array<Record<string, unknown>>).map(({ housekeepingStatus: _h, serviceStatus: _s, ...room }) => room)
+    : [];
+  return JSON.stringify([settings.roomTypes, rooms, settings.employees, settings.promotions, settings.bookingChannels]);
+}
+
 async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: string, value: Record<string, unknown>) {
   const configuredTypes = Array.isArray(value.roomTypes) ? value.roomTypes as ConfiguredRoomType[] : [];
   const configuredRooms = Array.isArray(value.rooms) ? value.rooms as ConfiguredRoom[] : [];
@@ -82,11 +96,25 @@ async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: st
     `;
     typeIds.set(configured.id, roomType.id);
   }
-  for (const room of configuredRooms) {
-    if (!room.number?.trim() || !room.roomTypeId || !typeIds.has(room.roomTypeId)) continue;
+  // One statement for every room: per-row round trips made a Settings save
+  // take 10-20 seconds against a remote database.
+  const roomRows = configuredRooms
+    .filter((room) => room.number?.trim() && room.roomTypeId && typeIds.has(room.roomTypeId))
+    .map((room) => ({
+      room_type_id: typeIds.get(room.roomTypeId!)!,
+      number: room.number!.trim(),
+      floor: String(room.floor ?? 1),
+      section: room.buildingId || null,
+      cleanliness_status: room.housekeepingStatus || "clean",
+      service_status: room.serviceStatus === "non-rentable" ? "non-rentable" : "rentable",
+      smoking_allowed: Boolean(room.smokingAllowed),
+      map_data: { mapColumn: room.mapColumn, mapRow: room.mapRow, mapWidth: room.mapWidth, mapHeight: room.mapHeight },
+    }));
+  if (roomRows.length) {
     await tx`
       insert into rooms (property_id,room_type_id,number,floor,section,cleanliness_status,service_status,smoking_allowed,active,map_data)
-      values (${propertyId}::uuid,${typeIds.get(room.roomTypeId)!}::uuid,${room.number.trim()},${String(room.floor ?? 1)},${room.buildingId || null},${room.housekeepingStatus || "clean"},${room.serviceStatus === "non-rentable" ? "non-rentable" : "rentable"},${Boolean(room.smokingAllowed)},true,${tx.json({ mapColumn: room.mapColumn, mapRow: room.mapRow, mapWidth: room.mapWidth, mapHeight: room.mapHeight })})
+      select ${propertyId}::uuid,x.room_type_id,x.number,x.floor,x.section,x.cleanliness_status,x.service_status,x.smoking_allowed,true,x.map_data
+      from jsonb_to_recordset(${tx.json(roomRows)}) as x(room_type_id uuid,number text,floor text,section text,cleanliness_status text,service_status text,smoking_allowed boolean,map_data jsonb)
       on conflict (property_id,number) do update set room_type_id=excluded.room_type_id,floor=excluded.floor,section=excluded.section,smoking_allowed=excluded.smoking_allowed,map_data=excluded.map_data,updated_at=now()
     `;
   }
@@ -138,11 +166,22 @@ async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: st
   // Settings-created employees do not necessarily have login memberships, but
   // they are still operational staff and must exist as relational records for
   // housekeeping, maintenance, payroll, and time workflows.
-  for (const employee of configuredEmployees) {
-    if (!employee.name?.trim() || !employee.role?.trim()) continue;
-    const [existing] = await tx<Array<{ id: string }>>`select id from employees where property_id=${propertyId}::uuid and lower(name)=lower(${employee.name.trim()}) limit 1`;
-    if (existing) await tx`update employees set job_role=${employee.role.trim()},hourly_rate_cents=${Math.max(0, employee.hourlyRateCents ?? 0)},active=${employee.status !== "Inactive"},updated_at=now() where id=${existing.id}::uuid`;
-    else await tx`insert into employees (property_id,name,job_role,pay_method,hourly_rate_cents,active) values (${propertyId}::uuid,${employee.name.trim()},${employee.role.trim()},'hourly',${Math.max(0, employee.hourlyRateCents ?? 0)},${employee.status !== "Inactive"})`;
+  const employeeRows = configuredEmployees
+    .filter((employee) => employee.name?.trim() && employee.role?.trim())
+    .map((employee) => ({ name: employee.name!.trim(), role: employee.role!.trim(), rate: Math.max(0, employee.hourlyRateCents ?? 0), active: employee.status !== "Inactive" }));
+  if (employeeRows.length) {
+    await tx`
+      with input as (
+        select * from jsonb_to_recordset(${tx.json(employeeRows)}) as x(name text,role text,rate int,active boolean)
+      ), updated as (
+        update employees e set job_role=i.role,hourly_rate_cents=i.rate,active=i.active,updated_at=now()
+        from input i where e.property_id=${propertyId}::uuid and lower(e.name)=lower(i.name)
+        returning lower(e.name) as name
+      )
+      insert into employees (property_id,name,job_role,pay_method,hourly_rate_cents,active)
+      select ${propertyId}::uuid,i.name,i.role,'hourly',i.rate,i.active from input i
+      where lower(i.name) not in (select name from updated)
+    `;
   }
 }
 
@@ -242,7 +281,14 @@ export async function PUT(request: Request) {
     const now = new Date().toISOString();
     if (hasProductionDatabase()) {
       await productionSql().begin(async (tx) => {
-        await synchronizeConfiguredInventory(tx, session.propertyId, parsed.data);
+        const [stored] = await tx<Array<{ value: unknown }>>`
+          select value from property_settings where property_id=${session.propertyId}::uuid and key='application_settings' for update
+        `;
+        // Most saves (payment types, toggles, tax text) do not touch the
+        // inventory, so skip the relational sync when it is unchanged.
+        if (inventoryFingerprint(parseStoredSettings(stored?.value)) !== inventoryFingerprint(parsed.data)) {
+          await synchronizeConfiguredInventory(tx, session.propertyId, parsed.data);
+        }
         await tx`
           insert into property_settings (property_id,key,value,updated_at)
           values (${session.propertyId}::uuid,'application_settings',${tx.json(JSON.parse(JSON.stringify(parsed.data)))},${now})
