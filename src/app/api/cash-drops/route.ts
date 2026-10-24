@@ -6,7 +6,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 type CashRecord = {
   id: string;
   date: string;
-  shift: "Day Shift" | "Evening Shift" | "Night Shift";
+  shift: string;
   expectedCents: number;
   countedCents: number;
   differenceCents: number;
@@ -23,10 +23,7 @@ function toRecord(row: {
   const expectedCents = row.expectedCents ?? row.openingCents;
   const countedCents = row.countedCents ?? 0;
   const differenceCents = countedCents - expectedCents;
-  const encodedShift = row.status.split(":")[1];
-  const shift = encodedShift === "Day Shift" || encodedShift === "Evening Shift" || encodedShift === "Night Shift"
-    ? encodedShift
-    : "Night Shift";
+  const shift = row.status.split(":")[1] || "Shift";
   return {
     id: row.id,
     date: row.date,

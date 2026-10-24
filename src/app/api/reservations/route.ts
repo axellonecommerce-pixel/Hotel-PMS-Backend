@@ -16,6 +16,7 @@ import type { PropertySession } from "@/server/auth/authorization";
 import { allocateProductionDocumentNumber, postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
 import { addDays, rateCalendarDays, rateCalendarRestriction } from "@/server/rates/rate-calendar";
+import { roomInventory } from "@/server/rates/inventory";
 import { describeNoteChanges, logReservationActivity, money } from "@/server/activity/reservation-activity";
 
 /**
@@ -342,6 +343,13 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   const stayNights = Math.round((new Date(`${payload.checkoutDate}T12:00:00Z`).getTime() - new Date(`${payload.checkInDate}T12:00:00Z`).getTime()) / 86_400_000);
   const restriction = rateCalendarRestriction(await rateCalendarDays(tx, session.propertyId, payload.roomTypeId, payload.checkInDate, occupiedUntil), payload.checkInDate, stayNights);
   if (restriction) throw new ReservationRequestError(restriction, 409);
+  // Rooms-to-sell caps set on the Rate Calendar.
+  const inventory = (await roomInventory(tx, session.propertyId, payload.checkInDate, addDays(occupiedUntil, -1))).get(payload.roomTypeId);
+  for (const [date, day] of inventory ?? []) {
+    if (day.sellLimit !== null && day.sold + payload.roomCount > day.sellLimit) {
+      throw new ReservationRequestError(`Only ${Math.max(0, day.sellLimit - day.sold)} room(s) of this type can be sold on ${date}.`, 409);
+    }
+  }
   const selectedPromotions = await validatedPromotions(tx, session.propertyId, roomType.id, payload.checkInDate, payload.checkoutDate, payload.promotionIds);
   const roomsForType = await tx<Array<{ id: string; number: string }>>`
     select r.id, r.number from rooms r

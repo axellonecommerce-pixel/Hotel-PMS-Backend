@@ -201,26 +201,42 @@ export async function PATCH(request: Request) {
         }
       }
       if (input.idType !== undefined || input.driverLicenseNumber !== undefined) {
-        // Preserve the history/audit trail rather than hard-deleting identity
-        // records. Only one current identity is returned to the PMS client.
-        await tx`update guest_identities set deleted_at=now() where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid and deleted_at is null`;
-        if (input.idType && input.driverLicenseNumber) {
-          const normalized = normalizedId(input.driverLicenseNumber);
-          const [duplicate] = await tx<Array<{ guestId: string }>>`
-            select guest_id as "guestId" from guest_identities
-            where property_id=${session.propertyId}::uuid and id_type=${input.idType} and normalized_id_number=${normalized} and deleted_at is null
-            limit 1
-          `;
-          if (duplicate && duplicate.guestId !== input.guestId) throw new Error("A different guest already has this ID.");
-          await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after)
-            values (${session.propertyId}::uuid,${input.guestId}::uuid,${input.idType},${input.driverLicenseNumber},${normalized},now()+interval '1 year')`;
+        // Identity records are kept as history (soft-deleted), and the unique
+        // key covers deleted rows too. Leave an unchanged ID alone, and reuse
+        // a matching historical row instead of inserting a duplicate.
+        const normalized = input.idType && input.driverLicenseNumber ? normalizedId(input.driverLicenseNumber) : null;
+        const [current] = await tx<Array<{ id: string; idType: string; normalized: string }>>`
+          select id, id_type as "idType", normalized_id_number as normalized from guest_identities
+          where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid and deleted_at is null
+          order by captured_at desc limit 1
+        `;
+        const unchanged = current && normalized && current.idType === input.idType && current.normalized === normalized;
+        if (!unchanged) {
+          await tx`update guest_identities set deleted_at=now() where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid and deleted_at is null`;
+          if (input.idType && input.driverLicenseNumber && normalized) {
+            const [existing] = await tx<Array<{ id: string; guestId: string; deletedAt: string | null }>>`
+              select id, guest_id as "guestId", deleted_at::text as "deletedAt" from guest_identities
+              where property_id=${session.propertyId}::uuid and id_type=${input.idType} and normalized_id_number=${normalized}
+              limit 1 for update
+            `;
+            if (existing && !existing.deletedAt && existing.guestId !== input.guestId) throw new Error("A different guest already has this ID.");
+            if (existing) {
+              await tx`update guest_identities set guest_id=${input.guestId}::uuid, id_number=${input.driverLicenseNumber}, deleted_at=null, captured_at=now(), delete_after=now()+interval '1 year' where id=${existing.id}::uuid`;
+            } else {
+              await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after)
+                values (${session.propertyId}::uuid,${input.guestId}::uuid,${input.idType},${input.driverLicenseNumber},${normalized},now()+interval '1 year')`;
+            }
+          }
         }
       }
       return true;
     });
     if (!updated) return Response.json({ error: "Guest not found." }, { status: 404 });
     return Response.json({ updated: true });
-  } catch (error) { return propertyAccessResponse(error); }
+  } catch (error) {
+    if (error instanceof Error && error.message === "A different guest already has this ID.") return Response.json({ error: error.message }, { status: 409 });
+    return propertyAccessResponse(error);
+  }
 }
 
 export async function POST(request: Request) {

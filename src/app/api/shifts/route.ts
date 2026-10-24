@@ -9,10 +9,10 @@ import { propertyBusinessDate } from "@/server/finance/production-finance";
 // the drawer, takes payments during the shift, and closes it by counting the
 // drawer again. Cash activity is attributed to the shift by time, so two
 // shifts on one business day never double-count the same payment.
-const shiftNames = ["Day Shift", "Evening Shift", "Night Shift"] as const;
 const startSchema = z.object({
   action: z.literal("start"),
-  shiftName: z.enum(shiftNames),
+  // A shift is identified by its clerk and start time, not a named period.
+  shiftName: z.string().trim().min(1).max(40).default("Shift"),
   openingCents: z.number().int().nonnegative().max(10_000_000),
   note: z.string().trim().max(500).optional(),
 });

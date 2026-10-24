@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { roomInventory } from "@/server/rates/inventory";
 import { addDays, rateCalendarRestriction } from "@/server/rates/rate-calendar";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
@@ -123,6 +124,8 @@ export async function GET(request: Request) {
       from rate_calendar where property_id=${session.propertyId}::uuid and stay_date >= ${parsed.data.checkIn}::date and stay_date < ${occupiedUntil}::date
     `;
     const exemptionRate = /rate (exception|exemption)/i.test(selectedRateCode?.name ?? "");
+    // Rooms-to-sell caps from the Rate Calendar limit each night's count.
+    const inventory = await roomInventory(productionSql(), session.propertyId, parsed.data.checkIn, addDays(occupiedUntil, -1));
     return Response.json({
       checkIn: parsed.data.checkIn,
       checkout: parsed.data.checkout,
@@ -144,12 +147,13 @@ export async function GET(request: Request) {
           .map((room) => room.number);
         const unassignedHere = Math.min(availableRoomNumbers.length, unassignedLeft.get(roomType.name) ?? 0);
         unassignedLeft.set(roomType.name, (unassignedLeft.get(roomType.name) ?? 0) - unassignedHere);
+        const sellable = Math.min(...[...(inventory.get(roomType.id)?.values() ?? [])].map((day) => day.available), Number.POSITIVE_INFINITY);
         return {
           roomTypeId: roomType.id,
           name: roomType.name,
           shortLabel: roomType.shortLabel || roomType.name.slice(0, 4).toUpperCase(),
           availableRoomNumbers,
-          roomCount: availableRoomNumbers.length - unassignedHere,
+          roomCount: Math.max(0, Math.min(availableRoomNumbers.length - unassignedHere, sellable)),
           nightlyRateCents: rateCents,
           nightlyRatesCents,
           restriction,
