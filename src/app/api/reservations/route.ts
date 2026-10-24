@@ -290,7 +290,7 @@ async function createProductionReservation(request: Request, session: PropertySe
   }
 }
 
-async function createProductionReservationTransaction(tx: TransactionSql, session: PropertySession, payload: ReservationPayload) {
+export async function createProductionReservationTransaction(tx: TransactionSql, session: PropertySession, payload: ReservationPayload) {
   const roomType = await productionRoomTypeForSettingsId(tx, session.propertyId, payload.roomTypeId);
   if (!roomType?.active) throw new ReservationRequestError("Select an active room type.", 409);
   await validateProductionRateCode(tx, session.propertyId, payload.rateCode);
@@ -415,7 +415,11 @@ async function createProductionReservationTransaction(tx: TransactionSql, sessio
       // folio charge. Keeping both entries in this transaction means a
       // created reservation is immediately represented in Revenue and can
       // never leave an unbalanced partial ledger behind.
-      await postProductionLedger(tx, {
+      // A zero-dollar rate is a valid configured rate (for example, a
+      // complimentary or rate-exempt stay).  Keep the charge as an auditable
+      // stay record, but do not attempt a zero-value double-entry posting:
+      // accounting correctly rejects those entries.
+      if (rate > 0) await postProductionLedger(tx, {
         propertyId: session.propertyId,
         businessDate: stayDate,
         resourceType: "charge",
