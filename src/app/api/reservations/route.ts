@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { TransactionSql } from "postgres";
 
 import { db } from "@/server/db/client";
-import { calculateCommissionCents, calculateOtaBreakdown, otaCommissionRules } from "@/domain/rules/commission";
+import { calculateCommissionCents, calculateOtaBreakdown, otaCommissionApplies, otaCommissionRules } from "@/domain/rules/commission";
 import { applyStackedPromotions, type Promotion } from "@/domain/rules/reservation-lifecycle";
 import { canUseRateCode } from "@/domain/rules/rate-code";
 import { calculateTaxCents } from "@/domain/rules/tax";
@@ -199,6 +199,8 @@ const payloadSchema = z.object({
   taxExemptionReason: z.string().trim().optional(),
   taxExemptionCertificate: z.string().trim().optional(),
   otaPaymentStatus: z.enum(["Guest Pays Hotel", "Paid Online", "Virtual Card Pending"]).optional(),
+  // The exact commission from the OTA extranet, replacing the percentage.
+  commissionCents: z.number().int().nonnegative().optional(),
   source: z.string().trim().min(1),
 });
 
@@ -530,7 +532,10 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
     from property_settings where property_id=${session.propertyId}::uuid and key='application_settings'
   `;
   const ota = calculateOtaBreakdown({ roomRentCents, taxCents, commissionPercent: bookingSource.commissionBasisPoints / 100, paymentStatus: otaPaymentStatus, rules: otaCommissionRules(ruleSettings?.rules) });
-  const commissionCents = ota.commissionCents;
+  const commissionApplies = otaCommissionApplies(otaPaymentStatus, otaCommissionRules(ruleSettings?.rules));
+  const commissionCents = payload.commissionCents !== undefined && commissionApplies && bookingSource.commissionBasisPoints > 0
+    ? Math.min(ota.grossCents, payload.commissionCents)
+    : ota.commissionCents;
   // Commission is an expense (FR-REV-001). When the OTA collected the stay it
   // keeps the commission, so the helper settles it on the folio and the guest
   // balance becomes the net the OTA remits.
@@ -545,9 +550,9 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   const [roomTypeName] = await tx<Array<{ name: string }>>`select name from room_types where id=${roomType.id}::uuid`;
   const roomLabel = selectedRooms.length ? `Room ${selectedRooms.map((room) => room!.number).join(", ")}` : "room unassigned";
   await logReservationActivity(tx, session, reservation.id, "Reservation", `Reservation created · ${confirmationNumber} · ${payload.firstName} ${payload.lastName} · ${payload.checkInDate} → ${payload.checkoutDate}${dayUse ? " (day use)" : ""} · ${payload.roomCount} × ${roomTypeName?.name ?? "room"}, ${roomLabel} · ${payload.rateCode} · ${bookingSource.name} · total ${money(totalCents)}${payload.companyId ? " · direct bill" : ""}${payload.taxExempt ? " · tax exempt" : ""}`);
-  if (commissionCents > 0) await logReservationActivity(tx, session, reservation.id, "Commission", `OTA commission ${money(commissionCents)} (${bookingSource.commissionBasisPoints / 100}%) · ${otaPaymentStatus ?? "payable by hotel"}`);
+  if (commissionCents > 0) await logReservationActivity(tx, session, reservation.id, "Commission", `OTA commission ${money(commissionCents)} (${commissionCents === ota.commissionCents ? `${bookingSource.commissionBasisPoints / 100}%` : "entered from OTA"}) · ${otaPaymentStatus ?? "payable by hotel"}`);
   if (identity?.guestStatus === "do_not_rent" && payload.dnrOverrideReason) await logReservationActivity(tx, session, reservation.id, "Guest", `Do Not Rent override approved: ${payload.dnrOverrideReason}`);
-  return { guestId, reservationId: reservation.id, groupReservation: payload.roomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents, otaNetCents: ota.netCents, otaPaymentStatus, totalCents, balanceCents: ota.commissionDeducted && commissionCents > 0 ? ota.netCents : totalCents, version: 1 };
+  return { guestId, reservationId: reservation.id, groupReservation: payload.roomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents, otaNetCents: ota.grossCents - commissionCents, otaPaymentStatus, totalCents, balanceCents: ota.commissionDeducted && commissionCents > 0 ? totalCents - commissionCents : totalCents, version: 1 };
 }
 
 export async function POST(request: Request) {
