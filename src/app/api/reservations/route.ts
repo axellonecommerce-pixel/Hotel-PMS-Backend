@@ -15,6 +15,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import type { PropertySession } from "@/server/auth/authorization";
 import { allocateProductionDocumentNumber, postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
+import { depositView, type DepositRecord, type DepositTransactionRecord } from "@/server/deposits/deposit-view";
 import { addDays, rateCalendarDays, rateCalendarRestriction } from "@/server/rates/rate-calendar";
 import { roomInventory } from "@/server/rates/inventory";
 import { describeNoteChanges, logReservationActivity, money } from "@/server/activity/reservation-activity";
@@ -32,6 +33,7 @@ export async function GET(request: Request) {
         id: string; version: number; confirmationNumber: string; guestId: string; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null; companyName: string | null;
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null; otaPaymentStatus: string | null;
         taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; checkedOutDate: string | null; bookedDate: string; rawNotes: string | null; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number; collectedCents: number;
+        deposit: (DepositRecord & { transactions: DepositTransactionRecord[] }) | null;
         reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; roomTypeName: string | null; status: string }>;
         extraGuests: Array<{ id: string; name: string; driverLicenseNumber: string | null }>;
       }>>`
@@ -48,6 +50,11 @@ export async function GET(request: Request) {
           coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rrx on rrx.id=nr.reservation_room_id where rrx.reservation_id=r.id),0)::int as "roomRentCents",
           coalesce((select sum(le.debit_cents-le.credit_cents) from ledger_entries le where le.property_id=r.property_id and le.resource_type='ota-commission' and le.resource_id=r.id and le.account='OTA Commission Expense'),0)::int as "commissionCents",
           coalesce((select sum(le.debit_cents) from ledger_entries le where le.property_id=r.property_id and le.resource_type='ota-commission-paid' and le.resource_id=r.id and le.account='Commission Payable'),0)::int as "commissionPaidCents",
+          -- Latest security deposit and its charges / releases.
+          (select json_build_object('id',d.id,'amountCents',d.amount_cents,'method',d.method,'status',d.status,'createdAt',d.created_at::text,
+              'transactions',coalesce((select json_agg(json_build_object('id',dt.id,'type',dt.type,'amountCents',dt.amount_cents,'reason',dt.reason,'note',dt.note,'createdAt',dt.created_at::text) order by dt.created_at) from deposit_transactions dt where dt.deposit_id=d.id),'[]'::json))
+            from security_deposits d join reservation_rooms rrd on rrd.id=d.reservation_room_id
+            where rrd.reservation_id=r.id order by d.created_at desc limit 1) as deposit,
           -- Money actually collected for the stay (not the OTA's own commission settlement).
           coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id join payments pay on pay.id=pa.payment_id
             where f.reservation_id=r.id and upper(pay.method)<>'OTA COMMISSION'),0)::int as "collectedCents",
@@ -102,7 +109,7 @@ export async function GET(request: Request) {
         }
         return {
           bookingRemarkEntries: remarks.booking ?? [], stayRemarkEntries: remarks.stay ?? [],
-          housekeepingRemarkEntries: remarks.housekeeping ?? [], otherRemarkEntries: remarks.other ?? [], id: record.id, version: record.version, confirmationNumber: record.confirmationNumber, guestId: record.guestId, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkedOutDate: record.checkedOutDate ?? undefined, bookedDate: record.bookedDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", companyId: record.companyId ?? undefined, company: record.companyName ?? undefined, roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, collectedCents: record.collectedCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+          housekeepingRemarkEntries: remarks.housekeeping ?? [], otherRemarkEntries: remarks.other ?? [], id: record.id, version: record.version, confirmationNumber: record.confirmationNumber, guestId: record.guestId, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkedOutDate: record.checkedOutDate ?? undefined, bookedDate: record.bookedDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", companyId: record.companyId ?? undefined, company: record.companyName ?? undefined, roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, collectedCents: record.collectedCents, ...depositView(record.deposit, record.deposit?.transactions ?? []), taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
     }
     const records = await db.query.reservations.findMany({

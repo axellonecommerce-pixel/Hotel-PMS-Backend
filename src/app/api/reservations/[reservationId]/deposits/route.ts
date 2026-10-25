@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { depositView, type DepositRecord, type DepositTransactionRecord, type DepositView } from "@/server/deposits/deposit-view";
+
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
@@ -25,62 +27,33 @@ const settleSchema = z.object({
 });
 const requestSchema = z.discriminatedUnion("action", [collectSchema, settleSchema]);
 
-type DepositView = {
-  securityDepositCents?: number;
-  securityDepositStatus?: "Held" | "Settled";
-  securityDepositMethod?: string;
-  securityDepositCollectedAt?: string;
-  securityDepositDeductions?: Array<{ id: string; reason: "Damage" | "Late Checkout" | "Smoking" | "Missing Item" | "Other"; note?: string; amountCents: number }>;
-  securityDepositReleasedCents?: number;
-  securityDepositSettledAt?: string;
-};
 
 function routeParams(context: { params: Promise<{ reservationId: string }> }) {
   return context.params.then(({ reservationId }) => reservationId);
 }
 
-async function depositView(propertyId: string, reservationId: string): Promise<DepositView> {
-  const [deposit] = await productionSql()<Array<{ id: string; amountCents: number; method: string; status: string; createdAt: string; settledAt: string | null }>>`
-    select d.id,d.amount_cents as "amountCents",d.method,d.status,d.created_at::text as "createdAt",
-      max(case when dt.type='release' then dt.created_at end)::text as "settledAt"
+async function loadDepositView(propertyId: string, reservationId: string): Promise<DepositView> {
+  const [deposit] = await productionSql()<DepositRecord[]>`
+    select d.id,d.amount_cents as "amountCents",d.method,d.status,d.created_at::text as "createdAt"
     from security_deposits d
     join reservation_rooms rr on rr.id=d.reservation_room_id
-    left join deposit_transactions dt on dt.deposit_id=d.id
     where d.property_id=${propertyId}::uuid and rr.reservation_id=${reservationId}::uuid
-    group by d.id
     order by d.created_at desc
     limit 1
   `;
   if (!deposit) return {};
-  const transactions = await productionSql()<Array<{ id: string; type: string; amountCents: number; reason: string | null; note: string | null }>>`
-    select id,type,amount_cents as "amountCents",reason,note
+  const transactions = await productionSql()<DepositTransactionRecord[]>`
+    select id,type,amount_cents as "amountCents",reason,note,created_at::text as "createdAt"
     from deposit_transactions where deposit_id=${deposit.id}::uuid and property_id=${propertyId}::uuid
     order by created_at
   `;
-  const deductions: NonNullable<DepositView["securityDepositDeductions"]> = transactions
-    .filter((transaction) => transaction.type === "charge")
-    .map((transaction) => ({
-      id: transaction.id,
-      reason: (transaction.reason === "Damage" || transaction.reason === "Late Checkout" || transaction.reason === "Smoking" || transaction.reason === "Missing Item" || transaction.reason === "Other") ? transaction.reason as "Damage" | "Late Checkout" | "Smoking" | "Missing Item" | "Other" : "Other",
-      note: transaction.note ?? undefined,
-      amountCents: transaction.amountCents,
-    }));
-  const releasedCents = transactions.filter((transaction) => transaction.type === "release").reduce((sum, transaction) => sum + transaction.amountCents, 0);
-  return {
-    securityDepositCents: deposit.amountCents,
-    securityDepositStatus: deposit.status === "held" ? "Held" : "Settled",
-    securityDepositMethod: deposit.method,
-    securityDepositCollectedAt: deposit.createdAt,
-    securityDepositDeductions: deductions.length ? deductions : undefined,
-    securityDepositReleasedCents: releasedCents || undefined,
-    securityDepositSettledAt: deposit.status === "held" ? undefined : deposit.settledAt ?? undefined,
-  };
+  return depositView(deposit, transactions);
 }
 
 export async function GET(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
-    return Response.json({ deposit: await depositView(session.propertyId, await routeParams(context)) });
+    return Response.json({ deposit: await loadDepositView(session.propertyId, await routeParams(context)) });
   } catch (error) {
     return propertyAccessResponse(error);
   }
@@ -153,7 +126,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       return { ok: true } as const;
     });
     if ("error" in result) return Response.json({ error: result.error }, { status: 409 });
-    return Response.json({ deposit: await depositView(session.propertyId, reservationId) });
+    return Response.json({ deposit: await loadDepositView(session.propertyId, reservationId) });
   } catch (error) {
     if (error instanceof ShiftRequiredError) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
