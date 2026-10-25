@@ -87,6 +87,13 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
       const roomRentCents = nextAmounts.reduce((sum, amount) => sum + amount, 0);
       const rentBefore = charges.reduce((sum, charge) => sum + charge.amountCents, 0);
       if (roomRentCents !== rentBefore) await logReservationActivity(tx, session, reservationId, "Rate", `Room rent changed ${money(rentBefore)} → ${money(roomRentCents)}`);
+      // A guest with a saved nightly rate (tax included) keeps the rate they
+      // now pay, so the profile matches the folio for the next booking.
+      if (roomRentCents !== rentBefore || input.taxCents !== undefined) await tx`
+        update guests set room_preferences=jsonb_set(room_preferences::jsonb,'{fixedRateCents}',to_jsonb(${nextAmounts[0] + nextTaxes[0]}::int)),updated_at=now()
+        where property_id=${session.propertyId}::uuid and id=(select main_guest_id from reservations where id=${reservation.id}::uuid)
+          and jsonb_typeof(room_preferences::jsonb)='object' and room_preferences::jsonb ? 'fixedRateCents'
+      `;
       const taxCents = nextTaxes.reduce((sum, amount) => sum + amount, 0);
       const [balance] = await tx<Array<{ balanceCents: number }>>`
         select (
