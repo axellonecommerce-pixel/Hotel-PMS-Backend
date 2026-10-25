@@ -818,6 +818,9 @@ const updateSchema = z.object({
   arrivalDate: z.string().optional(),
   departureDate: z.string().optional(),
   extensionNightlyRateCents: z.number().int().nonnegative().optional(),
+  // Who booked the added nights of an extension (a booking source name):
+  // the same OTA, another OTA, or Walk-In / direct (no commission).
+  extensionSource: z.string().trim().min(1).max(120).optional(),
   // Occupancy and pets are stay details kept in the reservation notes.
   details: z.object({
     adults: z.number().int().min(1).max(20).optional(),
@@ -844,8 +847,8 @@ async function updateProductionReservation(
 ) {
   try {
     const outcome = await productionSql().begin(async (tx) => {
-      const [current] = await tx<Array<{ id: string; version: number; status: string; arrivalDate: string; departureDate: string; taxExempt: boolean; taxRateBasisPoints: number; notes: string | null }>>`
-        select id,version,status,arrival_date::text as "arrivalDate",departure_date::text as "departureDate",tax_exempt as "taxExempt",tax_rate_basis_points as "taxRateBasisPoints",notes
+      const [current] = await tx<Array<{ id: string; version: number; status: string; arrivalDate: string; departureDate: string; taxExempt: boolean; taxRateBasisPoints: number; notes: string | null; bookingSourceId: string | null }>>`
+        select id,version,status,arrival_date::text as "arrivalDate",departure_date::text as "departureDate",tax_exempt as "taxExempt",tax_rate_basis_points as "taxRateBasisPoints",notes,booking_source_id as "bookingSourceId"
         from reservations where id=${id}::uuid and property_id=${session.propertyId}::uuid for update
       `;
       if (!current) return { kind: "not-found" as const };
@@ -989,16 +992,30 @@ async function updateProductionReservation(
 
       // OTA commission follows the room rent actually stayed: scale an unpaid
       // commission (including a manual edit) with the change in rent.
+      // An extension booked through another source charges that source's
+      // commission on the added nights only (Walk-In / direct: none).
+      let extensionSourceNote = "";
       if (changes.departureDate && changes.departureDate !== current.departureDate && rentBeforeCents > 0) {
         const commission = await readReservationCommission(tx, session.propertyId, id);
-        if (commission.commissionCents > 0 && (commission.deducted || commission.paidCents === 0)) {
+        const [extensionSource] = changes.extensionSource && changes.departureDate > current.departureDate
+          ? await tx<Array<{ id: string; name: string; commissionBasisPoints: number }>>`
+              select id,name,commission_basis_points as "commissionBasisPoints" from booking_sources
+              where property_id=${session.propertyId}::uuid and lower(name)=lower(${changes.extensionSource}) limit 1
+            `
+          : [];
+        const otherSource = extensionSource && extensionSource.id !== current.bookingSourceId ? extensionSource : null;
+        if (extensionSource) extensionSourceNote = ` · added nights booked via ${extensionSource.name}`;
+        if (commission.deducted || commission.paidCents === 0) {
           const rentAfterCents = await postedRentCents();
-          await setReservationCommission(tx, {
+          const targetCents = otherSource
+            ? commission.commissionCents + Math.round(Math.max(0, rentAfterCents - rentBeforeCents) * otherSource.commissionBasisPoints / 10_000)
+            : Math.round(commission.commissionCents * rentAfterCents / rentBeforeCents);
+          if (targetCents !== commission.commissionCents) await setReservationCommission(tx, {
             propertyId: session.propertyId,
             reservationId: id,
-            targetCents: Math.round(commission.commissionCents * rentAfterCents / rentBeforeCents),
+            targetCents,
             businessDate: await propertyBusinessDate(tx, session.propertyId),
-            reason: "Stay dates changed",
+            reason: otherSource ? `Extension via ${otherSource.name}` : "Stay dates changed",
           });
         }
       }
@@ -1051,7 +1068,7 @@ async function updateProductionReservation(
           nextArrival !== current.arrivalDate ? `arrival ${current.arrivalDate} → ${nextArrival}` : "",
           nextDeparture !== current.departureDate ? `departure ${current.departureDate} → ${nextDeparture}` : "",
         ].filter(Boolean).join(", ");
-        const extended = nextDeparture > current.departureDate && changes.extensionNightlyRateCents !== undefined ? ` · added nights at ${money(changes.extensionNightlyRateCents)}` : "";
+        const extended = (nextDeparture > current.departureDate && changes.extensionNightlyRateCents !== undefined ? ` · added nights at ${money(changes.extensionNightlyRateCents)}` : "") + extensionSourceNote;
         await logReservationActivity(tx, session, id, "Stay", `${nextDeparture > current.departureDate ? "Stay extended" : nextDeparture < current.departureDate ? "Stay shortened" : "Stay dates changed"}: ${parts}${extended}`);
       }
       await tx`
