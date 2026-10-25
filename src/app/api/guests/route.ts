@@ -8,6 +8,7 @@ type Address = { addressLine1?: string; postalCode?: string; city?: string; stat
 // remain durable without requiring an unsafe production schema migration.
 type Preferences = { fixedRateCents?: number; dateOfBirth?: string; idExpires?: string; secondaryPhone?: string; secondaryEmail?: string; roomPreferences?: Record<string, unknown> };
 
+const blankAsNull = <T extends z.ZodTypeAny>(schema: T) => z.preprocess((value) => (value === "" ? null : value), schema);
 const guestStatusSchema = z.enum(["Regular", "Returning", "New", "Do Not Rent"]);
 const paymentSourceSchema = z.object({
   id: z.string().optional(),
@@ -31,8 +32,9 @@ const updateSchema = z.object({
   country: z.string().max(120).optional(),
   countryCode: z.string().max(20).optional(),
   fixedRateCents: z.number().int().min(0).nullable().optional(),
-  dateOfBirth: z.string().date().nullable().optional(),
-  idExpires: z.string().date().nullable().optional(),
+  // A cleared date field arrives as "" and means no date.
+  dateOfBirth: blankAsNull(z.string().date().nullable().optional()),
+  idExpires: blankAsNull(z.string().date().nullable().optional()),
   notes: z.string().max(20_000).nullable().optional(),
   status: guestStatusSchema.optional(),
   roomPreferences: z.record(z.string(), z.unknown()).optional(),
@@ -64,8 +66,8 @@ const manualGuestSchema = z.object({
   email: z.string().email().or(z.literal("")).optional(),
   idType: z.enum(["US Driver License", "Passport", "Other"]).optional(),
   idNumber: z.string().trim().max(200).optional(),
-  dateOfBirth: z.string().date().optional(),
-  idExpires: z.string().date().optional(),
+  dateOfBirth: z.preprocess((value) => (value === "" ? undefined : value), z.string().date().optional()),
+  idExpires: z.preprocess((value) => (value === "" ? undefined : value), z.string().date().optional()),
   addressLine1: z.string().max(400).optional(),
   city: z.string().max(120).optional(),
   state: z.string().max(120).optional(),
