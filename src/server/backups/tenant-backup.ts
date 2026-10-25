@@ -3,12 +3,13 @@ import type { Sql, TransactionSql } from "postgres";
 import { downloadPrivateBytes, uploadPrivateBytes } from "@/server/storage/private-files";
 
 const tableOrder = [
-  "property_settings","employees","room_types","rooms","guests","guest_remarks","guest_identities","guest_payment_sources","guest_vehicles",
+  "property_settings","employees","property_tasks","room_types","rooms","rate_calendar","maintenance_schedules","guests","guest_remarks","guest_identities","guest_payment_sources","guest_vehicles",
   "companies","company_contacts","company_room_rates","booking_sources","promotions","promotion_room_types","tax_definitions","charge_types",
   "registration_rule_versions","reservations","reservation_rooms","reservation_guests","dnr_overrides","registration_acceptances","nightly_rates",
-  "reservation_promotions","room_moves","document_sequences","folios","charges","charge_taxes","payments","payment_allocations","refunds",
+  "reservation_promotions","room_moves","reservation_activity","lost_found_items","document_sequences","folios","charges","charge_taxes",
+  "house_accounts","house_account_charges","payments","payment_allocations","refunds","folio_transfers",
   "security_deposits","deposit_transactions","invoices","invoice_lines","invoice_payment_allocations","company_credits","business_days","cash_shifts",
-  "cash_drops","cash_shift_transactions","housekeeping_records","maintenance_orders","time_entries","pay_periods","payroll_entries","vendors","expenses",
+  "cash_drops","cash_shift_transactions","paid_outs","housekeeping_records","maintenance_orders","time_entries","pay_periods","payroll_entries","vendors","expenses",
   "recurring_expenses","night_audit_runs","report_definitions","guest_import_jobs","backup_jobs","retention_tombstones","notifications","attachments",
   "change_events","ledger_entries",
 ] as const;
@@ -18,7 +19,8 @@ const tableOrder = [
 const settingsTables = new Set<string>([
   "property_settings", "employees", "room_types", "rooms", "booking_sources",
   "promotions", "promotion_room_types", "tax_definitions", "charge_types",
-  "registration_rule_versions", "document_sequences",
+  "registration_rule_versions", "document_sequences", "rate_calendar", "maintenance_schedules",
+  "companies", "company_contacts", "company_room_rates",
 ]);
 
 export type TenantBackup = {
