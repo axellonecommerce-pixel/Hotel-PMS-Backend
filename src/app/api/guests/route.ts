@@ -16,7 +16,14 @@ const paymentSourceSchema = z.object({
   last4: z.string().regex(/^\d{4}$/).optional(),
   tokenReference: z.string().trim().max(200).optional(),
 });
-const vehicleSchema = z.object({ plate: z.string().trim().min(1), make: z.string().optional(), color: z.string().optional(), year: z.string().optional() });
+// Any one detail is enough (a plate may be unknown at first); all blank removes the vehicle.
+const vehicleSchema = z.object({
+  plate: z.string().trim().max(40).default(""),
+  make: z.string().trim().max(80).optional(),
+  color: z.string().trim().max(40).optional(),
+  year: z.union([z.string(), z.number()]).transform((value) => String(value).trim()).optional(),
+  state: z.string().trim().max(40).optional(),
+});
 const updateSchema = z.object({
   guestId: z.string().uuid(),
   firstName: z.string().trim().min(1).max(120).optional(),
@@ -153,7 +160,10 @@ export async function PATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "guests.manage");
     const parsed = updateSchema.safeParse(await request.json());
-    if (!parsed.success) return Response.json({ error: "Guest update is invalid." }, { status: 400 });
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      return Response.json({ error: `Guest update is invalid${issue ? ` (${issue.path.join(".")}: ${issue.message})` : ""}.` }, { status: 400 });
+    }
     if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
     const input = parsed.data;
     const updated = await productionSql().begin(async (tx) => {
@@ -179,7 +189,8 @@ export async function PATCH(request: Request) {
       await tx`update guests set first_name=coalesce(${input.firstName ?? null},first_name),last_name=coalesce(${input.lastName ?? null},last_name),phone=case when ${input.phone !== undefined} then ${input.phone?.replace(/\D/g, "") || null} else phone end,email=case when ${input.email !== undefined} then ${input.email || null} else email end,address=${tx.json(address as never)},remarks=case when ${input.notes !== undefined} then ${notes} else remarks end,guest_status=coalesce(${input.status ? storedStatus(input.status) : null},guest_status),dnr_reason=case when ${input.dnrRemarks !== undefined} then ${dnrRemarks} when ${input.dnrCode !== undefined} then ${dnrCode} else dnr_reason end,room_preferences=${tx.json(preferences as never)},updated_at=now() where id=${input.guestId}::uuid and property_id=${session.propertyId}::uuid`;
       if (input.vehicle !== undefined) {
         await tx`delete from guest_vehicles where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid`;
-        if (input.vehicle) await tx`insert into guest_vehicles (property_id,guest_id,plate,make,color,year) values (${session.propertyId}::uuid,${input.guestId}::uuid,${input.vehicle.plate},${input.vehicle.make || null},${input.vehicle.color || null},${input.vehicle.year || null})`;
+        const hasVehicle = input.vehicle && [input.vehicle.plate, input.vehicle.make, input.vehicle.color, input.vehicle.year].some((value) => value?.trim());
+        if (input.vehicle && hasVehicle) await tx`insert into guest_vehicles (property_id,guest_id,plate,make,color,year) values (${session.propertyId}::uuid,${input.guestId}::uuid,${input.vehicle.plate},${input.vehicle.make || null},${input.vehicle.color || null},${input.vehicle.year || null})`;
       }
       if (input.savedPaymentSources !== undefined) {
         await tx`delete from guest_payment_sources where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid`;

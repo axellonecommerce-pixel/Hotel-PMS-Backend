@@ -80,3 +80,16 @@ export async function POST(request: Request) {
     return Response.json({ entry });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Delete a time entry entered by mistake. */
+export async function DELETE(request: Request) {
+  try {
+    const session = await requirePropertySession(request, "payroll.manage");
+    const parsed = z.object({ id: z.string().uuid() }).safeParse(await request.json());
+    if (!parsed.success) return Response.json({ error: "Choose a time entry to delete." }, { status: 400 });
+    if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
+    const deleted = await productionSql()`delete from time_entries where id=${parsed.data.id}::uuid and property_id=${session.propertyId}::uuid returning id`;
+    if (!deleted.length) return Response.json({ error: "Time entry not found." }, { status: 404 });
+    return Response.json({ deleted: true });
+  } catch (error) { return propertyAccessResponse(error); }
+}

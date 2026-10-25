@@ -114,6 +114,11 @@ async function releaseUnarrivedReservations(tx: Tx, propertyId: string, business
   return reservations.length;
 }
 
+/** One line of what a night audit did, shown on the Night Audit page. */
+export type NightAuditStep = { step: string; detail: string; status: "done" | "blocked" | "info" };
+
+const usd = (cents: number) => `$${(cents / 100).toFixed(2)}`;
+
 export async function runNightAudit(tx: Tx, input: { propertyId: string; trigger: "manual" | "scheduled"; employeeId?: string | null }) {
   await tx`select pg_advisory_xact_lock(hashtext(${`night-audit:${input.propertyId}`}))`;
   const [day] = await tx<Array<{ id: string; businessDate: string }>>`
@@ -158,23 +163,78 @@ export async function runNightAudit(tx: Tx, input: { propertyId: string; trigger
     values (${input.propertyId}::uuid,${day.id}::uuid,${input.trigger},${blockers.length ? "failed" : "completed"},${tx.json(blockers)},${input.employeeId ?? null}::uuid)
     returning id
   `;
+  const steps: NightAuditStep[] = [{
+    step: "Checked blockers",
+    detail: blockers.length ? `Blocked: ${blockers.join(", ")}` : "No unpaid departures, unresolved deposits, or critical maintenance.",
+    status: blockers.length ? "blocked" : "done",
+  }];
   if (blockers.length) {
-    await tx`update night_audit_runs set completed_at=now() where id=${run.id}::uuid`;
+    await tx`update night_audit_runs set completed_at=now(),summary=${tx.json(steps)} where id=${run.id}::uuid`;
     await tx`insert into notifications (property_id,recipient_role,type,title,message,resource_type,resource_id)
       values (${input.propertyId}::uuid,'manager','NIGHT_AUDIT_FAILED','Night Audit needs attention',${`Resolve: ${blockers.join(", ")}`},'night_audit_run',${run.id}::uuid)`;
-    return { runId: run.id, status: "failed" as const, businessDate: day.businessDate, blockers };
+    return { runId: run.id, status: "failed" as const, businessDate: day.businessDate, blockers, steps };
   }
   // Reservations that were due to arrive today but never checked in are
   // closed as no-shows before the business day advances. Their rent and tax
   // must be reversed at the same time so they do not remain in Revenue or a
   // guest folio after disappearing from Arrivals.
-  await releaseUnarrivedReservations(tx, input.propertyId, day.businessDate);
+  const noShows = await releaseUnarrivedReservations(tx, input.propertyId, day.businessDate);
+  steps.push({ step: "Processed no-shows", detail: noShows ? `${noShows} unarrived reservation${noShows === 1 ? "" : "s"} marked No Show; their room nights were reversed.` : "Every arrival was checked in or cancelled.", status: noShows ? "done" : "info" });
+  // The day's room charges and other posted charges are closed with the day.
+  const [revenue] = await tx<Array<{ nights: number; rentCents: number; taxCents: number; extraCount: number; extraCents: number; paymentCents: number }>>`
+    select
+      count(*) filter (where c.type='Room Rent')::int as nights,
+      coalesce(sum(c.amount_cents) filter (where c.type='Room Rent'),0)::int as "rentCents",
+      coalesce(sum((select coalesce(sum(ct.amount_cents),0) from charge_taxes ct where ct.charge_id=c.id)) filter (where c.type='Room Rent'),0)::int as "taxCents",
+      count(*) filter (where c.type<>'Room Rent')::int as "extraCount",
+      coalesce(sum(c.amount_cents) filter (where c.type<>'Room Rent'),0)::int as "extraCents",
+      coalesce((select sum(p.amount_cents) from payments p where p.property_id=${input.propertyId}::uuid and p.effective_date=${day.businessDate}::date and upper(p.method) not in ('OTA COMMISSION','DIRECT BILL')),0)::int as "paymentCents"
+    from charges c
+    where c.property_id=${input.propertyId}::uuid and c.service_date=${day.businessDate}::date and c.status='posted'
+  `;
+  steps.push({ step: "Posted room charges", detail: `${revenue.nights} room night${revenue.nights === 1 ? "" : "s"} for ${day.businessDate}: room rent ${usd(revenue.rentCents)} + tax ${usd(revenue.taxCents)}.`, status: "done" });
+  steps.push({ step: "Posted extra charges", detail: revenue.extraCount ? `${revenue.extraCount} extra charge${revenue.extraCount === 1 ? "" : "s"} totaling ${usd(revenue.extraCents)}.` : "No extra charges today.", status: revenue.extraCount ? "done" : "info" });
+  steps.push({ step: "Payments for the day", detail: `${usd(revenue.paymentCents)} collected on ${day.businessDate}.`, status: "info" });
+  // Every occupied room (stay-over or due out) needs service tomorrow.
+  const dirtied = await tx<Array<{ number: string }>>`
+    update rooms r set cleanliness_status='dirty',updated_at=now()
+    where r.property_id=${input.propertyId}::uuid and r.cleanliness_status<>'dirty'
+      and exists (select 1 from reservation_rooms rr join reservations rs on rs.id=rr.reservation_id
+        where rr.room_id=r.id and rr.status='checked_in' and rs.status='checked_in')
+    returning r.number
+  `;
+  const occupiedRooms = dirtied.map((room) => room.number).sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+  steps.push({ step: "Marked occupied rooms dirty", detail: occupiedRooms.length ? `Rooms ${occupiedRooms.join(", ")} need service.` : "All occupied rooms were already marked for service.", status: "done" });
+  const [due] = await tx<Array<{ departures: number; arrivals: number }>>`
+    select
+      count(*) filter (where status='checked_in' and departure_date=(${day.businessDate}::date+1))::int as departures,
+      count(*) filter (where status='reserved' and arrival_date=(${day.businessDate}::date+1))::int as arrivals
+    from reservations where property_id=${input.propertyId}::uuid
+  `;
+  steps.push({ step: "Prepared the next day", detail: `${due.departures} departure${due.departures === 1 ? "" : "s"} and ${due.arrivals} arrival${due.arrivals === 1 ? "" : "s"} due tomorrow.`, status: "info" });
   await tx`update business_days set status='closed',closed_at=now() where id=${day.id}::uuid`;
   await tx`
     insert into business_days (property_id,business_date,status,opened_at)
     values (${input.propertyId}::uuid,(${day.businessDate}::date+1)::date,'open',now())
     on conflict (property_id,business_date) do update set status='open',opened_at=coalesce(business_days.opened_at,excluded.opened_at),closed_at=null
   `;
-  await tx`update night_audit_runs set completed_at=now() where id=${run.id}::uuid`;
-  return { runId: run.id, status: "completed" as const, businessDate: day.businessDate, blockers };
+  steps.push({ step: "Closed the business day", detail: `${day.businessDate} is closed. The new business day has started.`, status: "done" });
+  await tx`update night_audit_runs set completed_at=now(),summary=${tx.json(steps)} where id=${run.id}::uuid`;
+  return { runId: run.id, status: "completed" as const, businessDate: day.businessDate, blockers, steps };
+}
+
+/**
+ * When the scheduled audit for a business day is due, in the hotel's time
+ * zone: a morning time (before noon) belongs to the next calendar day, an
+ * evening time to the business day itself.
+ */
+export function nightAuditDue(input: { businessDate: string; time: string; timezone: string; now?: Date }) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: input.timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(input.now ?? new Date());
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? "";
+  const localDate = `${part("year")}-${part("month")}-${part("day")}`;
+  const localTime = `${part("hour")}:${part("minute")}`;
+  const next = new Date(`${input.businessDate}T12:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  const dueDate = input.time < "12:00" ? next.toISOString().slice(0, 10) : input.businessDate;
+  return localDate > dueDate || (localDate === dueDate && localTime >= input.time);
 }

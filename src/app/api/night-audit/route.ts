@@ -12,7 +12,12 @@ export async function GET(request: Request) {
     const [applicationSettings] = await productionSql()<Array<{ value: { property?: { nightAuditTime?: string } } }>>`
       select value from property_settings where property_id=${session.propertyId}::uuid and key='application_settings'
     `;
-    return Response.json({ schedule: record?.value ?? { enabled: false, time: applicationSettings?.value.property?.nightAuditTime ?? "02:00" } });
+    const [lastRun] = await productionSql()<Array<{ status: string; trigger: string; businessDate: string; completedAt: string | null; steps: unknown; blockers: unknown }>>`
+      select n.status,n.trigger,b.business_date::text as "businessDate",n.completed_at as "completedAt",n.summary as steps,n.blocking_issues as blockers
+      from night_audit_runs n join business_days b on b.id=n.business_day_id
+      where n.property_id=${session.propertyId}::uuid order by n.started_at desc limit 1
+    `;
+    return Response.json({ schedule: record?.value ?? { enabled: false, time: applicationSettings?.value.property?.nightAuditTime ?? "02:00" }, lastRun: lastRun ?? null });
   } catch (error) { return propertyAccessResponse(error); }
 }
 

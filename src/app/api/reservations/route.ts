@@ -1009,8 +1009,13 @@ async function updateProductionReservation(
           select id,room_id as "roomId",status from reservation_rooms
           where reservation_id=${id}::uuid and property_id=${session.propertyId}::uuid for update
         `;
-        const toCheckIn = rooms.filter((room) => room.status === "reserved" && (!requested || requested.includes(room.id)));
+        // A screen that has not reloaded since the booking can still hold the
+        // browser's temporary room ids; then every reserved room checks in.
+        const knownRequested = requested?.filter((roomId) => rooms.some((room) => room.id === roomId));
+        const toCheckIn = rooms.filter((room) => room.status === "reserved" && (!knownRequested?.length || knownRequested.includes(room.id)));
         if (toCheckIn.some((room) => !room.roomId)) throw new ReservationRequestError("Assign a room number before checking this room in.", 409);
+        // Never mark the stay checked in while none of its rooms are.
+        if (!toCheckIn.length && !rooms.some((room) => room.status === "checked_in")) throw new ReservationRequestError("No room on this reservation could be checked in. Reload the reservation and try again.", 409);
         if (toCheckIn.length) {
           await tx`
             update reservation_rooms set status='checked_in',checked_in_at=now(),updated_at=now()

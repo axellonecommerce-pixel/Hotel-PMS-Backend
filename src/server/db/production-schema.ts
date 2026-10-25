@@ -665,6 +665,7 @@ export const nightAuditRuns = pgTable("night_audit_runs", {
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   completedAt: timestamp("completed_at", { withTimezone: true }),
   initiatedByEmployeeId: uuid("initiated_by_employee_id").references(() => employees.id),
+  summary: jsonb("summary").notNull().default([]),
 });
 
 export const reportDefinitions = pgTable("report_definitions", {
