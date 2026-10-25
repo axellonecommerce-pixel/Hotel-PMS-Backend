@@ -197,6 +197,24 @@ async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: st
       where lower(i.name) not in (select name from updated)
     `;
   }
+  // An employee deleted in Settings is removed. Staff with a login are
+  // managed under Staff Logins and are never in this list, so skip them. An
+  // employee with history (shifts, time, payroll, …) is deactivated instead
+  // so those records keep their employee.
+  if (Array.isArray(value.employees)) {
+    const keptNames = employeeRows.map((employee) => employee.name.toLowerCase());
+    const removed = await tx<Array<{ id: string }>>`
+      select id from employees
+      where property_id=${propertyId}::uuid and membership_id is null and not (lower(name) = any(${keptNames}::text[]))
+    `;
+    for (const employee of removed) {
+      try {
+        await tx.savepoint((sp) => sp`delete from employees where id=${employee.id}::uuid`);
+      } catch {
+        await tx`update employees set active=false,updated_at=now() where id=${employee.id}::uuid`;
+      }
+    }
+  }
 }
 
 const settingsSchema = z.record(z.string(), z.unknown());

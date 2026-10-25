@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { TransactionSql } from "postgres";
 
 import { db } from "@/server/db/client";
-import { calculateCommissionCents, calculateOtaBreakdown } from "@/domain/rules/commission";
+import { calculateCommissionCents, calculateOtaBreakdown, otaCommissionRules } from "@/domain/rules/commission";
 import { applyStackedPromotions, type Promotion } from "@/domain/rules/reservation-lifecycle";
 import { canUseRateCode } from "@/domain/rules/rate-code";
 import { calculateTaxCents } from "@/domain/rules/tax";
@@ -29,13 +29,13 @@ export async function GET(request: Request) {
     const session = await requirePropertySession(request, "reservations.manage");
     if (hasProductionDatabase()) {
       const records = await productionSql()<Array<{
-        id: string; version: number; confirmationNumber: string; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null; companyName: string | null;
+        id: string; version: number; confirmationNumber: string; guestId: string; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null; companyName: string | null;
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null; otaPaymentStatus: string | null;
         taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; checkedOutDate: string | null; bookedDate: string; rawNotes: string | null; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number;
         reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; roomTypeName: string | null; status: string }>;
         extraGuests: Array<{ id: string; name: string; driverLicenseNumber: string | null }>;
       }>>`
-        select r.id,r.version,r.confirmation_number as "confirmationNumber",r.company_id as "companyId",(select c.name from companies c where c.id=r.company_id) as "companyName",g.first_name as "firstName",g.last_name as "lastName",g.phone,
+        select r.id,r.version,r.confirmation_number as "confirmationNumber",r.main_guest_id as "guestId",r.company_id as "companyId",(select c.name from companies c where c.id=r.company_id) as "companyName",g.first_name as "firstName",g.last_name as "lastName",g.phone,
           rr.room_number as room,r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
           (select to_char(max(rrx.checked_out_at at time zone p.timezone),'YYYY-MM-DD') from reservation_rooms rrx join properties p on p.id=r.property_id where rrx.reservation_id=r.id) as "checkedOutDate",
           (select to_char(r.created_at at time zone p.timezone,'YYYY-MM-DD') from properties p where p.id=r.property_id) as "bookedDate",
@@ -99,7 +99,7 @@ export async function GET(request: Request) {
         }
         return {
           bookingRemarkEntries: remarks.booking ?? [], stayRemarkEntries: remarks.stay ?? [],
-          housekeepingRemarkEntries: remarks.housekeeping ?? [], otherRemarkEntries: remarks.other ?? [], id: record.id, version: record.version, confirmationNumber: record.confirmationNumber, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkedOutDate: record.checkedOutDate ?? undefined, bookedDate: record.bookedDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", companyId: record.companyId ?? undefined, company: record.companyName ?? undefined, roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
+          housekeepingRemarkEntries: remarks.housekeeping ?? [], otherRemarkEntries: remarks.other ?? [], id: record.id, version: record.version, confirmationNumber: record.confirmationNumber, guestId: record.guestId, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkedOutDate: record.checkedOutDate ?? undefined, bookedDate: record.bookedDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", companyId: record.companyId ?? undefined, company: record.companyName ?? undefined, roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
     }
     const records = await db.query.reservations.findMany({
@@ -165,15 +165,16 @@ const payloadSchema = z.object({
   idNumber: z.string().trim().min(1),
   firstName: z.string().trim().min(1),
   lastName: z.string().trim().min(1),
-  dateOfBirth: z.string().min(1),
-  idExpires: z.string().min(1),
+  // Only name and ID are required; the rest of the profile is optional.
+  dateOfBirth: z.string().default(""),
+  idExpires: z.string().default(""),
   addressLine1: z.string().optional(),
   postalCode: z.string().optional(),
   city: z.string().optional(),
   state: z.string().optional(),
   country: z.string().optional(),
   countryCode: z.string().default("+1"),
-  phone: z.string().trim().min(1),
+  phone: z.string().trim().default(""),
   secondaryPhone: z.string().optional(),
   email: z.string().email().optional().or(z.literal("")),
   secondaryEmail: z.string().email().optional().or(z.literal("")),
@@ -385,25 +386,30 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
     if (!company || company.status !== "active") throw new ReservationRequestError("Select an active company for Direct Bill.");
   }
   const normalizedId = normalizeId(payload.idNumber);
-  const [identity] = await tx<Array<{ guestId: string; guestStatus: string; roomPreferences: unknown }>>`
-    select gi.guest_id as "guestId",g.guest_status as "guestStatus",g.room_preferences as "roomPreferences" from guest_identities gi join guests g on g.id=gi.guest_id
+  const [identity] = await tx<Array<{ guestId: string; guestStatus: string; roomPreferences: unknown; address: unknown }>>`
+    select gi.guest_id as "guestId",g.guest_status as "guestStatus",g.room_preferences as "roomPreferences",g.address from guest_identities gi join guests g on g.id=gi.guest_id
     where gi.property_id=${session.propertyId}::uuid and gi.normalized_id_number=${normalizedId} and gi.deleted_at is null for update
   `;
   if (identity?.guestStatus === "do_not_rent" && !payload.dnrOverrideReason) throw new ReservationRequestError("Enter a reason to override the Do Not Rent warning.", 403);
   let guestId = identity?.guestId;
-  const address = { addressLine1: payload.addressLine1 ?? "", city: payload.city ?? "", state: payload.state ?? "", postalCode: payload.postalCode ?? "", country: payload.country ?? "", countryCode: payload.countryCode };
-  const existingPreferences = identity?.roomPreferences && typeof identity.roomPreferences === "object" && !Array.isArray(identity.roomPreferences)
-    ? identity.roomPreferences as Record<string, unknown>
-    : {};
+  const asRecord = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  // A returning guest keeps saved details for anything left blank this time.
+  const enteredAddress = { addressLine1: payload.addressLine1, city: payload.city, state: payload.state, postalCode: payload.postalCode, country: payload.country, countryCode: payload.countryCode };
+  const address = {
+    ...{ addressLine1: "", city: "", state: "", postalCode: "", country: "" },
+    ...asRecord(identity?.address),
+    ...Object.fromEntries(Object.entries(enteredAddress).filter(([, value]) => value?.trim())),
+  };
+  const existingPreferences = asRecord(identity?.roomPreferences);
   const guestPreferences = {
     ...existingPreferences,
-    dateOfBirth: payload.dateOfBirth,
-    idExpires: payload.idExpires,
+    ...(payload.dateOfBirth ? { dateOfBirth: payload.dateOfBirth } : {}),
+    ...(payload.idExpires ? { idExpires: payload.idExpires } : {}),
     ...(payload.fixedRateCents !== undefined ? { fixedRateCents: payload.fixedRateCents } : {}),
   };
-  if (guestId) await tx`update guests set first_name=${payload.firstName},last_name=${payload.lastName},phone=${normalizePhone(payload.phone)},email=${payload.email || null},address=${tx.json(address)},room_preferences=${tx.json(guestPreferences)},updated_at=now() where id=${guestId}::uuid`;
+  if (guestId) await tx`update guests set first_name=${payload.firstName},last_name=${payload.lastName},phone=coalesce(${normalizePhone(payload.phone) || null},phone),email=coalesce(${payload.email || null},email),address=${tx.json(address as never)},room_preferences=${tx.json(guestPreferences as never)},updated_at=now() where id=${guestId}::uuid`;
   else {
-    const [guest] = await tx<Array<{ id: string }>>`insert into guests (property_id,first_name,last_name,phone,email,address,guest_status,room_preferences) values (${session.propertyId}::uuid,${payload.firstName},${payload.lastName},${normalizePhone(payload.phone)},${payload.email || null},${tx.json(address)},'active',${tx.json(guestPreferences)}) returning id`;
+    const [guest] = await tx<Array<{ id: string }>>`insert into guests (property_id,first_name,last_name,phone,email,address,guest_status,room_preferences) values (${session.propertyId}::uuid,${payload.firstName},${payload.lastName},${normalizePhone(payload.phone) || null},${payload.email || null},${tx.json(address as never)},'active',${tx.json(guestPreferences as never)}) returning id`;
     guestId = guest.id;
     await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.idType},${payload.idNumber},${normalizedId},now()+interval '1 year')`;
   }
@@ -517,7 +523,13 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   }
   const roomRentCents = payload.nightlyRatesCents.reduce((sum, rate) => sum + rate, 0) * payload.roomCount;
   const taxCents = payload.taxExempt ? 0 : calculateTaxCents(roomRentCents, payload.taxRatePercentage / 100);
-  const ota = calculateOtaBreakdown({ roomRentCents, taxCents, commissionPercent: bookingSource.commissionBasisPoints / 100, paymentStatus: otaPaymentStatus });
+  // Settings decide per OTA payment category whether the entered amount has
+  // commission deducted or is already net to the hotel.
+  const [ruleSettings] = await tx<Array<{ rules: unknown }>>`
+    select (case when jsonb_typeof(value)='object' then value else (value#>>'{}')::jsonb end)->'otaCommissionRules' as rules
+    from property_settings where property_id=${session.propertyId}::uuid and key='application_settings'
+  `;
+  const ota = calculateOtaBreakdown({ roomRentCents, taxCents, commissionPercent: bookingSource.commissionBasisPoints / 100, paymentStatus: otaPaymentStatus, rules: otaCommissionRules(ruleSettings?.rules) });
   const commissionCents = ota.commissionCents;
   // Commission is an expense (FR-REV-001). When the OTA collected the stay it
   // keeps the commission, so the helper settles it on the folio and the guest
@@ -535,7 +547,7 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   await logReservationActivity(tx, session, reservation.id, "Reservation", `Reservation created · ${confirmationNumber} · ${payload.firstName} ${payload.lastName} · ${payload.checkInDate} → ${payload.checkoutDate}${dayUse ? " (day use)" : ""} · ${payload.roomCount} × ${roomTypeName?.name ?? "room"}, ${roomLabel} · ${payload.rateCode} · ${bookingSource.name} · total ${money(totalCents)}${payload.companyId ? " · direct bill" : ""}${payload.taxExempt ? " · tax exempt" : ""}`);
   if (commissionCents > 0) await logReservationActivity(tx, session, reservation.id, "Commission", `OTA commission ${money(commissionCents)} (${bookingSource.commissionBasisPoints / 100}%) · ${otaPaymentStatus ?? "payable by hotel"}`);
   if (identity?.guestStatus === "do_not_rent" && payload.dnrOverrideReason) await logReservationActivity(tx, session, reservation.id, "Guest", `Do Not Rent override approved: ${payload.dnrOverrideReason}`);
-  return { guestId, reservationId: reservation.id, groupReservation: payload.roomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents, otaNetCents: ota.netCents, otaPaymentStatus, totalCents, balanceCents: ota.commissionDeducted ? ota.netCents : totalCents, version: 1 };
+  return { guestId, reservationId: reservation.id, groupReservation: payload.roomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents, otaNetCents: ota.netCents, otaPaymentStatus, totalCents, balanceCents: ota.commissionDeducted && commissionCents > 0 ? ota.netCents : totalCents, version: 1 };
 }
 
 export async function POST(request: Request) {

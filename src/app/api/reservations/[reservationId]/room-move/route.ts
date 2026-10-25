@@ -20,7 +20,8 @@ async function reservationRentCents(tx: Tx, reservationId: string) {
 const requestSchema = z.object({
   expectedVersion: z.number().int().positive(),
   destinationRoomNumber: z.string().trim().min(1).max(80),
-  remark: z.string().trim().min(1).max(2_000),
+  // Required for an in-house move; optional when changing an arrival's room.
+  remark: z.string().trim().max(2_000).default(""),
   // keep: current rate; change: destination room type's rate; custom: a
   // nightly rate the front desk enters for the remaining nights.
   rateDecision: z.enum(["keep", "change", "custom"]),
@@ -60,6 +61,8 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       `;
       if (!reservationRoom) return { error: "This reservation has no active room to move.", status: 409 } as const;
       if (reservationRoom.roomNumber === input.data.destinationRoomNumber) return { error: "Choose a different destination room.", status: 400 } as const;
+      const inHouse = reservationRoom.status === "checked_in";
+      if (inHouse && !input.data.remark) return { error: "Enter a room move remark.", status: 400 } as const;
 
       const [destination] = await tx<Array<{ id: string; number: string; roomTypeId: string; baseRateCents: number; cleanliness: string; service: string }>>`
         select r.id,r.number,r.room_type_id as "roomTypeId",rt.base_rate_cents as "baseRateCents",r.cleanliness_status as cleanliness,r.service_status as service
@@ -169,23 +172,27 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
           });
         }
       }
-      // Assigning a room to an unassigned booking is not a move; a move from
-      // a room the guest never occupied must not make that room dirty.
-      if (reservationRoom.roomId) {
+      // Only an in-house guest physically moves. Assigning or changing the
+      // room of an arrival is a booking change: no room-move record (Room
+      // Move report) and the old room is not made dirty.
+      if (reservationRoom.roomId && inHouse) {
         await tx`
           insert into room_moves (property_id,reservation_room_id,from_room_id,to_room_id,rate_decision,remark,moved_by_employee_id)
           values (${session.propertyId}::uuid,${reservationRoom.id}::uuid,${reservationRoom.roomId}::uuid,${destination.id}::uuid,${input.data.rateDecision},${input.data.remark},${employee?.id ?? null}::uuid)
         `;
-        if (reservationRoom.status === "checked_in") await tx`
+        await tx`
           update rooms set cleanliness_status='dirty',updated_at=now()
           where id=${reservationRoom.roomId}::uuid and property_id=${session.propertyId}::uuid
         `;
       }
       await tx`update reservations set version=version+1,updated_at=now() where id=${reservation.id}::uuid`;
       const rateNote = input.data.rateDecision === "keep" ? "kept the existing rate" : input.data.rateDecision === "custom" ? `new rate ${money(input.data.newRateCents!)} per night` : `room type rate ${money(destination.baseRateCents)} per night`;
-      await logReservationActivity(tx, session, reservation.id, "Room", reservationRoom.roomNumber
-        ? `Room moved ${reservationRoom.roomNumber} → ${destination.number} · ${rateNote} · ${input.data.remark}`
-        : `Room ${destination.number} assigned · ${input.data.remark}`);
+      const remarkNote = input.data.remark ? ` · ${input.data.remark}` : "";
+      await logReservationActivity(tx, session, reservation.id, "Room", !reservationRoom.roomNumber
+        ? `Room ${destination.number} assigned${remarkNote}`
+        : inHouse
+          ? `Room moved ${reservationRoom.roomNumber} → ${destination.number} · ${rateNote}${remarkNote}`
+          : `Room changed ${reservationRoom.roomNumber} → ${destination.number} before arrival · ${rateNote}${remarkNote}`);
       const [totals] = await tx<Array<{ roomRentCents: number; taxCents: number; totalCents: number; paidCents: number }>>`
         select
           coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rr on rr.id=nr.reservation_room_id where rr.reservation_id=${reservation.id}::uuid),0)::int as "roomRentCents",
