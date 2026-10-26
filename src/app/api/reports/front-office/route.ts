@@ -13,8 +13,10 @@ const querySchema = z.object({
   view: z.enum([
     "arrivals", "departures", "in-house-balances", "do-not-rent", "payment-activity",
     "tax", "direct-bill-aging", "trial-balance", "revenue-by-room-type", "room-status", "paid-outs", "lost-and-found", "clerk-activity", "clerk-shift",
-    "housekeeping-board", "head-housekeeper", "room-attendant-sheets", "vacant-rooms", "housekeeping-forecast",
+    "housekeeping-board", "room-reconciliation", "room-move", "vacant-rooms", "housekeeping-forecast",
   ]),
+  // Housekeeping Board: one housekeeper (or all).
+  housekeeper: z.string().trim().max(120).optional(),
 });
 
 type Column = { key: string; label: string; format?: "text" | "money" | "number" | "percent" | "date" | "status"; align?: "left" | "right" };
@@ -46,22 +48,35 @@ export async function GET(request: Request) {
 
     if (view === "arrivals" || view === "departures") {
       const arrivals = view === "arrivals";
-      const records = await sql<Array<{ id: string; date: string; confirmation: string; guest: string; rooms: string; roomType: string; nights: number; source: string; ratePlan: string; status: string; billTo: string; totalCents: number; balanceCents: number }>>`
+      const records = await sql<Array<{ id: string; date: string; confirmation: string; guest: string; rooms: string; roomType: string; nights: number; source: string; ratePlan: string; status: string; billTo: string; totalCents: number; balanceCents: number; checkInDate: string; departedTime: string; arCents: number }>>`
         select r.id, (case when ${arrivals} then r.arrival_date else r.departure_date end)::text as date, r.confirmation_number as confirmation,
           g.first_name||' '||g.last_name as guest, ${roomList} as rooms, ${roomTypes} as "roomType",
           (r.departure_date - r.arrival_date)::int as nights, coalesce(bs.name,'Direct') as source,
           coalesce(case when r.notes like '{%' then r.notes::jsonb->>'rateCode' end,'—') as "ratePlan", r.status,
           coalesce(c.name,'Guest') as "billTo",
           coalesce((select sum(ch.amount_cents + coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=ch.id),0)) from charges ch join folios f on f.id=ch.folio_id where f.reservation_id=r.id and ch.status='posted'),0)::int as "totalCents",
-          ${balance} as "balanceCents"
-        from reservations r join guests g on g.id=r.main_guest_id
+          ${balance} as "balanceCents",
+          r.arrival_date::text as "checkInDate",
+          coalesce((select to_char(max(rrx.checked_out_at) at time zone p.timezone,'HH12:MI AM') from reservation_rooms rrx where rrx.reservation_id=r.id),'') as "departedTime",
+          coalesce((select sum(pay.amount_cents) from payments pay where pay.reservation_id=r.id and upper(pay.method)='DIRECT BILL'),0)::int as "arCents"
+        from reservations r join guests g on g.id=r.main_guest_id join properties p on p.id=r.property_id
         left join booking_sources bs on bs.id=r.booking_source_id left join companies c on c.id=r.company_id
         where r.property_id=${propertyId}::uuid and r.status not in ('cancelled')
+          and (${arrivals} or r.status <> 'no_show')
           and (case when ${arrivals} then r.arrival_date else r.departure_date end) between ${startDate}::date and ${endDate}::date
         order by date, rooms
       `;
-      const rows = records.map((record) => ({ ...record, status: statusLabel(record.status) }));
+      const rows = records.map((record) => ({ ...record, status: arrivals ? statusLabel(record.status) : record.status === "checked_out" ? "Departed" : record.status === "checked_in" ? "Pending Depart" : statusLabel(record.status) }));
       const done = records.filter((record) => record.status === (arrivals ? "reserved" : "checked_in")).length;
+      if (!arrivals) {
+        // HotelKey Departures List layout.
+        return respond(
+          [{ label: "Total", value: records.length, format: "number" }, { label: "Pending Depart", value: done, format: "number" }, { label: "Departed", value: records.filter((row) => row.status === "checked_out").length, format: "number" }, { label: "Open Balance", value: sum(records, (row) => Math.max(0, row.balanceCents)), format: "money" }],
+          [{ key: "confirmation", label: "Confirmation No" }, { key: "rooms", label: "Room Number" }, { key: "guest", label: "Guest Name" }, { key: "checkInDate", label: "Check In Date", format: "date" }, { key: "status", label: "Status", format: "status" }, money("arCents", "ARR"), money("balanceCents", "Balance"), { key: "departedTime", label: "Departed Time" }],
+          rows,
+          "Stays departing in the range. ARR is the amount moved to accounts receivable (direct bill) at checkout.",
+        );
+      }
       return respond(
         arrivals
           ? [{ label: "Arrivals", value: records.length, format: "number" }, { label: "Still Due In", value: done, format: "number" }, { label: "Room Nights", value: sum(records, (row) => row.nights), format: "number" }, { label: "Balance Due", value: sum(records, (row) => Math.max(0, row.balanceCents)), format: "money" }]
@@ -325,35 +340,45 @@ export async function GET(request: Request) {
 
     // Housekeeping reports (HotelKey: Housekeeping Board, Head Housekeeper,
     // Vacant Room List, Forecasting, plus room attendant sheets).
-    if (view === "housekeeping-board" || view === "head-housekeeper" || view === "room-attendant-sheets" || view === "vacant-rooms") {
+    if (view === "housekeeping-board" || view === "room-reconciliation" || view === "vacant-rooms") {
       const [day] = await sql<Array<{ date: string }>>`select coalesce((select business_date::text from business_days where property_id=${propertyId}::uuid and status='open' order by business_date limit 1), current_date::text) as date`;
-      const rooms = await sql<Array<{ id: string; room: string; roomType: string; frontOffice: string; hkStatus: string; service: string; serviceType: string; guest: string; adults: number; children: number; arrival: string; departure: string; housekeeper: string; progress: string; completedAt: string; remarks: string; nextArrival: string; maintenance: string }>>`
+      // Short room-type codes and floors live in the Settings document.
+      const [settingsRow] = await sql<Array<{ value: { rooms?: Array<{ number?: string; roomTypeId?: string; floor?: number }>; roomTypes?: Array<{ id?: string; name?: string; shortLabel?: string }> } | null }>>`
+        select (case when jsonb_typeof(value)='object' then value else (value#>>'{}')::jsonb end) as value from property_settings where property_id=${propertyId}::uuid and key='application_settings'`;
+      const configuredRooms = new Map((settingsRow?.value?.rooms ?? []).map((room) => [room.number ?? "", room]));
+      const typeCode = (roomNumber: string, typeName: string) => {
+        const configured = configuredRooms.get(roomNumber);
+        const type = (settingsRow?.value?.roomTypes ?? []).find((item) => item.id === configured?.roomTypeId) ?? (settingsRow?.value?.roomTypes ?? []).find((item) => item.name === typeName);
+        return type?.shortLabel || typeName;
+      };
+      const rooms = await sql<Array<{ id: string; room: string; roomType: string; occupied: boolean; stayStatus: string; dirty: boolean; outOfOrder: boolean; guest: string; adults: number; children: number; pets: number; arrival: string; departure: string; housekeeper: string; remarks: string; nextArrival: string; maintenance: string; returnedFromMaint: boolean; movedOut: boolean; earlyCheckout: boolean; refunded: boolean; carryOver: boolean }>>`
         select ro.id, ro.number as room, rt.name as "roomType",
-          case when stay.status='checked_in' and stay.departure <= ${day.date}::date then 'Due Out'
-            when stay.status='checked_in' then 'Occupied'
-            when departed.id is not null then 'Checked Out'
-            when stay.status='reserved' then 'Arrival' else 'Vacant' end as "frontOffice",
-          initcap(ro.cleanliness_status) as "hkStatus",
-          case when ro.service_status='non-rentable' then 'Non-Rentable' else 'Rentable' end as service,
-          case when ro.service_status='non-rentable' then 'Out of Order'
-            when (stay.status='checked_in' and stay.departure <= ${day.date}::date) or departed.id is not null then 'Departure Clean'
-            when stay.status='checked_in' then 'Stayover Service'
-            when ro.cleanliness_status='dirty' then 'Vacant Dirty'
-            when stay.status='reserved' then 'Arrival Prep' else 'Vacant Clean' end as "serviceType",
-          coalesce(stay.guest, departed.guest, '—') as guest, coalesce(stay.adults,departed.adults,0) as adults, coalesce(stay.children,departed.children,0) as children,
+          (stay.status='checked_in') as occupied,
+          case when stay.status='checked_in' and stay.departure <= ${day.date}::date then 'Pending Depart'
+            when stay.status='checked_in' then 'Stay Over'
+            when departed.id is not null then 'Departed'
+            when stay.status='reserved' then 'Arrival' else 'Vacant' end as "stayStatus",
+          ro.cleanliness_status='dirty' as dirty, ro.service_status='non-rentable' as "outOfOrder",
+          coalesce(stay.guest, departed.guest, '') as guest,
+          coalesce(stay.adults, departed.adults, 0) as adults, coalesce(stay.children, departed.children, 0) as children,
+          coalesce(stay.pets, departed.pets, 0) as pets,
           coalesce(stay.arrival::text,'') as arrival, coalesce(stay.departure::text, departed.departure::text, '') as departure,
           coalesce(e.name,'Unassigned') as housekeeper,
-          case when h.assignment_status='completed' then 'Completed' when h.assignment_status='in_progress' then 'In Progress' when h.assignment_status='assigned' then 'Assigned' else case when ro.cleanliness_status='clean' then 'Clean' else 'Not Started' end end as progress,
-          coalesce(to_char(h.completed_at at time zone p.timezone,'HH12:MI AM'),'') as "completedAt",
-          coalesce(stay.remark,'') as remarks,
-          coalesce((select r2.arrival_date::text||' · '||g2.first_name||' '||g2.last_name from reservation_rooms rr2 join reservations r2 on r2.id=rr2.reservation_id join guests g2 on g2.id=r2.main_guest_id
-            where rr2.room_id=ro.id and rr2.status='reserved' and r2.status='reserved' and r2.arrival_date >= ${day.date}::date order by r2.arrival_date limit 1),'—') as "nextArrival",
-          coalesce((select string_agg(m.problem, '; ') from maintenance_orders m where m.room_id=ro.id and m.status not in ('resolved','cancelled')),'') as maintenance
+          coalesce(stay.remark, departed.remark, '') as remarks,
+          coalesce((select to_char(r2.arrival_date,'Mon DD')||' · '||g2.first_name||' '||g2.last_name from reservation_rooms rr2 join reservations r2 on r2.id=rr2.reservation_id join guests g2 on g2.id=r2.main_guest_id
+            where rr2.room_id=ro.id and rr2.status='reserved' and r2.status='reserved' and r2.arrival_date >= ${day.date}::date order by r2.arrival_date limit 1),'') as "nextArrival",
+          coalesce((select string_agg(m.problem, '; ') from maintenance_orders m where m.room_id=ro.id and m.status not in ('resolved','cancelled')),'') as maintenance,
+          exists (select 1 from maintenance_orders m where m.room_id=ro.id and (m.returned_to_service_at at time zone p.timezone)::date between (${day.date}::date - 1) and ${day.date}::date) as "returnedFromMaint",
+          exists (select 1 from room_moves rm where rm.from_room_id=ro.id and (rm.moved_at at time zone p.timezone)::date between (${day.date}::date - 1) and ${day.date}::date) as "movedOut",
+          coalesce(departed.early, false) as "earlyCheckout",
+          coalesce(departed.refunded, false) as refunded,
+          (ro.cleanliness_status='dirty' and ro.updated_at < (${day.date}::date)::timestamp at time zone p.timezone) as "carryOver"
         from rooms ro join room_types rt on rt.id=ro.room_type_id join properties p on p.id=ro.property_id
         left join lateral (
           select rr.status, r.arrival_date as arrival, r.departure_date as departure, g.first_name||' '||g.last_name as guest,
             coalesce((case when r.notes like '{%' then r.notes::jsonb->>'adults' end)::int,1) as adults,
             coalesce((case when r.notes like '{%' then r.notes::jsonb->>'children' end)::int,0) as children,
+            coalesce((case when r.notes like '{%' then r.notes::jsonb->>'petCount' end)::int,0) as pets,
             case when r.notes like '{%' then r.notes::jsonb->'remarks'->'housekeeping'->-1->>'text' end as remark
           from reservation_rooms rr join reservations r on r.id=rr.reservation_id join guests g on g.id=r.main_guest_id
           where rr.room_id=ro.id and rr.status in ('checked_in','reserved') and r.status in ('checked_in','reserved') and r.arrival_date <= ${day.date}::date
@@ -362,61 +387,88 @@ export async function GET(request: Request) {
         left join lateral (
           select rr.id, g.first_name||' '||g.last_name as guest, r.departure_date as departure,
             coalesce((case when r.notes like '{%' then r.notes::jsonb->>'adults' end)::int,1) as adults,
-            coalesce((case when r.notes like '{%' then r.notes::jsonb->>'children' end)::int,0) as children
+            coalesce((case when r.notes like '{%' then r.notes::jsonb->>'children' end)::int,0) as children,
+            coalesce((case when r.notes like '{%' then r.notes::jsonb->>'petCount' end)::int,0) as pets,
+            case when r.notes like '{%' then r.notes::jsonb->'remarks'->'housekeeping'->-1->>'text' end as remark,
+            (rr.checked_out_at at time zone p.timezone)::date < r.departure_date as early,
+            exists (select 1 from refunds rf join payments pay on pay.id=rf.payment_id where pay.reservation_id=r.id) as refunded
           from reservation_rooms rr join reservations r on r.id=rr.reservation_id join guests g on g.id=r.main_guest_id
-          where rr.room_id=ro.id and rr.status='checked_out' and (rr.checked_out_at at time zone p.timezone)::date=${day.date}::date limit 1
+          where rr.room_id=ro.id and rr.status='checked_out' and (rr.checked_out_at at time zone p.timezone)::date between (${day.date}::date - 1) and ${day.date}::date
+          order by rr.checked_out_at desc limit 1
         ) departed on stay.status is distinct from 'checked_in'
         left join housekeeping_records h on h.room_id=ro.id and h.service_date=${day.date}::date
         left join employees e on e.id=h.housekeeper_employee_id
         where ro.property_id=${propertyId}::uuid and ro.active
         order by ro.number
       `;
-      const credits: Record<string, number> = { "Departure Clean": 1, "Stayover Service": 0.5, "Vacant Dirty": 0.75, "Arrival Prep": 0.25 };
-      const needsService = (row: (typeof rooms)[number]) => row.serviceType !== "Vacant Clean" && row.serviceType !== "Out of Order" && (row.hkStatus === "Dirty" || row.progress === "Assigned" || row.progress === "In Progress" || row.progress === "Completed");
-      const note = `Business day ${day.date}. Credits: departure 1.0, vacant dirty 0.75, stayover 0.5, arrival prep 0.25.`;
+      const zone = (roomNumber: string) => `Zone ${configuredRooms.get(roomNumber)?.floor ?? 1}`;
+      const status = (row: (typeof rooms)[number]) => row.outOfOrder ? `Out of Order and ${row.dirty ? "Dirty" : "Clean"}` : `${row.occupied ? "Occupied" : "Vacant"} and ${row.dirty ? "Dirty" : "Clean"}`;
       if (view === "housekeeping-board") {
+        // HotelKey Housekeeping Board: rooms to service, by housekeeper.
+        const nightsInto = (arrival: string) => arrival ? Math.round((new Date(`${day.date}T12:00:00Z`).getTime() - new Date(`${arrival}T12:00:00Z`).getTime()) / 86_400_000) : 0;
+        const board = rooms
+          .filter((row) => row.dirty || row.housekeeper !== "Unassigned" || row.stayStatus === "Stay Over" || row.stayStatus === "Pending Depart")
+          .filter((row) => !input.data.housekeeper || row.housekeeper === input.data.housekeeper)
+          .map((row) => {
+            const service = row.outOfOrder ? "OOO" : row.stayStatus === "Pending Depart" || row.stayStatus === "Departed" ? "NCO" : row.stayStatus === "Stay Over" ? "SO" : row.dirty ? "VD" : "PU";
+            const changeLinen = service === "NCO" || service === "VD" || (service === "SO" && nightsInto(row.arrival) > 0 && nightsInto(row.arrival) % 3 === 0);
+            return {
+              id: row.id, housekeeper: row.housekeeper, zone: zone(row.room), room: row.room, status: status(row), stayStatus: row.stayStatus,
+              roomType: typeCode(row.room, row.roomType), service, adults: row.adults, children: row.children,
+              pets: row.guest ? (row.pets > 0 ? `YES (${row.pets})` : "NO") : "", remarks: row.remarks, comments: "",
+              options: changeLinen ? "✓ CHANGE LINEN" : service === "SO" ? "TIDY" : "",
+            };
+          })
+          .sort((left, right) => (left.housekeeper === "Unassigned" ? 1 : right.housekeeper === "Unassigned" ? -1 : left.housekeeper.localeCompare(right.housekeeper)) || left.room.localeCompare(right.room, undefined, { numeric: true }));
         return respond(
-          [{ label: "Dirty", value: rooms.filter((row) => row.hkStatus === "Dirty").length, format: "number" }, { label: "Clean", value: rooms.filter((row) => row.hkStatus === "Clean").length, format: "number" }, { label: "Due Out / Checked Out", value: rooms.filter((row) => row.serviceType === "Departure Clean").length, format: "number" }, { label: "Stayovers", value: rooms.filter((row) => row.serviceType === "Stayover Service").length, format: "number" }, { label: "Assigned", value: rooms.filter((row) => row.housekeeper !== "Unassigned").length, format: "number" }],
-          [{ key: "room", label: "Room" }, { key: "roomType", label: "Room Type" }, { key: "frontOffice", label: "FO Status", format: "status" }, { key: "hkStatus", label: "HK Status", format: "status" }, { key: "serviceType", label: "Service" }, { key: "guest", label: "Guest" }, count("adults", "Adults"), count("children", "Children"), { key: "departure", label: "Departure", format: "date" }, { key: "housekeeper", label: "Housekeeper" }, { key: "progress", label: "Progress", format: "status" }, { key: "remarks", label: "Remarks" }],
-          rooms, note,
+          [{ label: "Dirty Rooms", value: board.filter((row) => row.status.endsWith("Dirty")).length, format: "number" }, { label: "Out Of Order", value: board.filter((row) => row.service === "OOO").length, format: "number" }, { label: "Stay Overs", value: board.filter((row) => row.stayStatus === "Stay Over").length, format: "number" }, { label: "Due Outs", value: board.filter((row) => row.stayStatus === "Pending Depart" || row.stayStatus === "Departed").length, format: "number" }],
+          [{ key: "housekeeper", label: "Housekeeper" }, { key: "zone", label: "Zone" }, { key: "room", label: "Room Number" }, { key: "status", label: "Status" }, { key: "stayStatus", label: "Stay Status" }, { key: "roomType", label: "Room Type" }, { key: "service", label: "Service" }, count("adults", "Adults"), count("children", "Children"), { key: "pets", label: "Pets" }, { key: "remarks", label: "Remarks" }, { key: "comments", label: "Comments" }, { key: "options", label: "Options" }],
+          board,
+          `Business day ${day.date}. Service: NCO check-out clean, SO stayover, VD vacant dirty, PU pick-up, OOO out of order. Stayovers change linen every 3rd night.`,
         );
       }
-      if (view === "vacant-rooms") {
-        const vacant = rooms.filter((row) => row.frontOffice === "Vacant" || row.frontOffice === "Checked Out" || row.frontOffice === "Arrival");
+      if (view === "room-reconciliation") {
+        // HotelKey Room Reconciliation: available-dirty and out-of-order-dirty rooms to research.
+        const list = rooms.filter((row) => !row.occupied && row.dirty).map((row) => ({
+          id: row.id, room: row.room, status: row.outOfOrder ? "O.O.O-Dirty" : "AV-Dirty",
+          roomMove: row.movedOut ? "✓" : "", returnFromMaint: row.returnedFromMaint ? "✓" : "", fullRefund: row.refunded ? "✓" : "",
+          earlyCheckOut: row.earlyCheckout ? "✓" : "", carryOver: row.carryOver ? "✓" : "",
+          other: !row.movedOut && !row.returnedFromMaint && !row.refunded && !row.earlyCheckout && !row.carryOver && row.stayStatus !== "Departed" ? "✓" : "",
+          keyMade: "", explanation: row.stayStatus === "Departed" ? `Departed: ${row.guest}` : row.maintenance,
+        }));
         return respond(
-          [{ label: "Vacant Rooms", value: vacant.length, format: "number" }, { label: "Vacant Clean (ready)", value: vacant.filter((row) => row.hkStatus === "Clean" && row.service === "Rentable").length, format: "number" }, { label: "Vacant Dirty", value: vacant.filter((row) => row.hkStatus === "Dirty").length, format: "number" }, { label: "Out of Order", value: vacant.filter((row) => row.service === "Non-Rentable").length, format: "number" }],
-          [{ key: "room", label: "Room" }, { key: "roomType", label: "Room Type" }, { key: "hkStatus", label: "HK Status", format: "status" }, { key: "service", label: "Service", format: "status" }, { key: "frontOffice", label: "FO Status", format: "status" }, { key: "nextArrival", label: "Next Arrival" }, { key: "housekeeper", label: "Housekeeper" }, { key: "maintenance", label: "Open Maintenance" }],
-          vacant, `Rooms with no guest in them on business day ${day.date}.`,
+          [{ label: "AV-Dirty", value: list.filter((row) => row.status === "AV-Dirty").length, format: "number" }, { label: "O.O.O-Dirty", value: list.filter((row) => row.status === "O.O.O-Dirty").length, format: "number" }],
+          [{ key: "room", label: "Number" }, { key: "status", label: "Status" }, { key: "roomMove", label: "Room Move" }, { key: "returnFromMaint", label: "Return From Maint ?" }, { key: "fullRefund", label: "Full Refund ?" }, { key: "earlyCheckOut", label: "Early Check Out ?" }, { key: "carryOver", label: "Carry Over From Prev Date ?" }, { key: "other", label: "Other" }, { key: "keyMade", label: "Key Made ? Y or N" }, { key: "explanation", label: "Explanation" }],
+          list,
+          `Business day ${day.date}. Ticks are what the PMS found; research every room, mark Key Made, and explain "Other".`,
         );
       }
-      if (view === "room-attendant-sheets") {
-        const assigned = rooms.filter(needsService).sort((left, right) => left.housekeeper.localeCompare(right.housekeeper) || left.room.localeCompare(right.room, undefined, { numeric: true }));
-        return respond(
-          [{ label: "Rooms to Service", value: assigned.length, format: "number" }, { label: "Housekeepers", value: new Set(assigned.filter((row) => row.housekeeper !== "Unassigned").map((row) => row.housekeeper)).size, format: "number" }, { label: "Unassigned", value: assigned.filter((row) => row.housekeeper === "Unassigned").length, format: "number" }],
-          [{ key: "housekeeper", label: "Housekeeper" }, { key: "room", label: "Room" }, { key: "roomType", label: "Room Type" }, { key: "serviceType", label: "Service" }, { key: "frontOffice", label: "FO Status", format: "status" }, { key: "guest", label: "Guest" }, count("adults", "Adults"), count("children", "Children"), { key: "departure", label: "Departure", format: "date" }, { key: "remarks", label: "Remarks" }, { key: "timeIn", label: "Time In" }, { key: "timeOut", label: "Time Out" }],
-          assigned.map((row) => ({ ...row, credits: credits[row.serviceType] ?? 0, timeIn: "", timeOut: row.completedAt })),
-          note,
-        );
-      }
-      // Head housekeeper: workload and progress per housekeeper.
-      const byHousekeeper = new Map<string, Array<(typeof rooms)[number]>>();
-      for (const row of rooms.filter(needsService)) byHousekeeper.set(row.housekeeper, [...(byHousekeeper.get(row.housekeeper) ?? []), row]);
-      const rows = [...byHousekeeper.entries()].sort(([left], [right]) => (left === "Unassigned" ? 1 : right === "Unassigned" ? -1 : left.localeCompare(right))).map(([housekeeper, list]) => ({
-        id: housekeeper,
-        housekeeper,
-        rooms: list.length,
-        departures: list.filter((row) => row.serviceType === "Departure Clean").length,
-        stayovers: list.filter((row) => row.serviceType === "Stayover Service").length,
-        other: list.filter((row) => row.serviceType !== "Departure Clean" && row.serviceType !== "Stayover Service").length,
-        completed: list.filter((row) => row.progress === "Completed" || row.hkStatus === "Clean").length,
-        remaining: list.filter((row) => row.progress !== "Completed" && row.hkStatus !== "Clean").length,
-        credits: Math.round(list.reduce((total, row) => total + (credits[row.serviceType] ?? 0), 0) * 100) / 100,
-        roomList: list.map((row) => row.room).join(", "),
-      }));
+      const vacant = rooms.filter((row) => !row.occupied).map((row) => ({ id: row.id, room: row.room, roomType: typeCode(row.room, row.roomType), zone: zone(row.room), status: status(row), stayStatus: row.stayStatus, nextArrival: row.nextArrival || "—", housekeeper: row.housekeeper, maintenance: row.maintenance }));
       return respond(
-        [{ label: "Rooms to Service", value: sum(rows, (row) => row.rooms), format: "number" }, { label: "Completed", value: sum(rows, (row) => row.completed), format: "number" }, { label: "Remaining", value: sum(rows, (row) => row.remaining), format: "number" }, { label: "Unassigned", value: rows.find((row) => row.housekeeper === "Unassigned")?.rooms ?? 0, format: "number" }],
-        [{ key: "housekeeper", label: "Housekeeper" }, count("rooms", "Rooms"), count("departures", "Departures"), count("stayovers", "Stayovers"), count("other", "Other"), count("credits", "Credits"), count("completed", "Completed"), count("remaining", "Remaining"), { key: "roomList", label: "Rooms" }],
-        rows, note,
+        [{ label: "Vacant Rooms", value: vacant.length, format: "number" }, { label: "Vacant Clean (ready)", value: vacant.filter((row) => row.status === "Vacant and Clean").length, format: "number" }, { label: "Vacant Dirty", value: vacant.filter((row) => row.status === "Vacant and Dirty").length, format: "number" }, { label: "Out of Order", value: vacant.filter((row) => row.status.startsWith("Out of Order")).length, format: "number" }],
+        [{ key: "zone", label: "Zone" }, { key: "room", label: "Room" }, { key: "roomType", label: "Room Type" }, { key: "status", label: "Status" }, { key: "stayStatus", label: "Stay Status" }, { key: "nextArrival", label: "Next Arrival" }, { key: "housekeeper", label: "Housekeeper" }, { key: "maintenance", label: "Open Maintenance" }],
+        vacant, `Rooms without a guest on business day ${day.date}.`,
+      );
+    }
+
+    if (view === "room-move") {
+      // HotelKey Room Move report.
+      const moves = await sql<Array<{ id: string; from: string; to: string; category: string; moveDate: string; moveTime: string; username: string; reason: string }>>`
+        select rm.id, fr.number as "from", tr.number as "to", 'FRONT OFFICE' as category,
+          to_char(rm.moved_at at time zone p.timezone,'YYYY-MM-DD') as "moveDate",
+          to_char(rm.moved_at at time zone p.timezone,'HH12:MI AM') as "moveTime",
+          coalesce(e.name,'—') as username, coalesce(rm.remark,'') as reason
+        from room_moves rm
+        join rooms fr on fr.id=rm.from_room_id join rooms tr on tr.id=rm.to_room_id
+        join properties p on p.id=rm.property_id
+        left join employees e on e.id=rm.moved_by_employee_id
+        where rm.property_id=${propertyId}::uuid and (rm.moved_at at time zone p.timezone)::date between ${startDate}::date and ${endDate}::date
+        order by rm.moved_at
+      `;
+      return respond(
+        [{ label: "Total Rooms Moved", value: moves.length, format: "number" }],
+        [{ key: "from", label: "From" }, { key: "to", label: "To" }, { key: "category", label: "Category" }, { key: "moveDate", label: "Move Date", format: "date" }, { key: "moveTime", label: "Move Time" }, { key: "username", label: "Username" }, { key: "reason", label: "Reason" }],
+        moves,
       );
     }
 
