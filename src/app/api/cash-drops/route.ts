@@ -20,8 +20,9 @@ function toRecord(row: {
   id: string; date: string; status: string; expectedCents: number | null; countedCents: number | null;
   openingCents: number; drawerFloatCents: number; droppedCents: number; employee: string; note: string | null;
 }): CashRecord {
-  const expectedCents = row.expectedCents ?? row.openingCents;
-  const countedCents = row.countedCents ?? 0;
+  // Shift cash only: the opening balance the drawer started with is left out of both figures.
+  const expectedCents = (row.expectedCents ?? row.openingCents) - row.openingCents;
+  const countedCents = (row.countedCents ?? 0) - row.openingCents;
   const differenceCents = countedCents - expectedCents;
   const shift = row.status.split(":")[1] || "Shift";
   return {
