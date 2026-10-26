@@ -95,7 +95,7 @@ export async function GET(request: Request) {
     const floatCents = typeof settings?.value?.property?.cashFloatCents === "number" ? settings.value.property.cashFloatCents : 20_000;
     if (!shift) return Response.json({ shift: null, floatCents });
     const activity = await cashActivityBetween(sql, session.propertyId, shift.openedAt, null);
-    return Response.json({ shift: { ...shift, activity, expectedCents: shift.openingCents + activity.netCents }, floatCents });
+    return Response.json({ shift: { ...shift, activity, expectedCents: Math.max(0, shift.openingCents + activity.netCents) }, floatCents });
   } catch (error) {
     return propertyAccessResponse(error);
   }
@@ -145,7 +145,9 @@ export async function POST(request: Request) {
         select value from property_settings where property_id=${session.propertyId}::uuid and key='application_settings'
       `;
       const floatCents = typeof settings?.value?.property?.cashFloatCents === "number" ? settings.value.property.cashFloatCents : 20_000;
-      if (input.droppedCents > Math.max(0, input.countedCents - floatCents)) throw new ShiftError(`Keep the ${(floatCents / 100).toFixed(2)} float in the drawer; only cash above it can be dropped.`);
+      // Leave what the drawer started with (never more than the float); a shift that opened empty can drop it all.
+      const keepCents = Math.min(floatCents, current.openingCents);
+      if (input.droppedCents > Math.max(0, input.countedCents - keepCents)) throw new ShiftError(`Keep $${(keepCents / 100).toFixed(2)} in the drawer for the next shift; only cash above it can be dropped.`);
       if (input.countedCents !== expectedCents && !input.note) throw new ShiftError(`The drawer is ${input.countedCents < expectedCents ? "short" : "over"} by $${(Math.abs(input.countedCents - expectedCents) / 100).toFixed(2)}. Add a note explaining the difference.`);
       await tx`
         update cash_shifts set status=${`closed:${current.shiftName}`}, expected_cents=${expectedCents}, counted_cents=${input.countedCents}, closed_at=now()
