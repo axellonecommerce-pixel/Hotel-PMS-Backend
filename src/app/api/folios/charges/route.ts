@@ -131,7 +131,7 @@ export async function GET(request: Request) {
     const includeRoomRent = params.get("includeRoomRent") === "1";
     if (!reservationId || !z.string().uuid().safeParse(reservationId).success) return Response.json({ error: "A reservation is required." }, { status: 400 });
     const charges = await productionSql()<Array<{ id: string; folioId: string; description: string; amountCents: number; type: string; taxCents: number; serviceDate: string }>>`
-      select c.id,c.folio_id as "folioId",c.description,c.amount_cents as "amountCents",c.type,c.service_date::text as "serviceDate",
+      select c.id,c.folio_id as "folioId",c.reservation_room_id as "reservationRoomId",c.description,c.amount_cents as "amountCents",c.type,c.service_date::text as "serviceDate",
         coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)::int as "taxCents"
       from charges c join folios f on f.id=c.folio_id
       where c.property_id=${session.propertyId}::uuid and f.reservation_id=${reservationId}::uuid

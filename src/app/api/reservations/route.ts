@@ -192,6 +192,15 @@ const payloadSchema = z.object({
   roomTypeId: z.string().trim().min(1),
   roomCount: z.number().int().positive(),
   roomNumbers: z.array(z.string().trim().min(1)).default([]),
+  // A group can mix room types: each extra line is a room type with its own
+  // rooms and nightly rates (the main room type is the line above).
+  additionalRooms: z.array(z.object({
+    roomTypeId: z.string().trim().min(1),
+    roomCount: z.number().int().positive().max(50),
+    roomNumbers: z.array(z.string().trim().min(1)).default([]),
+    baseNightlyRatesCents: z.array(z.number().int().nonnegative()).min(1),
+    nightlyRatesCents: z.array(z.number().int().nonnegative()).min(1),
+  })).max(10).default([]),
   dnrOverrideReason: z.string().trim().optional(),
   checkInDate: z.string().min(1),
   checkoutDate: z.string().min(1),
@@ -345,25 +354,35 @@ async function createProductionReservation(request: Request, session: PropertySe
   }
 }
 
-export async function createProductionReservationTransaction(tx: TransactionSql, session: PropertySession, payload: ReservationPayload) {
-  const roomType = await productionRoomTypeForSettingsId(tx, session.propertyId, payload.roomTypeId);
+type RoomLine = { roomTypeId: string; roomCount: number; roomNumbers: string[]; baseNightlyRatesCents: number[]; nightlyRatesCents: number[] };
+
+/**
+ * Check one room-type line of a booking (availability, sell limits, rate
+ * calendar, room numbers and promotion pricing) and lock its free rooms.
+ * `strictPromotions` rejects a promotion that does not fit the room type;
+ * extra group lines simply skip it.
+ */
+async function checkRoomLine(tx: TransactionSql, session: PropertySession, payload: ReservationPayload, line: RoomLine, strictPromotions: boolean) {
+  const roomType = await productionRoomTypeForSettingsId(tx, session.propertyId, line.roomTypeId);
   if (!roomType?.active) throw new ReservationRequestError("Select an active room type.", 409);
-  await validateProductionRateCode(tx, session.propertyId, payload.rateCode);
-  // Equal dates are a day-use stay: one room charge, and the room is held for
-  // its arrival date. Overlap checks treat every day-use stay the same way.
   const dayUse = payload.checkoutDate === payload.checkInDate;
   const occupiedUntil = dayUse ? addDays(payload.checkInDate, 1) : payload.checkoutDate;
   const stayNights = Math.round((new Date(`${payload.checkoutDate}T12:00:00Z`).getTime() - new Date(`${payload.checkInDate}T12:00:00Z`).getTime()) / 86_400_000);
-  const restriction = rateCalendarRestriction(await rateCalendarDays(tx, session.propertyId, payload.roomTypeId, payload.checkInDate, occupiedUntil), payload.checkInDate, stayNights);
+  const restriction = rateCalendarRestriction(await rateCalendarDays(tx, session.propertyId, line.roomTypeId, payload.checkInDate, occupiedUntil), payload.checkInDate, stayNights);
   if (restriction) throw new ReservationRequestError(restriction, 409);
   // Rooms-to-sell caps set on the Rate Calendar.
-  const inventory = (await roomInventory(tx, session.propertyId, payload.checkInDate, addDays(occupiedUntil, -1))).get(payload.roomTypeId);
+  const inventory = (await roomInventory(tx, session.propertyId, payload.checkInDate, addDays(occupiedUntil, -1))).get(line.roomTypeId);
   for (const [date, day] of inventory ?? []) {
-    if (day.sellLimit !== null && day.sold + payload.roomCount > day.sellLimit) {
+    if (day.sellLimit !== null && day.sold + line.roomCount > day.sellLimit) {
       throw new ReservationRequestError(`Only ${Math.max(0, day.sellLimit - day.sold)} room(s) of this type can be sold on ${date}.`, 409);
     }
   }
-  const selectedPromotions = await validatedPromotions(tx, session.propertyId, roomType.id, payload.checkInDate, payload.checkoutDate, payload.promotionIds);
+  let promotions: Promotion[] = [];
+  if (strictPromotions) promotions = await validatedPromotions(tx, session.propertyId, roomType.id, payload.checkInDate, payload.checkoutDate, payload.promotionIds);
+  else for (const promotionId of payload.promotionIds) {
+    const valid = await validatedPromotions(tx, session.propertyId, roomType.id, payload.checkInDate, payload.checkoutDate, [promotionId]).catch(() => []);
+    promotions.push(...valid);
+  }
   const roomsForType = await tx<Array<{ id: string; number: string }>>`
     select r.id, r.number from rooms r
     where r.property_id=${session.propertyId}::uuid and r.room_type_id=${roomType.id}::uuid
@@ -379,11 +398,9 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
           and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockTo')::date else null end >= ${payload.checkInDate}::date
       ) order by r.number for update
   `;
-  const selectedRooms = payload.roomNumbers.length
-    ? payload.roomNumbers.map((number) => roomsForType.find((room) => room.number === number))
-    : [];
+  const selectedRooms = line.roomNumbers.map((number) => roomsForType.find((room) => room.number === number));
   // Rooms may be assigned later (FR-RES-001), so 0..roomCount numbers are valid.
-  if (payload.roomNumbers.length > payload.roomCount || new Set(payload.roomNumbers).size !== payload.roomNumbers.length || selectedRooms.some((room) => !room)) throw new ReservationRequestError("Select unique rentable room numbers, no more than the rooms requested.", 409);
+  if (line.roomNumbers.length > line.roomCount || new Set(line.roomNumbers).size !== line.roomNumbers.length || selectedRooms.some((room) => !room)) throw new ReservationRequestError("Select unique rentable room numbers, no more than the rooms requested.", 409);
   // Unassigned bookings hold room-type inventory without a room, so they must
   // be subtracted from the free rooms or the type could be overbooked.
   const [unassigned] = await tx<Array<{ count: number }>>`
@@ -392,7 +409,29 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
       and rr.status in ('reserved','checked_in') and rs.status in ('reserved','checked_in')
       and rs.arrival_date < ${occupiedUntil}::date and greatest(rs.departure_date, rs.arrival_date + 1) > ${payload.checkInDate}::date
   `;
-  if (roomsForType.length - unassigned.count < payload.roomCount) throw new ReservationRequestError("That room type no longer has enough inventory for those dates.", 409);
+  if (roomsForType.length - unassigned.count < line.roomCount) throw new ReservationRequestError("That room type no longer has enough inventory for those dates.", 409);
+  // A day-use stay is priced as one room charge for its arrival date.
+  const nights = dayUse ? 1 : stayNights;
+  if (line.baseNightlyRatesCents.length !== nights || line.nightlyRatesCents.length !== nights) throw new ReservationRequestError(dayUse ? "Enter the day-use room rate." : "Enter one nightly rate for every night of the stay.");
+  const serverNightlyRatesCents = line.baseNightlyRatesCents.map((rate) => applyStackedPromotions(rate, promotions));
+  if (serverNightlyRatesCents.some((rate, index) => rate !== line.nightlyRatesCents[index])) {
+    throw new ReservationRequestError("Promotion pricing changed. Review the nightly rates and try again.", 409);
+  }
+  return { roomType, selectedRooms: selectedRooms as Array<{ id: string; number: string }>, promotions };
+}
+
+export async function createProductionReservationTransaction(tx: TransactionSql, session: PropertySession, payload: ReservationPayload) {
+  await validateProductionRateCode(tx, session.propertyId, payload.rateCode);
+  // Equal dates are a day-use stay: one room charge, and the room is held for
+  // its arrival date. Overlap checks treat every day-use stay the same way.
+  const dayUse = payload.checkoutDate === payload.checkInDate;
+  const stayNights = Math.round((new Date(`${payload.checkoutDate}T12:00:00Z`).getTime() - new Date(`${payload.checkInDate}T12:00:00Z`).getTime()) / 86_400_000);
+  const lines: RoomLine[] = [{ roomTypeId: payload.roomTypeId, roomCount: payload.roomCount, roomNumbers: payload.roomNumbers, baseNightlyRatesCents: payload.baseNightlyRatesCents, nightlyRatesCents: payload.nightlyRatesCents }, ...payload.additionalRooms];
+  if (new Set(lines.map((line) => line.roomTypeId)).size !== lines.length) throw new ReservationRequestError("List each room type once; set its number of rooms instead.");
+  const checkedLines = [];
+  for (const [index, line] of lines.entries()) checkedLines.push({ ...line, ...(await checkRoomLine(tx, session, payload, line, index === 0)) });
+  const { roomType } = checkedLines[0];
+  const totalRoomCount = lines.reduce((sum, line) => sum + line.roomCount, 0);
   if (payload.companyId) {
     const [company] = await tx<Array<{ id: string; status: string }>>`select id,status from companies where id=${payload.companyId}::uuid and property_id=${session.propertyId}::uuid`;
     if (!company || company.status !== "active") throw new ReservationRequestError("Select an active company for Direct Bill.");
@@ -427,11 +466,6 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   }
   // A day-use stay is priced as one room charge for its arrival date.
   const nights = dayUse ? 1 : stayNights;
-  if (payload.baseNightlyRatesCents.length !== nights || payload.nightlyRatesCents.length !== nights) throw new ReservationRequestError(dayUse ? "Enter the day-use room rate." : "Enter one nightly rate for every night of the stay.");
-  const serverNightlyRatesCents = payload.baseNightlyRatesCents.map((rate) => applyStackedPromotions(rate, selectedPromotions));
-  if (serverNightlyRatesCents.some((rate, index) => rate !== payload.nightlyRatesCents[index])) {
-    throw new ReservationRequestError("Promotion pricing changed. Review the nightly rates and try again.", 409);
-  }
   // Booking sources are configured in Settings. Resolve the active record
   // here rather than recreating it with a zero commission on every booking.
   const bookingSources = await tx<Array<{ id: string; name: string; type: string; commissionBasisPoints: number }>>`
@@ -444,7 +478,7 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   if (!bookingSource) throw new ReservationRequestError("Select an active booking source configured in Settings.", 409);
   const otaPaymentStatus = bookingSource.type.toLowerCase() === "ota" ? payload.otaPaymentStatus ?? "Guest Pays Hotel" : null;
   const confirmationNumber = `PMS-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900 + 100)}`;
-  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${payload.roomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${otaPaymentStatus},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: bookingSource.name })}::text) returning id`;
+  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${totalRoomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${otaPaymentStatus},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: bookingSource.name })}::text) returning id`;
   for (const [appliedOrder, promotionId] of payload.promotionIds.entries()) {
     await tx`insert into reservation_promotions (property_id,reservation_id,promotion_id,applied_order) values (${session.propertyId}::uuid,${reservation.id}::uuid,${promotionId}::uuid,${appliedOrder})`;
   }
@@ -456,10 +490,13 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
     await tx`insert into dnr_overrides (property_id,reservation_id,guest_id,reason)
       values (${session.propertyId}::uuid,${reservation.id}::uuid,${guestId}::uuid,${payload.dnrOverrideReason})`;
   }
-  const reservationRoomsCreated: Array<{ id: string; roomNumber: number }> = [];
-  for (let index = 0; index < payload.roomCount; index += 1) {
-    const [reservationRoom] = await tx<Array<{ id: string }>>`insert into reservation_rooms (property_id,reservation_id,room_type_id,room_id,status) values (${session.propertyId}::uuid,${reservation.id}::uuid,${roomType.id}::uuid,${selectedRooms[index]?.id || null}::uuid,'reserved') returning id`;
-    reservationRoomsCreated.push({ id: reservationRoom.id, roomNumber: index + 1 });
+  const reservationRoomsCreated: Array<{ id: string; roomNumber: number; label: string; baseNightlyRatesCents: number[]; nightlyRatesCents: number[] }> = [];
+  for (const line of checkedLines) {
+    for (let index = 0; index < line.roomCount; index += 1) {
+      const room = line.selectedRooms[index];
+      const [reservationRoom] = await tx<Array<{ id: string }>>`insert into reservation_rooms (property_id,reservation_id,room_type_id,room_id,status) values (${session.propertyId}::uuid,${reservation.id}::uuid,${line.roomType.id}::uuid,${room?.id || null}::uuid,'reserved') returning id`;
+      reservationRoomsCreated.push({ id: reservationRoom.id, roomNumber: reservationRoomsCreated.length + 1, label: room?.number ?? String(reservationRoomsCreated.length + 1), baseNightlyRatesCents: line.baseNightlyRatesCents, nightlyRatesCents: line.nightlyRatesCents });
+    }
   }
   // A group starts with one shared folio. This is important: it lets the
   // front desk collect one payment for the complete stay, while checkout can
@@ -467,7 +504,7 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   // their room-specific folio as before.
   let sharedGroupFolioId: string | null = null;
   let primaryFolioId: string | null = null;
-  if (payload.roomCount > 1) {
+  if (totalRoomCount > 1) {
     const folioNumber = await allocateProductionDocumentNumber(tx, session.propertyId);
     const [folio] = await tx<Array<{ id: string }>>`
       insert into folios (property_id,reservation_id,reservation_room_id,number,name,status)
@@ -491,12 +528,12 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
     for (let night = 0; night < nights; night += 1) {
       const date = new Date(`${payload.checkInDate}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + night);
       const stayDate = date.toISOString().slice(0, 10);
-      const baseRate = payload.baseNightlyRatesCents[night];
-      const rate = payload.nightlyRatesCents[night];
+      const baseRate = reservationRoom.baseNightlyRatesCents[night];
+      const rate = reservationRoom.nightlyRatesCents[night];
       await tx`insert into nightly_rates (property_id,reservation_room_id,stay_date,base_rate_cents,discount_cents,final_rate_cents) values (${session.propertyId}::uuid,${reservationRoom.id}::uuid,${stayDate}::date,${baseRate},${baseRate - rate},${rate})`;
       const [charge] = await tx<Array<{ id: string }>>`
         insert into charges (property_id,folio_id,reservation_room_id,type,description,service_date,amount_cents,taxable,status)
-        values (${session.propertyId}::uuid,${folioId}::uuid,${reservationRoom.id}::uuid,'Room Rent',${`Room ${selectedRooms[reservationRoom.roomNumber - 1]?.number ?? reservationRoom.roomNumber} · ${dayUse ? "Day use · " : ""}${stayDate}`},${stayDate}::date,${rate},${!payload.taxExempt},'posted')
+        values (${session.propertyId}::uuid,${folioId}::uuid,${reservationRoom.id}::uuid,'Room Rent',${`Room ${reservationRoom.label} · ${dayUse ? "Day use · " : ""}${stayDate}`},${stayDate}::date,${rate},${!payload.taxExempt},'posted')
         returning id
       `;
       // Initial room rent is a financial posting just like a manually added
@@ -533,7 +570,7 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
       }
     }
   }
-  const roomRentCents = payload.nightlyRatesCents.reduce((sum, rate) => sum + rate, 0) * payload.roomCount;
+  const roomRentCents = checkedLines.reduce((sum, line) => sum + line.nightlyRatesCents.reduce((nightSum, rate) => nightSum + rate, 0) * line.roomCount, 0);
   const taxCents = payload.taxExempt ? 0 : calculateTaxCents(roomRentCents, payload.taxRatePercentage / 100);
   // Settings decide per OTA payment category whether the entered amount has
   // commission deducted or is already net to the hotel.
@@ -557,12 +594,14 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
     reason: "Booking commission",
   });
   const totalCents = roomRentCents + taxCents;
-  const [roomTypeName] = await tx<Array<{ name: string }>>`select name from room_types where id=${roomType.id}::uuid`;
-  const roomLabel = selectedRooms.length ? `Room ${selectedRooms.map((room) => room!.number).join(", ")}` : "room unassigned";
-  await logReservationActivity(tx, session, reservation.id, "Reservation", `Reservation created · ${confirmationNumber} · ${payload.firstName} ${payload.lastName} · ${payload.checkInDate} → ${payload.checkoutDate}${dayUse ? " (day use)" : ""} · ${payload.roomCount} × ${roomTypeName?.name ?? "room"}, ${roomLabel} · ${payload.rateCode} · ${bookingSource.name} · total ${money(totalCents)}${payload.companyId ? " · direct bill" : ""}${payload.taxExempt ? " · tax exempt" : ""}`);
+  const typeNames = await tx<Array<{ id: string; name: string }>>`select id,name from room_types where id in ${tx(checkedLines.map((line) => line.roomType.id))}`;
+  const allSelected = checkedLines.flatMap((line) => line.selectedRooms);
+  const roomLabel = allSelected.length ? `Room ${allSelected.map((room) => room.number).join(", ")}` : "room unassigned";
+  const typeLabel = checkedLines.map((line) => `${line.roomCount} × ${typeNames.find((type) => type.id === line.roomType.id)?.name ?? "room"}`).join(" + ");
+  await logReservationActivity(tx, session, reservation.id, "Reservation", `Reservation created · ${confirmationNumber} · ${payload.firstName} ${payload.lastName} · ${payload.checkInDate} → ${payload.checkoutDate}${dayUse ? " (day use)" : ""} · ${typeLabel}, ${roomLabel} · ${payload.rateCode} · ${bookingSource.name} · total ${money(totalCents)}${payload.companyId ? " · direct bill" : ""}${payload.taxExempt ? " · tax exempt" : ""}`);
   if (commissionCents > 0) await logReservationActivity(tx, session, reservation.id, "Commission", `OTA commission ${money(commissionCents)} (${commissionCents === ota.commissionCents ? `${bookingSource.commissionBasisPoints / 100}%` : "entered from OTA"}) · ${otaPaymentStatus ?? "payable by hotel"}`);
   if (identity?.guestStatus === "do_not_rent" && payload.dnrOverrideReason) await logReservationActivity(tx, session, reservation.id, "Guest", `Do Not Rent override approved: ${payload.dnrOverrideReason}`);
-  return { guestId, reservationId: reservation.id, groupReservation: payload.roomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents, otaNetCents: ota.grossCents - commissionCents, otaPaymentStatus, totalCents, balanceCents: ota.commissionDeducted && commissionCents > 0 ? totalCents - commissionCents : totalCents, version: 1 };
+  return { guestId, reservationId: reservation.id, groupReservation: totalRoomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents, otaNetCents: ota.grossCents - commissionCents, otaPaymentStatus, totalCents, balanceCents: ota.commissionDeducted && commissionCents > 0 ? totalCents - commissionCents : totalCents, version: 1 };
 }
 
 export async function POST(request: Request) {
@@ -821,6 +860,12 @@ const updateSchema = z.object({
   // Who booked the added nights of an extension (a booking source name):
   // the same OTA, another OTA, or Walk-In / direct (no commission).
   extensionSource: z.string().trim().min(1).max(120).optional(),
+  // Rent before tax for single nights of single rooms (date change or rate edit).
+  nightlyRates: z.array(z.object({
+    reservationRoomId: z.string().uuid(),
+    stayDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    amountCents: z.number().int().nonnegative().max(10_000_000),
+  })).max(5_000).optional(),
   // Occupancy and pets are stay details kept in the reservation notes.
   details: z.object({
     adults: z.number().int().min(1).max(20).optional(),
@@ -881,42 +926,101 @@ async function updateProductionReservation(
         `;
         return row.cents;
       };
-      const rentBeforeCents = changes.departureDate && changes.departureDate !== current.departureDate ? await postedRentCents() : 0;
-      if (changes.departureDate && changes.departureDate !== current.departureDate) {
+      const datesChanged = nextArrival !== current.arrivalDate || nextDeparture !== current.departureDate;
+      const rateEdits = changes.nightlyRates ?? [];
+      if (nextArrival !== current.arrivalDate) {
+        if (current.status !== "reserved") throw new ReservationRequestError("The check-in date can only change before the guest checks in.", 409);
+        const [openDay] = await tx<Array<{ date: string }>>`select business_date::text as date from business_days where property_id=${session.propertyId}::uuid and status='open' order by business_date limit 1`;
+        if (openDay && nextArrival < openDay.date) throw new ReservationRequestError(`Check-in cannot be before the current business date (${openDay.date}).`, 409);
+      }
+      const rentBeforeCents = datesChanged ? await postedRentCents() : 0;
+      if (datesChanged || rateEdits.length) {
+        // The stay's nights; a same-day (day-use) stay keeps its arrival night.
+        const stayNights: string[] = [];
+        for (let night = nextArrival; night < nextDeparture || (!stayNights.length && night === nextArrival); night = addDays(night, 1)) stayNights.push(night);
+        const firstNight = stayNights[0];
+        const endNight = addDays(stayNights[stayNights.length - 1], 1);
         const roomRows = await tx<Array<{ id: string; folioId: string | null }>>`
-          -- A group shares one folio with no room link; extend onto it rather
-          -- than opening a new folio per room.
+          -- A group shares one folio with no room link; add nights onto it
+          -- rather than opening a new folio per room.
           select rr.id, coalesce(f.id,(select gf.id from folios gf where gf.reservation_id=rr.reservation_id order by gf.created_at limit 1)) as "folioId"
           from reservation_rooms rr
           left join folios f on f.reservation_room_id=rr.id
           where rr.reservation_id=${id}::uuid and rr.property_id=${session.propertyId}::uuid for update of rr
         `;
-        if (changes.departureDate > current.departureDate) {
-          // The added nights must be free in every assigned room; otherwise
-          // the extension would double-book a room another guest holds.
-          const addedFrom = current.departureDate === current.arrivalDate ? addDays(current.arrivalDate, 1) : current.departureDate;
-          if (addedFrom < changes.departureDate) {
-            const [clash] = await tx<Array<{ number: string }>>`
-              select room.number from reservation_rooms rr
-              join rooms room on room.id=rr.room_id
-              where rr.reservation_id=${id}::uuid and (
-                exists (
-                  select 1 from reservation_rooms other_rr join reservations other on other.id=other_rr.reservation_id
-                  where other_rr.room_id=rr.room_id and other.id<>${id}::uuid
-                    and other_rr.status in ('reserved','checked_in') and other.status in ('reserved','checked_in')
-                    and other.arrival_date < ${changes.departureDate}::date and greatest(other.departure_date, other.arrival_date + 1) > ${addedFrom}::date
-                ) or exists (
-                  select 1 from maintenance_orders mo
-                  where mo.room_id=rr.room_id and mo.rentable=false and mo.status not in ('resolved','cancelled')
-                    and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockFrom')::date else null end < ${changes.departureDate}::date
-                    and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockTo')::date else null end >= ${addedFrom}::date
-                )
-              ) limit 1
-            `;
-            if (clash) throw new ReservationRequestError(`Room ${clash.number} is booked or blocked on the added nights. Move the guest to a free room first.`, 409);
+        const posted = await tx<Array<{ id: string; reservationRoomId: string; serviceDate: string; amountCents: number; taxCents: number }>>`
+          select c.id,c.reservation_room_id as "reservationRoomId",c.service_date::text as "serviceDate",c.amount_cents as "amountCents",
+            coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)::int as "taxCents"
+          from charges c
+          where c.reservation_room_id in (select id from reservation_rooms where reservation_id=${id}::uuid)
+            and c.type='Room Rent' and c.status='posted'
+          order by c.service_date
+          for update
+        `;
+        // Nights outside the new dates (moved check-in or early departure):
+        // void them and reverse their revenue/tax, as cancellation does.
+        const unused = posted.filter((charge) => charge.serviceDate < firstNight || charge.serviceDate >= endNight);
+        if (unused.length) {
+          await tx`update charges set status='voided',updated_at=now() where id in ${tx(unused.map((charge) => charge.id))}`;
+          const businessDate = await propertyBusinessDate(tx, session.propertyId);
+          for (const charge of unused) {
+            if (charge.amountCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: reversalBusinessDate(businessDate, charge.serviceDate), resourceType: "stay-shortened", resourceId: id, description: `Stay dates changed room-rent reversal · ${charge.serviceDate}`, debitAccount: "Room Revenue", creditAccount: "Guest Receivable", amountCents: charge.amountCents });
+            if (charge.taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: reversalBusinessDate(businessDate, charge.serviceDate), resourceType: "stay-shortened-tax", resourceId: id, description: `Stay dates changed room-tax reversal · ${charge.serviceDate}`, debitAccount: "Tax Payable", creditAccount: "Guest Receivable", amountCents: charge.taxCents });
           }
-          for (const roomRow of roomRows) {
-            let folioId = roomRow.folioId;
+        }
+        await tx`
+          delete from nightly_rates where reservation_room_id in (select id from reservation_rooms where reservation_id=${id}::uuid)
+            and (stay_date < ${firstNight}::date or stay_date >= ${endNight}::date)
+        `;
+        const kept = posted.filter((charge) => !unused.includes(charge));
+        const addsNights = roomRows.some((room) => stayNights.some((night) => !kept.some((charge) => charge.reservationRoomId === room.id && charge.serviceDate === night)));
+        if (addsNights) {
+          // Added nights must be free in every assigned room; otherwise the
+          // change would double-book a room another guest holds.
+          const [clash] = await tx<Array<{ number: string }>>`
+            select room.number from reservation_rooms rr
+            join rooms room on room.id=rr.room_id
+            where rr.reservation_id=${id}::uuid and (
+              exists (
+                select 1 from reservation_rooms other_rr join reservations other on other.id=other_rr.reservation_id
+                where other_rr.room_id=rr.room_id and other.id<>${id}::uuid
+                  and other_rr.status in ('reserved','checked_in') and other.status in ('reserved','checked_in')
+                  and other.arrival_date < ${endNight}::date and greatest(other.departure_date, other.arrival_date + 1) > ${firstNight}::date
+              ) or exists (
+                select 1 from maintenance_orders mo
+                where mo.room_id=rr.room_id and mo.rentable=false and mo.status not in ('resolved','cancelled')
+                  and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockFrom')::date else null end < ${endNight}::date
+                  and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockTo')::date else null end >= ${firstNight}::date
+              )
+            ) limit 1
+          `;
+          if (clash) throw new ReservationRequestError(`Room ${clash.number} is booked or blocked on the new dates. Move the guest to a free room first.`, 409);
+        }
+        const taxFor = (amountCents: number) => current.taxExempt ? 0 : calculateTaxCents(amountCents, current.taxRateBasisPoints / 10_000);
+        for (const roomRow of roomRows) {
+          const roomCharges = kept.filter((charge) => charge.reservationRoomId === roomRow.id);
+          // A new night is priced as entered, else as the extension rate, else
+          // like the room's nearest existing night.
+          const nearestRate = (night: string) => [...roomCharges].sort((left, right) =>
+            Math.abs(Date.parse(left.serviceDate) - Date.parse(night)) - Math.abs(Date.parse(right.serviceDate) - Date.parse(night)))[0]?.amountCents;
+          let folioId = roomRow.folioId;
+          for (const night of stayNights) {
+            const edit = rateEdits.find((rate) => rate.reservationRoomId === roomRow.id && rate.stayDate === night)?.amountCents;
+            const existing = roomCharges.find((charge) => charge.serviceDate === night);
+            if (existing) {
+              if (edit === undefined || edit === existing.amountCents) continue;
+              const nextTax = taxFor(edit);
+              await tx`update charges set amount_cents=${edit},updated_at=now() where id=${existing.id}::uuid`;
+              await tx`update nightly_rates set base_rate_cents=${edit},discount_cents=0,final_rate_cents=${edit} where reservation_room_id=${roomRow.id}::uuid and stay_date=${night}::date`;
+              await tx`delete from charge_taxes where charge_id=${existing.id}::uuid`;
+              if (!current.taxExempt) await tx`insert into charge_taxes (property_id,charge_id,name,rate_basis_points,amount_cents) values (${session.propertyId}::uuid,${existing.id}::uuid,'Room Tax',${current.taxRateBasisPoints},${nextTax})`;
+              const roomDifference = edit - existing.amountCents;
+              await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: night, resourceType: "room-rent-adjustment", resourceId: existing.id, description: `Room rent adjustment · ${night}`, debitAccount: roomDifference > 0 ? "Guest Receivable" : "Room Revenue", creditAccount: roomDifference > 0 ? "Room Revenue" : "Guest Receivable", amountCents: Math.abs(roomDifference) });
+              const taxDifference = nextTax - existing.taxCents;
+              if (taxDifference !== 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: night, resourceType: "room-tax-adjustment", resourceId: existing.id, description: `Room tax adjustment · ${night}`, debitAccount: taxDifference > 0 ? "Guest Receivable" : "Tax Payable", creditAccount: taxDifference > 0 ? "Tax Payable" : "Guest Receivable", amountCents: Math.abs(taxDifference) });
+              continue;
+            }
+            const nightlyRateCents = edit ?? changes.extensionNightlyRateCents ?? nearestRate(night) ?? 0;
             if (!folioId) {
               const number = await allocateProductionDocumentNumber(tx, session.propertyId);
               const [folio] = await tx<Array<{ id: string }>>`
@@ -926,67 +1030,30 @@ async function updateProductionReservation(
               `;
               folioId = folio.id;
             }
-            const [lastRate] = await tx<Array<{ finalRateCents: number }>>`
-              select final_rate_cents as "finalRateCents" from nightly_rates
-              where reservation_room_id=${roomRow.id}::uuid
-              order by stay_date desc limit 1
+            await tx`
+              insert into nightly_rates (property_id,reservation_room_id,stay_date,base_rate_cents,discount_cents,final_rate_cents)
+              values (${session.propertyId}::uuid,${roomRow.id}::uuid,${night}::date,${nightlyRateCents},0,${nightlyRateCents})
+              on conflict (reservation_room_id,stay_date) do update set base_rate_cents=excluded.base_rate_cents,discount_cents=excluded.discount_cents,final_rate_cents=excluded.final_rate_cents
             `;
-            const nightlyRateCents = changes.extensionNightlyRateCents ?? lastRate?.finalRateCents ?? 0;
-            for (let stayDate = current.departureDate; stayDate < changes.departureDate;) {
-              await tx`
-                insert into nightly_rates (property_id,reservation_room_id,stay_date,base_rate_cents,discount_cents,final_rate_cents)
-                values (${session.propertyId}::uuid,${roomRow.id}::uuid,${stayDate}::date,${nightlyRateCents},0,${nightlyRateCents})
-                on conflict (reservation_room_id,stay_date) do update set base_rate_cents=excluded.base_rate_cents,discount_cents=excluded.discount_cents,final_rate_cents=excluded.final_rate_cents
-              `;
-              const [existingCharge] = await tx<Array<{ id: string }>>`
-                select id from charges where reservation_room_id=${roomRow.id}::uuid
-                  and type='Room Rent' and status='posted' and service_date=${stayDate}::date limit 1
-              `;
-              if (!existingCharge) {
-                const [charge] = await tx<Array<{ id: string }>>`
-                  insert into charges (property_id,folio_id,reservation_room_id,type,description,service_date,amount_cents,taxable,status)
-                  values (${session.propertyId}::uuid,${folioId}::uuid,${roomRow.id}::uuid,'Room Rent',${`Extended stay · ${stayDate}`},${stayDate}::date,${nightlyRateCents},${!current.taxExempt},'posted')
-                  returning id
-                `;
-                // Extended nights must reach the ledger like booked nights or
-                // Revenue would never include them.
-                if (nightlyRateCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: stayDate, resourceType: "charge", resourceId: charge.id, description: `Extended stay · ${stayDate}`, debitAccount: "Guest Receivable", creditAccount: "Room Revenue", amountCents: nightlyRateCents });
-                if (!current.taxExempt) {
-                  const taxCents = calculateTaxCents(nightlyRateCents, current.taxRateBasisPoints / 10_000);
-                  await tx`insert into charge_taxes (property_id,charge_id,name,rate_basis_points,amount_cents) values (${session.propertyId}::uuid,${charge.id}::uuid,'Room Tax',${current.taxRateBasisPoints},${taxCents})`;
-                  if (taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: stayDate, resourceType: "charge-tax", resourceId: charge.id, description: `Extended stay tax · ${stayDate}`, debitAccount: "Guest Receivable", creditAccount: "Tax Payable", amountCents: taxCents });
-                }
-              }
-              const next = new Date(`${stayDate}T12:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
-              stayDate = next.toISOString().slice(0, 10);
+            const description = night >= current.departureDate ? `Extended stay · ${night}` : `Room rent · ${night}`;
+            const [charge] = await tx<Array<{ id: string }>>`
+              insert into charges (property_id,folio_id,reservation_room_id,type,description,service_date,amount_cents,taxable,status)
+              values (${session.propertyId}::uuid,${folioId}::uuid,${roomRow.id}::uuid,'Room Rent',${description},${night}::date,${nightlyRateCents},${!current.taxExempt},'posted')
+              returning id
+            `;
+            // Added nights reach the ledger like booked nights or Revenue
+            // would never include them.
+            if (nightlyRateCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: night, resourceType: "charge", resourceId: charge.id, description, debitAccount: "Guest Receivable", creditAccount: "Room Revenue", amountCents: nightlyRateCents });
+            if (!current.taxExempt) {
+              const taxCents = taxFor(nightlyRateCents);
+              await tx`insert into charge_taxes (property_id,charge_id,name,rate_basis_points,amount_cents) values (${session.propertyId}::uuid,${charge.id}::uuid,'Room Tax',${current.taxRateBasisPoints},${taxCents})`;
+              if (taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: night, resourceType: "charge-tax", resourceId: charge.id, description: `${description} tax`, debitAccount: "Guest Receivable", creditAccount: "Tax Payable", amountCents: taxCents });
             }
           }
-        } else {
-          // Shortened stay (early departure): void the unused nights and
-          // reverse their revenue/tax, as cancellation does, so Revenue and
-          // the ledger stay in step with the folio.
-          // Shortening to the arrival date makes a day-use stay: its arrival
-          // night stays as the day-use charge.
-          const keepBefore = changes.departureDate === nextArrival ? addDays(nextArrival, 1) : changes.departureDate;
-          const unused = await tx<Array<{ id: string; serviceDate: string; amountCents: number; taxCents: number }>>`
-            select c.id,c.service_date::text as "serviceDate",c.amount_cents as "amountCents",
-              coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)::int as "taxCents"
-            from charges c
-            where c.reservation_room_id in (select id from reservation_rooms where reservation_id=${id}::uuid)
-              and c.type='Room Rent' and c.status='posted' and c.service_date >= ${keepBefore}::date
-            for update
-          `;
-          if (unused.length) await tx`update charges set status='voided',updated_at=now() where id in ${tx(unused.map((charge) => charge.id))}`;
-          const businessDate = await propertyBusinessDate(tx, session.propertyId);
-          for (const charge of unused) {
-            if (charge.amountCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: reversalBusinessDate(businessDate, charge.serviceDate), resourceType: "stay-shortened", resourceId: id, description: `Early departure room-rent reversal · ${charge.serviceDate}`, debitAccount: "Room Revenue", creditAccount: "Guest Receivable", amountCents: charge.amountCents });
-            if (charge.taxCents > 0) await postProductionLedger(tx, { propertyId: session.propertyId, businessDate: reversalBusinessDate(businessDate, charge.serviceDate), resourceType: "stay-shortened-tax", resourceId: id, description: `Early departure room-tax reversal · ${charge.serviceDate}`, debitAccount: "Tax Payable", creditAccount: "Guest Receivable", amountCents: charge.taxCents });
-          }
-          await tx`
-            delete from nightly_rates where reservation_room_id in (
-              select id from reservation_rooms where reservation_id=${id}::uuid
-            ) and stay_date >= ${keepBefore}::date
-          `;
+        }
+        if (rateEdits.length) {
+          const rentAfter = await postedRentCents();
+          if (!datesChanged && rentAfter !== (posted.reduce((sum, charge) => sum + charge.amountCents, 0))) await logReservationActivity(tx, session, id, "Rate", `Room rent changed ${money(posted.reduce((sum, charge) => sum + charge.amountCents, 0))} → ${money(rentAfter)}`);
         }
       }
 
@@ -995,9 +1062,9 @@ async function updateProductionReservation(
       // An extension booked through another source charges that source's
       // commission on the added nights only (Walk-In / direct: none).
       let extensionSourceNote = "";
-      if (changes.departureDate && changes.departureDate !== current.departureDate && rentBeforeCents > 0) {
+      if (datesChanged && rentBeforeCents > 0) {
         const commission = await readReservationCommission(tx, session.propertyId, id);
-        const [extensionSource] = changes.extensionSource && changes.departureDate > current.departureDate
+        const [extensionSource] = changes.extensionSource && nextDeparture > current.departureDate
           ? await tx<Array<{ id: string; name: string; commissionBasisPoints: number }>>`
               select id,name,commission_basis_points as "commissionBasisPoints" from booking_sources
               where property_id=${session.propertyId}::uuid and lower(name)=lower(${changes.extensionSource}) limit 1
@@ -1068,7 +1135,7 @@ async function updateProductionReservation(
           nextArrival !== current.arrivalDate ? `arrival ${current.arrivalDate} → ${nextArrival}` : "",
           nextDeparture !== current.departureDate ? `departure ${current.departureDate} → ${nextDeparture}` : "",
         ].filter(Boolean).join(", ");
-        const extended = (nextDeparture > current.departureDate && changes.extensionNightlyRateCents !== undefined ? ` · added nights at ${money(changes.extensionNightlyRateCents)}` : "") + extensionSourceNote;
+        const extended = (nextDeparture > current.departureDate && changes.extensionNightlyRateCents !== undefined ? ` · added nights at ${money(changes.extensionNightlyRateCents)}` : "") + (rateEdits.length ? " · nightly rates set" : "") + extensionSourceNote;
         await logReservationActivity(tx, session, id, "Stay", `${nextDeparture > current.departureDate ? "Stay extended" : nextDeparture < current.departureDate ? "Stay shortened" : "Stay dates changed"}: ${parts}${extended}`);
       }
       await tx`
@@ -1081,12 +1148,21 @@ async function updateProductionReservation(
           updated_at=now()
         where id=${id}::uuid and property_id=${session.propertyId}::uuid
       `;
-      return { kind: "updated" as const, version: expectedVersion + 1 };
+      // A date or rate change returns the new folio figures so the screen
+      // shows what the server posted.
+      const [figures] = datesChanged || rateEdits.length ? await tx<Array<{ roomRentCents: number; taxCents: number; chargesCents: number; paidCents: number }>>`
+        select
+          coalesce((select sum(c.amount_cents) from charges c join folios f on f.id=c.folio_id where f.reservation_id=${id}::uuid and c.type='Room Rent' and c.status='posted'),0)::int as "roomRentCents",
+          coalesce((select sum(ct.amount_cents) from charge_taxes ct join charges c on c.id=ct.charge_id join folios f on f.id=c.folio_id where f.reservation_id=${id}::uuid and c.type='Room Rent' and c.status='posted'),0)::int as "taxCents",
+          coalesce((select sum(c.amount_cents + coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios f on f.id=c.folio_id where f.reservation_id=${id}::uuid and c.status='posted'),0)::int as "chargesCents",
+          coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=${id}::uuid),0)::int as "paidCents"
+      ` : [];
+      return { kind: "updated" as const, version: expectedVersion + 1, totals: figures ? { roomRentCents: figures.roomRentCents, taxCents: figures.taxCents, totalCents: figures.roomRentCents + figures.taxCents, balanceCents: figures.chargesCents - figures.paidCents } : undefined };
     });
     if (outcome.kind === "not-found") return Response.json({ error: "Reservation not found.", code: "NOT_FOUND" }, { status: 404 });
     if (outcome.kind === "conflict") return Response.json({ error: "Another employee changed this reservation. Review the latest version before saving.", code: "EDIT_CONFLICT", currentVersion: outcome.currentVersion }, { status: 409 });
     await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "reservation", entityId: id, action: "updated", entityVersion: outcome.version, payload: {} });
-    return Response.json({ id, version: outcome.version, ...changes });
+    return Response.json({ id, version: outcome.version, ...changes, ...(outcome.totals ?? {}) });
   } catch (error) {
     if (error instanceof ReservationRequestError) return Response.json({ error: error.message }, { status: error.status });
     console.error("Production reservation update failed", { propertyId: session.propertyId, id, error });

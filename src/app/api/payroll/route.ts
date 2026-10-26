@@ -6,6 +6,18 @@ import { propertyBusinessDate } from "@/server/finance/production-finance";
 
 const updateSchema = z.object({ id: z.string().uuid(), status: z.enum(["Pending", "Approved", "Paid"]).optional(), adjustmentCents: z.number().int().min(-10_000_000).max(10_000_000).optional() });
 type StoredPayroll = { payroll?: { frequency?: string } };
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const rangeSchema = z.object({ start: isoDate.optional(), end: isoDate.optional() }).refine((value) => {
+  if (!value.start && !value.end) return true;
+  if (!value.start || !value.end || value.end < value.start) return false;
+  return (Date.parse(value.end) - Date.parse(value.start)) / 86_400_000 <= 93;
+});
+
+function shiftDate(date: string, days: number) {
+  const next = new Date(`${date}T12:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next.toISOString().slice(0, 10);
+}
 
 function datesForPeriod(today: string, frequency: string) {
   const date = new Date(`${today}T12:00:00Z`);
@@ -38,14 +50,23 @@ export async function GET(request: Request) {
   try {
     const session = await requirePropertySession(request, "payroll.manage");
     if (!hasProductionDatabase()) return Response.json({ employees: [], entries: [], history: [] });
+    const params = new URL(request.url).searchParams;
+    const parsedRange = rangeSchema.safeParse({ start: params.get("startDate") ?? undefined, end: params.get("endDate") ?? undefined });
+    if (!parsedRange.success) return Response.json({ error: "Choose a payroll date range of up to 93 days." }, { status: 400 });
+    const range = parsedRange.data.start && parsedRange.data.end ? { start: parsedRange.data.start, end: parsedRange.data.end } : null;
     const result = await productionSql().begin(async (tx) => {
       const [configured] = await tx<Array<{ value: StoredPayroll }>>`select value from property_settings where property_id=${session.propertyId}::uuid and key='application_settings'`;
       const frequency = configured?.value?.payroll?.frequency ?? "Biweekly";
-      const periodDates = datesForPeriod(await propertyBusinessDate(tx, session.propertyId), frequency);
-      const payDate = new Date(`${periodDates.end}T12:00:00Z`); payDate.setUTCDate(payDate.getUTCDate() + 3);
+      const today = await propertyBusinessDate(tx, session.propertyId);
+      const currentDates = datesForPeriod(today, frequency);
+      const previousDates = datesForPeriod(shiftDate(currentDates.start, -1), frequency);
+      // Staff can run payroll for any dates; the configured period is the default.
+      const custom = range && (range.start !== currentDates.start || range.end !== currentDates.end) && (range.start !== previousDates.start || range.end !== previousDates.end);
+      const periodDates = range ?? currentDates;
+      const payDate = shiftDate(periodDates.end, 3);
       const [period] = await tx<Array<{ id: string; start: string; end: string; payDate: string; status: string }>>`
         insert into pay_periods (property_id,starts_on,ends_on,scheduled_pay_date,status)
-        values (${session.propertyId}::uuid,${periodDates.start},${periodDates.end},${payDate.toISOString().slice(0,10)},'open')
+        values (${session.propertyId}::uuid,${periodDates.start},${periodDates.end},${payDate},${custom ? "custom" : "open"})
         on conflict (property_id,starts_on,ends_on) do update set scheduled_pay_date=excluded.scheduled_pay_date
         returning id,starts_on::text as start,ends_on::text as end,scheduled_pay_date::text as "payDate",status
       `;
@@ -78,14 +99,29 @@ export async function GET(request: Request) {
             and h.assignment_status='completed' and h.service_date between ${period.start}::date and ${period.end}::date)::int as "roomsCleaned"
         from payroll_entries pe where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id=${period.id}::uuid order by pe.created_at
       `;
-      const history = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; hourlyRateCents: number | null; description: string | null; paid: boolean; periodId: string; startsOn: string; endsOn: string }>>`
-        select pe.id,pe.employee_id as "employeeId",pe.regular_minutes as "regularMinutes",pe.rate_cents as "hourlyRateCents",pe.description,pe.paid,pe.pay_period_id as "periodId",pp.starts_on::text as "startsOn",pp.ends_on::text as "endsOn"
-        from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id
-        where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id<>${period.id}::uuid order by pp.ends_on desc limit 100
+      // Earlier periods: a paid entry keeps what was paid; an unpaid one is
+      // recounted, so time entered after the period ended is included.
+      // A custom date range only stays in history once it is approved or paid.
+      const history = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; hourlyRateCents: number | null; description: string | null; paid: boolean; periodId: string; startsOn: string; endsOn: string; roomsCleaned: number }>>`
+        select pe.id,pe.employee_id as "employeeId",
+          case when pe.paid then pe.regular_minutes else coalesce((
+            select sum(greatest(0,extract(epoch from (te.clock_out_at-te.clock_in_at))/60-te.break_minutes))::int from time_entries te
+            where te.property_id=pe.property_id and te.employee_id=pe.employee_id and te.clock_out_at is not null and te.work_date between pp.starts_on and pp.ends_on
+          ),0) end as "regularMinutes",
+          case when pe.paid then pe.rate_cents else coalesce(e.hourly_rate_cents,0) end as "hourlyRateCents",
+          pe.description,pe.paid,pe.pay_period_id as "periodId",pp.starts_on::text as "startsOn",pp.ends_on::text as "endsOn",
+          (select count(*) from housekeeping_records h where h.property_id=pe.property_id and h.housekeeper_employee_id=pe.employee_id
+            and h.assignment_status='completed' and h.service_date between pp.starts_on and pp.ends_on)::int as "roomsCleaned"
+        from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id join employees e on e.id=pe.employee_id
+        where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id<>${period.id}::uuid
+          and (pp.status<>'custom' or pe.paid or pe.description like '%"Approved"%')
+        order by pp.ends_on desc,e.name limit 100
       `;
       const mapEntry = (entry: typeof entries[number]) => { const meta = parseDescription(entry.description); return { id: entry.id, payrollPeriodId: entry.periodId, employeeId: entry.employeeId, regularMinutes: entry.regularMinutes, hourlyRateCents: entry.hourlyRateCents ?? 0, adjustmentCents: meta.adjustmentCents ?? 0, paymentStatus: entry.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending", ...("roomsCleaned" in entry ? { roomsCleaned: Number(entry.roomsCleaned) } : {}) }; };
       return {
         period: { id: period.id, label: `${period.start} to ${period.end}`, startDate: period.start, endDate: period.end, payDate: period.payDate },
+        currentPeriod: currentDates,
+        previousPeriod: previousDates,
         employees: employees.map((employee) => {
           const role = employee.role?.toLowerCase() ?? "";
           return {
