@@ -423,7 +423,7 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   else {
     const [guest] = await tx<Array<{ id: string }>>`insert into guests (property_id,first_name,last_name,phone,email,address,guest_status,room_preferences) values (${session.propertyId}::uuid,${payload.firstName},${payload.lastName},${normalizePhone(payload.phone) || null},${payload.email || null},${tx.json(address as never)},'active',${tx.json(guestPreferences as never)}) returning id`;
     guestId = guest.id;
-    await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.idType},${payload.idNumber},${normalizedId},now()+interval '1 year')`;
+    await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.idType},${payload.idNumber},${normalizedId},now()+interval '1 year') on conflict (property_id,id_type,normalized_id_number) do update set guest_id=excluded.guest_id,id_number=excluded.id_number,deleted_at=null,captured_at=now(),delete_after=excluded.delete_after`;
   }
   // A day-use stay is priced as one room charge for its arrival date.
   const nights = dayUse ? 1 : stayNights;

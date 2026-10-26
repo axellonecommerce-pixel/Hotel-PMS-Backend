@@ -237,7 +237,7 @@ export async function PATCH(request: Request) {
               await tx`update guest_identities set guest_id=${input.guestId}::uuid, id_number=${input.driverLicenseNumber}, deleted_at=null, captured_at=now(), delete_after=now()+interval '1 year' where id=${existing.id}::uuid`;
             } else {
               await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after)
-                values (${session.propertyId}::uuid,${input.guestId}::uuid,${input.idType},${input.driverLicenseNumber},${normalized},now()+interval '1 year')`;
+                values (${session.propertyId}::uuid,${input.guestId}::uuid,${input.idType},${input.driverLicenseNumber},${normalized},now()+interval '1 year') on conflict (property_id,id_type,normalized_id_number) do update set guest_id=excluded.guest_id,id_number=excluded.id_number,deleted_at=null,captured_at=now(),delete_after=excluded.delete_after`;
             }
           }
         }
@@ -288,7 +288,7 @@ export async function POST(request: Request) {
           returning id
         `;
         if (row.idType && row.idNumber?.trim()) {
-          await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guest.id}::uuid,${row.idType},${row.idNumber},${normalizedId(row.idNumber)},now()+interval '1 year')`;
+          await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guest.id}::uuid,${row.idType},${row.idNumber},${normalizedId(row.idNumber)},now()+interval '1 year') on conflict (property_id,id_type,normalized_id_number) do update set guest_id=excluded.guest_id,id_number=excluded.id_number,deleted_at=null,captured_at=now(),delete_after=excluded.delete_after`;
         }
         return { guestId: guest.id };
       });
@@ -306,7 +306,7 @@ export async function POST(request: Request) {
         if (identity) { merged += 1; await tx`update guests set first_name=${row.firstName},last_name=${row.lastName},phone=${row.phone?.replace(/\D/g, "") || null},address=${tx.json(address)},remarks=coalesce(${row.notes || null},remarks),updated_at=now() where id=${identity.guestId}::uuid and property_id=${session.propertyId}::uuid`; }
         else {
           const [guest] = await tx<Array<{ id: string }>>`insert into guests (property_id,first_name,last_name,phone,address,remarks,guest_status) values (${session.propertyId}::uuid,${row.firstName},${row.lastName},${row.phone?.replace(/\D/g, "") || null},${tx.json(address)},${row.notes || null},'active') returning id`;
-          await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guest.id}::uuid,${row.idType},${row.driverLicenseNumber},${idNumber},now()+interval '1 year')`;
+          await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guest.id}::uuid,${row.idType},${row.driverLicenseNumber},${idNumber},now()+interval '1 year') on conflict (property_id,id_type,normalized_id_number) do update set guest_id=excluded.guest_id,id_number=excluded.id_number,deleted_at=null,captured_at=now(),delete_after=excluded.delete_after`;
         }
       }
     });

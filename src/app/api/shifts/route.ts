@@ -89,13 +89,9 @@ export async function GET(request: Request) {
     const session = await requirePropertySession(request, "cash.manage");
     const sql = productionSql();
     const shift = await openShift(sql, session.propertyId);
-    const [settings] = await sql<Array<{ value: { property?: { cashFloatCents?: number } } | null }>>`
-      select value from property_settings where property_id=${session.propertyId}::uuid and key='application_settings'
-    `;
-    const floatCents = typeof settings?.value?.property?.cashFloatCents === "number" ? settings.value.property.cashFloatCents : 20_000;
-    if (!shift) return Response.json({ shift: null, floatCents });
+    if (!shift) return Response.json({ shift: null });
     const activity = await cashActivityBetween(sql, session.propertyId, shift.openedAt, null);
-    return Response.json({ shift: { ...shift, activity, expectedCents: Math.max(0, shift.openingCents + activity.netCents) }, floatCents });
+    return Response.json({ shift: { ...shift, activity, expectedCents: Math.max(0, shift.openingCents + activity.netCents) } });
   } catch (error) {
     return propertyAccessResponse(error);
   }
@@ -120,34 +116,22 @@ export async function POST(request: Request) {
           insert into business_days (property_id,business_date,status,opened_at) values (${session.propertyId}::uuid,${businessDate}::date,'open',now())
           on conflict (property_id,business_date) do update set business_date=excluded.business_date returning id
         `;
-        const [settings] = await tx<Array<{ value: { property?: { cashFloatCents?: number } } | null }>>`
-          select value from property_settings where property_id=${session.propertyId}::uuid and key='application_settings'
-        `;
-        const floatCents = typeof settings?.value?.property?.cashFloatCents === "number" ? settings.value.property.cashFloatCents : 20_000;
+        // The clerk enters the drawer balance; there is no fixed float, so the drawer's float is what it opened with.
         const [created] = await tx<Array<{ id: string; openedAt: string }>>`
           insert into cash_shifts (property_id,business_day_id,employee_id,opening_cents,drawer_float_cents,status,opened_at)
-          values (${session.propertyId}::uuid,${businessDay.id}::uuid,${clerk.id}::uuid,${input.openingCents},${floatCents},${`open:${input.shiftName}`},now())
+          values (${session.propertyId}::uuid,${businessDay.id}::uuid,${clerk.id}::uuid,${input.openingCents},${input.openingCents},${`open:${input.shiftName}`},now())
           returning id, to_char(opened_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "openedAt"
         `;
-        if (input.note || input.openingCents !== floatCents) {
+        if (input.note) {
           await tx`insert into cash_shift_transactions (property_id,cash_shift_id,type,amount_cents,note)
-            values (${session.propertyId}::uuid,${created.id}::uuid,'opening_count',${input.openingCents - floatCents},${input.note ?? `Opening count differs from the ${(floatCents / 100).toFixed(2)} float`})`;
+            values (${session.propertyId}::uuid,${created.id}::uuid,'opening_count',${input.openingCents},${input.note})`;
         }
         return { started: { id: created.id, clerk: clerk.name, shiftName: input.shiftName, openedAt: created.openedAt } };
       }
       if (!current) throw new ShiftError("There is no open shift to end.");
-      // The drawer always holds at least the float, so an empty count means
-      // the clerk has not counted yet.
-      if (input.countedCents <= 0) throw new ShiftError("Count the cash in the drawer before ending the shift.");
       const activity = await cashActivityBetween(tx, session.propertyId, current.openedAt, null);
       const expectedCents = Math.max(0, current.openingCents + activity.netCents);
-      const [settings] = await tx<Array<{ value: { property?: { cashFloatCents?: number } } | null }>>`
-        select value from property_settings where property_id=${session.propertyId}::uuid and key='application_settings'
-      `;
-      const floatCents = typeof settings?.value?.property?.cashFloatCents === "number" ? settings.value.property.cashFloatCents : 20_000;
-      // Leave what the drawer started with (never more than the float); a shift that opened empty can drop it all.
-      const keepCents = Math.min(floatCents, current.openingCents);
-      if (input.droppedCents > Math.max(0, input.countedCents - keepCents)) throw new ShiftError(`Keep $${(keepCents / 100).toFixed(2)} in the drawer for the next shift; only cash above it can be dropped.`);
+      if (input.droppedCents > input.countedCents) throw new ShiftError(`You counted $${(input.countedCents / 100).toFixed(2)}; you cannot drop more than that.`);
       if (input.countedCents !== expectedCents && !input.note) throw new ShiftError(`The drawer is ${input.countedCents < expectedCents ? "short" : "over"} by $${(Math.abs(input.countedCents - expectedCents) / 100).toFixed(2)}. Add a note explaining the difference.`);
       await tx`
         update cash_shifts set status=${`closed:${current.shiftName}`}, expected_cents=${expectedCents}, counted_cents=${input.countedCents}, closed_at=now()
