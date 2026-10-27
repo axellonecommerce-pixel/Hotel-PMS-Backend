@@ -32,7 +32,7 @@ export async function GET(request: Request) {
       const records = await productionSql()<Array<{
         id: string; version: number; confirmationNumber: string; guestId: string; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null; companyName: string | null;
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null; otaPaymentStatus: string | null;
-        taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; checkedOutDate: string | null; bookedDate: string; rawNotes: string | null; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number; collectedCents: number;
+        taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; roomTaxCents: number | null; balanceCents: number; checkedOutDate: string | null; bookedDate: string; rawNotes: string | null; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number; collectedCents: number;
         deposit: (DepositRecord & { transactions: DepositTransactionRecord[] }) | null;
         reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; roomTypeName: string | null; status: string; guestId: string | null; guestName: string | null }>;
         extraGuests: Array<{ id: string; name: string; driverLicenseNumber: string | null }>;
@@ -48,6 +48,9 @@ export async function GET(request: Request) {
           coalesce((case when r.notes like '{%' then r.notes::jsonb->>'adults' end)::int,1) as adults,coalesce((case when r.notes like '{%' then r.notes::jsonb->>'children' end)::int,0) as children,
           coalesce((case when r.notes like '{%' then r.notes::jsonb->>'petCount' end)::int,0) as "petCount",coalesce((case when r.notes like '{%' then r.notes::jsonb->>'servicePetCount' end)::int,0) as "servicePetCount",
           coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rrx on rrx.id=nr.reservation_room_id where rrx.reservation_id=r.id),0)::int as "roomRentCents",
+          -- Tax actually posted on each night's room charge (rounded per night).
+          (select sum(ct.amount_cents) from charge_taxes ct join charges c on c.id=ct.charge_id join reservation_rooms rrt on rrt.id=c.reservation_room_id
+            where rrt.reservation_id=r.id and c.type='Room Rent' and c.status='posted')::int as "roomTaxCents",
           coalesce((select sum(le.debit_cents-le.credit_cents) from ledger_entries le where le.property_id=r.property_id and le.resource_type='ota-commission' and le.resource_id=r.id and le.account='OTA Commission Expense'),0)::int as "commissionCents",
           coalesce((select sum(le.debit_cents) from ledger_entries le where le.property_id=r.property_id and le.resource_type='ota-commission-paid' and le.resource_id=r.id and le.account='Commission Payable'),0)::int as "commissionPaidCents",
           -- Latest security deposit and its charges / releases.
@@ -88,7 +91,7 @@ export async function GET(request: Request) {
         ?? room.roomTypeId;
       return Response.json({ reservations: records.map((record) => {
         const nights = Math.max(0, Math.round((new Date(`${record.checkoutDate}T12:00:00Z`).getTime() - new Date(`${record.checkInDate}T12:00:00Z`).getTime()) / 86_400_000));
-        const taxCents = record.taxExempt ? 0 : Math.round(record.roomRentCents * record.taxRateBasisPoints / 10_000);
+        const taxCents = record.taxExempt ? 0 : record.roomTaxCents ?? Math.round(record.roomRentCents * record.taxRateBasisPoints / 10_000);
         const status = record.status === "reserved" ? "Reserved" : record.status === "checked_in" ? "Checked In" : record.status === "checked_out" ? "Checked Out" : record.status === "no_show" ? "No Show" : record.status === "cancelled" ? "Cancelled" : record.status;
         const roomStatus = (value: string) => value === "reserved" ? "Reserved" : value === "checked_in" ? "Checked In" : value === "checked_out" ? "Checked Out" : value === "no_show" ? "No Show" : "Cancelled";
         const reservationRooms = (record.reservationRooms ?? []).map((room) => ({ id: room.id, roomNumber: room.roomNumber ?? undefined, roomTypeId: settingsRoomTypeId(room), status: roomStatus(room.status), nightlyRatesCents: [], guestId: room.guestId ?? undefined, guestName: room.guestName ?? undefined }));
@@ -575,7 +578,8 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
     }
   }
   const roomRentCents = checkedLines.reduce((sum, line) => sum + line.nightlyRatesCents.reduce((nightSum, rate) => nightSum + rate, 0) * line.roomCount, 0);
-  const taxCents = payload.taxExempt ? 0 : calculateTaxCents(roomRentCents, payload.taxRatePercentage / 100);
+  // The same per-night rounding as the posted charge taxes.
+  const taxCents = payload.taxExempt ? 0 : checkedLines.reduce((sum, line) => sum + line.nightlyRatesCents.reduce((nightSum, rate) => nightSum + calculateTaxCents(rate, payload.taxRatePercentage / 100), 0) * line.roomCount, 0);
   // Settings decide per OTA payment category whether the entered amount has
   // commission deducted or is already net to the hotel.
   const [ruleSettings] = await tx<Array<{ rules: unknown }>>`

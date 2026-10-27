@@ -2,6 +2,8 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { recordChange } from "@/server/realtime/change-events";
+import { deletePrivateFiles } from "@/server/storage/private-files";
 
 type Address = { addressLine1?: string; postalCode?: string; city?: string; state?: string; country?: string; countryCode?: string };
 // These profile values live with the configurable guest preferences so they
@@ -311,5 +313,51 @@ export async function POST(request: Request) {
       }
     });
     return Response.json({ imported: parsed.data.rows.length, merged });
+  } catch (error) { return propertyAccessResponse(error); }
+}
+
+/**
+ * Delete a guest's data. A guest who never stayed is removed completely. A
+ * guest with stays keeps an anonymous profile so folios, payments and the
+ * ledger still add up: name becomes "Deleted Guest" and every personal
+ * detail (contact, address, ID numbers and photos, vehicles, saved cards,
+ * remarks) is erased.
+ */
+export async function DELETE(request: Request) {
+  try {
+    const session = await requirePropertySession(request, "guests.manage");
+    const guestId = new URL(request.url).searchParams.get("guestId") ?? "";
+    if (!z.string().uuid().safeParse(guestId).success) return Response.json({ error: "Choose a guest." }, { status: 400 });
+    const result = await productionSql().begin(async (tx) => {
+      const [guest] = await tx<Array<{ id: string }>>`select id from guests where id=${guestId}::uuid and property_id=${session.propertyId}::uuid for update`;
+      if (!guest) return null;
+      const [{ stays }] = await tx<Array<{ stays: number }>>`
+        select (
+          (select count(*) from reservations where main_guest_id=${guestId}::uuid)
+          + (select count(*) from reservation_guests where guest_id=${guestId}::uuid)
+          + (select count(*) from registration_acceptances where signed_by_guest_id=${guestId}::uuid)
+          + (select count(*) from dnr_overrides where guest_id=${guestId}::uuid)
+        )::int as stays
+      `;
+      const photos = await tx<Array<{ key: string }>>`select storage_key as key from guest_identities where guest_id=${guestId}::uuid and property_id=${session.propertyId}::uuid and storage_key is not null`;
+      for (const table of ["guest_identities", "guest_vehicles", "guest_payment_sources", "guest_remarks"] as const) {
+        await tx.unsafe(`delete from ${table} where guest_id=$1 and property_id=$2`, [guestId, session.propertyId]);
+      }
+      if (stays === 0) {
+        await tx`delete from guests where id=${guestId}::uuid and property_id=${session.propertyId}::uuid`;
+        return { mode: "deleted" as const, photos: photos.map((photo) => photo.key) };
+      }
+      await tx`
+        update guests set first_name='Deleted', last_name='Guest', phone=null, email=null, address='{}'::jsonb,
+          remarks=null, dnr_reason=null, guest_status='active', room_preferences='{}'::jsonb, updated_at=now()
+        where id=${guestId}::uuid and property_id=${session.propertyId}::uuid
+      `;
+      return { mode: "anonymized" as const, photos: photos.map((photo) => photo.key) };
+    });
+    if (!result) return Response.json({ error: "Guest not found." }, { status: 404 });
+    // ID photos live in private storage; remove them once the rows are gone.
+    if (result.photos.length) await deletePrivateFiles(result.photos).catch((error) => console.error("Guest ID photo delete failed", error));
+    await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "guest", entityId: guestId, action: "deleted", entityVersion: 1, payload: { mode: result.mode } });
+    return Response.json({ mode: result.mode });
   } catch (error) { return propertyAccessResponse(error); }
 }
