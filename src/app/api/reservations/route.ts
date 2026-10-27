@@ -34,7 +34,7 @@ export async function GET(request: Request) {
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null; otaPaymentStatus: string | null;
         taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; balanceCents: number; checkedOutDate: string | null; bookedDate: string; rawNotes: string | null; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number; collectedCents: number;
         deposit: (DepositRecord & { transactions: DepositTransactionRecord[] }) | null;
-        reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; roomTypeName: string | null; status: string }>;
+        reservationRooms: Array<{ id: string; roomNumber: string | null; roomTypeId: string; roomTypeName: string | null; status: string; guestId: string | null; guestName: string | null }>;
         extraGuests: Array<{ id: string; name: string; driverLicenseNumber: string | null }>;
       }>>`
         select r.id,r.version,r.confirmation_number as "confirmationNumber",r.main_guest_id as "guestId",r.company_id as "companyId",(select c.name from companies c where c.id=r.company_id) as "companyName",g.first_name as "firstName",g.last_name as "lastName",g.phone,
@@ -60,7 +60,9 @@ export async function GET(request: Request) {
             where f.reservation_id=r.id and upper(pay.method)<>'OTA COMMISSION'),0)::int as "collectedCents",
           (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)
             - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=r.id),0))::int as "balanceCents",
-          coalesce((select json_agg(json_build_object('id',rrx.id,'roomNumber',room.number,'roomTypeId',rrx.room_type_id,'roomTypeName',rt.name,'status',rrx.status) order by rrx.created_at)
+          coalesce((select json_agg(json_build_object('id',rrx.id,'roomNumber',room.number,'roomTypeId',rrx.room_type_id,'roomTypeName',rt.name,'status',rrx.status,
+              'guestId',(select rg.guest_id from reservation_guests rg where rg.reservation_room_id=rrx.id order by rg."primary" desc, rg.id limit 1),
+              'guestName',(select concat(g.first_name,' ',g.last_name) from reservation_guests rg join guests g on g.id=rg.guest_id where rg.reservation_room_id=rrx.id order by rg."primary" desc, rg.id limit 1)) order by rrx.created_at)
             from reservation_rooms rrx left join rooms room on room.id=rrx.room_id left join room_types rt on rt.id=rrx.room_type_id where rrx.reservation_id=r.id),'[]'::json) as "reservationRooms"
           ,coalesce((select json_agg(json_build_object('id',extra_guest.id,'name',concat(extra_guest.first_name,' ',extra_guest.last_name),'driverLicenseNumber',identity.id_number) order by reservation_guest.id)
             from reservation_guests reservation_guest
@@ -89,7 +91,7 @@ export async function GET(request: Request) {
         const taxCents = record.taxExempt ? 0 : Math.round(record.roomRentCents * record.taxRateBasisPoints / 10_000);
         const status = record.status === "reserved" ? "Reserved" : record.status === "checked_in" ? "Checked In" : record.status === "checked_out" ? "Checked Out" : record.status === "no_show" ? "No Show" : record.status === "cancelled" ? "Cancelled" : record.status;
         const roomStatus = (value: string) => value === "reserved" ? "Reserved" : value === "checked_in" ? "Checked In" : value === "checked_out" ? "Checked Out" : value === "no_show" ? "No Show" : "Cancelled";
-        const reservationRooms = (record.reservationRooms ?? []).map((room) => ({ id: room.id, roomNumber: room.roomNumber ?? undefined, roomTypeId: settingsRoomTypeId(room), status: roomStatus(room.status), nightlyRatesCents: [] }));
+        const reservationRooms = (record.reservationRooms ?? []).map((room) => ({ id: room.id, roomNumber: room.roomNumber ?? undefined, roomTypeId: settingsRoomTypeId(room), status: roomStatus(room.status), nightlyRatesCents: [], guestId: room.guestId ?? undefined, guestName: room.guestName ?? undefined }));
         const extraGuests = (record.extraGuests ?? []).map((guest) => ({
           id: guest.id,
           name: guest.name,
@@ -498,6 +500,8 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
       reservationRoomsCreated.push({ id: reservationRoom.id, roomNumber: reservationRoomsCreated.length + 1, label: room?.number ?? String(reservationRoomsCreated.length + 1), baseNightlyRatesCents: line.baseNightlyRatesCents, nightlyRatesCents: line.nightlyRatesCents });
     }
   }
+  // The main guest stays in the first room until staff assign rooms to guests.
+  await tx`update reservation_guests set reservation_room_id=${reservationRoomsCreated[0].id}::uuid where reservation_id=${reservation.id}::uuid and "primary"=true`;
   // A group starts with one shared folio. This is important: it lets the
   // front desk collect one payment for the complete stay, while checkout can
   // later split a departing room into its own folio. Single-room stays keep
