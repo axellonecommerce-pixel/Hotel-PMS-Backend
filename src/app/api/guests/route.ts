@@ -100,9 +100,12 @@ function normalizedId(value: string) { return value.replace(/\s/g, "").toUpperCa
 
 async function listGuests(propertyId: string) {
   const sql = productionSql();
-  const guests = await sql<Array<{ id: string; firstName: string; lastName: string; phone: string | null; email: string | null; address: unknown; guestStatus: string; remarks: string | null; dnrReason: string | null; roomPreferences: unknown; createdAt: string }>>`
-    select id,first_name as "firstName",last_name as "lastName",phone,email,address,guest_status as "guestStatus",remarks,dnr_reason as "dnrReason",room_preferences as "roomPreferences",created_at::text as "createdAt"
-    from guests where property_id=${propertyId}::uuid and archived_at is null order by created_at desc,last_name,first_name
+  const guests = await sql<Array<{ id: string; firstName: string; lastName: string; phone: string | null; email: string | null; address: unknown; guestStatus: string; remarks: string | null; dnrReason: string | null; roomPreferences: unknown; createdAt: string; updatedAt: string }>>`
+    select id,first_name as "firstName",last_name as "lastName",phone,email,address,guest_status as "guestStatus",remarks,dnr_reason as "dnrReason",room_preferences as "roomPreferences",created_at::text as "createdAt",updated_at::text as "updatedAt"
+    from guests where property_id=${propertyId}::uuid and archived_at is null
+      -- A guest whose data was deleted before archiving existed.
+      and not (first_name='Deleted' and last_name='Guest' and phone is null and email is null and room_preferences='{}'::jsonb)
+    order by created_at desc,last_name,first_name
   `;
   if (!guests.length) return [];
   const identities = await sql<Array<{ guestId: string; idType: string; idNumber: string }>>`
@@ -137,7 +140,7 @@ async function listGuests(propertyId: string) {
     const address = parseObject<Address>(guest.address); const prefs = parseObject<Preferences>(guest.roomPreferences);
     const identity = identityByGuest.get(guest.id); const vehicle = vehicleByGuest.get(guest.id); const guestStays = staysByGuest.get(guest.id) ?? [];
     return {
-      id: guest.id, createdAt: guest.createdAt, firstName: guest.firstName, lastName: guest.lastName, phone: guest.phone ?? "", phoneNormalized: (guest.phone ?? "").replace(/\D/g, ""),
+      id: guest.id, createdAt: guest.createdAt, updatedAt: guest.updatedAt, firstName: guest.firstName, lastName: guest.lastName, phone: guest.phone ?? "", phoneNormalized: (guest.phone ?? "").replace(/\D/g, ""),
       city: address.city ?? "", addressLine1: address.addressLine1, postalCode: address.postalCode, state: address.state, country: address.country, countryCode: address.countryCode,
       email: guest.email ?? undefined, secondaryPhone: prefs.secondaryPhone, secondaryEmail: prefs.secondaryEmail, status: apiStatus(guest.guestStatus), fixedRateCents: prefs.fixedRateCents, dateOfBirth: prefs.dateOfBirth, idExpires: prefs.idExpires, roomPreferences: prefs.roomPreferences,
       idType: identity?.idType, driverLicenseNumber: identity?.idNumber, notes: guest.remarks ?? undefined, dnrRemarks: guest.dnrReason ?? undefined,
@@ -349,7 +352,7 @@ export async function DELETE(request: Request) {
       }
       await tx`
         update guests set first_name='Deleted', last_name='Guest', phone=null, email=null, address='{}'::jsonb,
-          remarks=null, dnr_reason=null, guest_status='active', room_preferences='{}'::jsonb, updated_at=now()
+          remarks=null, dnr_reason=null, guest_status='active', room_preferences='{}'::jsonb, archived_at=now(), updated_at=now()
         where id=${guestId}::uuid and property_id=${session.propertyId}::uuid
       `;
       return { mode: "anonymized" as const, photos: photos.map((photo) => photo.key) };
