@@ -16,6 +16,9 @@ const createSchema = z.object({
   chargeTypeName: z.string().trim().min(1).max(200).optional(),
   description: z.string().trim().min(1),
   serviceDate: z.string().date(),
+  // A per-night charge (pet fee, extra person, parking…): one charge on each
+  // of these nights, all in the same transaction.
+  serviceDates: z.array(z.string().date()).min(1).max(366).optional(),
   amountCents: z.number().int().positive(),
   taxOverrideCents: z.number().int().nonnegative().optional(),
   taxOverrideReason: z.string().trim().min(1).optional(),
@@ -82,6 +85,9 @@ export async function POST(request: Request) {
       `;
       if (!context) throw new Error("The folio or charge type is unavailable.");
       const taxCents = taxAmount(context, input.amountCents, input.taxOverrideCents, input.taxOverrideReason);
+      const nights = [...new Set(input.serviceDates ?? [input.serviceDate])].sort();
+      const createdIds: string[] = [];
+      for (const serviceDate of nights) {
       const [created] = await tx<Array<{ id: string }>>`
         insert into charges (
           property_id, folio_id, reservation_room_id, type, description,
@@ -89,9 +95,10 @@ export async function POST(request: Request) {
         ) values (
           ${session.propertyId}::uuid, ${context.folioId}::uuid,
           ${input.reservationRoomId ?? null}::uuid, ${context.typeName}, ${input.description},
-          ${input.serviceDate}::date, ${input.amountCents}, false, 'posted'
+          ${serviceDate}::date, ${input.amountCents}, false, 'posted'
         ) returning id
       `;
+      createdIds.push(created.id);
       if (taxCents > 0 || input.taxOverrideCents !== undefined) {
         await tx`
           insert into charge_taxes (property_id, charge_id, name, rate_basis_points, amount_cents, override_reason)
@@ -99,23 +106,25 @@ export async function POST(request: Request) {
         `;
       }
       await postProductionLedger(tx, {
-        propertyId: session.propertyId, businessDate: input.serviceDate, resourceType: "charge", resourceId: created.id,
+        propertyId: session.propertyId, businessDate: serviceDate, resourceType: "charge", resourceId: created.id,
         description: input.description, debitAccount: "Guest Receivable", creditAccount: revenueAccount(context), amountCents: input.amountCents,
       });
       if (taxCents > 0) await postProductionLedger(tx, {
-        propertyId: session.propertyId, businessDate: input.serviceDate, resourceType: "charge-tax", resourceId: created.id,
+        propertyId: session.propertyId, businessDate: serviceDate, resourceType: "charge-tax", resourceId: created.id,
         description: `${input.description} tax`, debitAccount: "Guest Receivable", creditAccount: "Tax Payable", amountCents: taxCents,
       });
+      }
       const [balance] = await tx<Array<{ balanceCents: number }>>`
         select (
           coalesce((select sum(c.amount_cents + coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios all_folios on all_folios.id=c.folio_id where all_folios.reservation_id=${context.reservationId}::uuid and c.status='posted'),0)
           - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios all_folios on all_folios.id=pa.folio_id where all_folios.reservation_id=${context.reservationId}::uuid),0)
         )::int as "balanceCents"
       `;
-      await logReservationActivity(tx, session, context.reservationId, "Charge", `Charge added · ${input.description} · ${money(input.amountCents)}${taxCents ? ` + tax ${money(taxCents)}` : ""}`);
-      return { id: created.id, folioId: context.folioId, reservationRoomId: input.reservationRoomId ?? null, description: input.description, amountCents: input.amountCents, type: context.typeName, taxable: context.taxable && !context.taxExempt, taxCents, totalCents: input.amountCents + taxCents, balanceCents: balance?.balanceCents ?? input.amountCents + taxCents };
+      await logReservationActivity(tx, session, context.reservationId, "Charge", `Charge added · ${input.description} · ${money(input.amountCents)}${taxCents ? ` + tax ${money(taxCents)}` : ""}${nights.length > 1 ? ` per night × ${nights.length} nights (${nights[0]} to ${nights[nights.length - 1]})` : ""}`);
+      const charges = createdIds.map((id, index) => ({ id, folioId: context.folioId, reservationRoomId: input.reservationRoomId ?? null, description: input.description, amountCents: input.amountCents, type: context.typeName, serviceDate: nights[index], taxCents, totalCents: input.amountCents + taxCents }));
+      return { charges, id: createdIds[0], folioId: context.folioId, reservationRoomId: input.reservationRoomId ?? null, description: input.description, amountCents: input.amountCents, type: context.typeName, taxable: context.taxable && !context.taxExempt, taxCents, totalCents: input.amountCents + taxCents, balanceCents: balance?.balanceCents ?? input.amountCents + taxCents };
     });
-    return Response.json({ charge }, { status: 201 });
+    return Response.json({ charge, charges: charge.charges }, { status: 201 });
   } catch (error) {
     if (error instanceof Error && /folio|tax|charge type/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
