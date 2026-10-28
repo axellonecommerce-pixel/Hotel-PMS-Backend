@@ -16,7 +16,7 @@ These rules apply to humans, AI coding tools, both repositories, database work, 
 - Implement only approved requirements. Explain new cloud services, integrations, costs, permissions, and material architecture changes before using them.
 - Never connect, purchase, deploy, or mutate an external/production service without explicit owner approval.
 - Keep frontend and backend as separate repositories.
-- Do not introduce guest/company portals, direct email/SMS, direct card processing, OTA sync, offline mutations, or payroll tax calculation into v1 without approval.
+- Do not introduce guest/company portals, direct email/SMS, direct card processing, OTA sync, offline mutations, or payroll tax filing into v1 without approval. (Payroll tax *estimates* by state were approved on 2026-10-28.)
 
 ## 3. Privacy and security
 
@@ -41,6 +41,28 @@ These rules apply to humans, AI coding tools, both repositories, database work, 
 - Same-day/day-use sales count as rooms sold but never remove overnight inventory availability.
 - Preserve accepted rules version with signed registration records.
 - Delete ID images at one year after seven-day warning; retain guest/stay data.
+
+### 4.1 Every motel gets the same behaviour
+
+- A fix or feature applies to every property: never branch on a property id, name, state or a specific record. Write rules from settings and data, not from what one motel happens to have.
+- Every new setting has a default in `frontend/src/config/default-settings.ts`, and `normalizeSettings` merges nested defaults, so properties created earlier (and new ones created by the platform with a smaller settings document) get it without a migration.
+- New motels are created by `backend/src/server/provisioning/platform-motel.ts`; anything a property needs to work (settings document, business day, owner employee, country/state/time zone) is created there, inside one transaction.
+- Settings › Property is saved back to the `properties` row (name, address, country, state, time zone), so server code that reads the row and screens that read settings agree.
+- Test changes against a property in another state (for example Texas) as well as California before release.
+
+### 4.2 Financial reporting
+
+- Revenue screens and Profit & Loss read the ledger and stop at the property's business date; nights booked for later dates are not revenue yet.
+- Tax collected is a liability: show it beside revenue, never inside it.
+- Profit & Loss is cash basis: an expense counts when it is paid. Unpaid OTA commission (Commission Payable) and unpaid payroll are not expenses.
+- One source per figure: the same number on two screens comes from the same query or ledger account.
+
+### 4.3 Payroll
+
+- Overtime is calculated on the server from the time clock by the property's state (`backend/src/server/payroll/pay-calculation.ts`); workweeks run Monday to Sunday, the same weeks as weekly pay periods.
+- State rules and 2026 tax tables live in `frontend/src/lib/payroll/us-payroll-rules.ts` with their sources and an "as of" date. Review them every January and July (minimum wage changes) and update the date.
+- Tax amounts are estimates and must be labelled as estimates. Never present them as filed or exact withholding.
+- Loading payroll creates the period for the saved schedule, so the screen must wait for saved settings before loading.
 
 ## 5. Database changes
 

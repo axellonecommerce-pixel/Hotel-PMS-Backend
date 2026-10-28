@@ -34,6 +34,8 @@ The first release is employee-only. It supports many hotels, but one owner accou
 - **FR-TEN-002:** Data must be isolated by hotel; one hotel can never access another hotel's data.
 - **FR-TEN-003:** A hotel configures identity, logo, contact details, timezone, rooms, room types, floors, rates, floor map, taxes, currency-ready settings, employees, rules, checkout times, cash float, payroll periods, invoice due days, and Night Audit time.
 - **FR-TEN-004:** V1 uses US conventions/USD but the data model must allow additional countries/currencies later.
+- **FR-TEN-005:** When the platform admin creates a motel they choose its country, state/province (a list for the US and Canada) and time zone (the country's zones first; choosing a state suggests its zone). The motel sees and can change them in Settings › Property; the change is saved to the property record that business dates, the platform list and payroll read.
+- **FR-TEN-006:** Every motel, new or existing, gets the same features, defaults and rules. A setting added in a release has a default that applies to every property that has not saved its own value; no fix or feature may depend on one property's data, name or configuration. See `docs/workflows.md` › "Every motel".
 
 ### 3.2 Guests and identity
 
@@ -99,9 +101,11 @@ The first release is employee-only. It supports many hotels, but one owner accou
 
 ### 3.9 Time, payroll, expenses, and cash
 
-- **FR-TIM-001:** One clock-in/out period per housekeeper per day. Staff can record clock-in, break start/end, and clock-out as separate events, use the live time clock, or enter the completed shift at once. Staff can correct the work date and times. Only the recorded break duration is deducted. Overtime/double-time rules follow the hotel's configured jurisdiction.
-- **FR-PAYR-001:** Hotels configure weekly/biweekly/semi-monthly or custom pay periods and payday. Employees may be hourly, quantity × fixed rate, or description + total amount. The PMS calculates hours and gross pay only.
-- **FR-PAYR-002:** Payroll records show paid status, date, and method. Owner/manager/accountant can correct time; correction note is optional.
+- **FR-TIM-001:** One clock-in/out period per housekeeper per day. Staff can record clock-in, break start/end, and clock-out as separate events, use the live time clock, or enter the completed shift at once. Staff can correct the work date and times. Only the recorded break duration is deducted. Overtime/double-time rules follow the state the property is registered in (FR-PAYR-003).
+- **FR-PAYR-001:** Hotels choose a pay schedule: weekly, biweekly, semi-monthly (1st–15th and 16th–end of month) or monthly, plus any custom From/To dates. Each employee is paid hourly (rate × clocked hours, with overtime) or a fixed salary per pay period.
+- **FR-PAYR-002:** Payroll records show paid status, paid date and payment method: Cash, Check, Direct deposit or Other. Paying cash is recorded the same as any other method and is taxed the same. Owner/manager/accountant can correct time; correction note is optional. A paid entry keeps what was paid; it must be marked Pending again before its adjustment changes.
+- **FR-PAYR-003:** Payroll shows the rules of the property's registered US state (all 50 states and DC): minimum wage (and an optional city/county minimum set in Settings), overtime (federal 40 hours a week everywhere; daily overtime in CA, AK, NV, CO; CA double time after 12 hours), 2026 state income tax brackets, employee-paid state payroll deductions (e.g. CA SDI), required pay frequency, final-paycheck deadlines and meal/rest breaks. It flags employees paid below the minimum wage. A property in California sees California rules; a property in Texas sees Texas rules.
+- **FR-PAYR-004:** Payroll shows estimated withholding per employee (federal income tax, Social Security, Medicare, state income tax, state employee deductions) and estimated take-home pay, as a reference for a single filer with no other W-4 adjustments. The PMS does not file payroll taxes; the estimate is labelled as such.
 - **FR-EXP-001:** Hotels configure categories, vendors, recurring expenses, payment method, and optional receipt.
 - **FR-CSH-001:** Cash is tracked by employee shift. Opening cash is confirmed; multiple drops per shift are allowed; a hotel-configured float remains for the next shift.
 - **FR-CSH-002:** Expected cash includes recorded cash activity. Over/Short is calculated automatically from expected versus counted cash; it is never manually entered. Other cash expense requires a note.
@@ -111,6 +115,7 @@ The first release is employee-only. It supports many hotels, but one owner accou
 - **FR-AUD-001:** Night Audit may run manually or at a hotel-configured time. As in HotelKey, in-house guests may carry a balance and a held deposit overnight; they must pay before checkout. Night Audit stops only for unpaid departures (due out or overdue), unresolved deposits on departing stays, open shifts, or other blocking issues. Before it advances the business day, any unprocessed arrival for that business date becomes a No Show. Closed days cannot reopen. Failed automatic runs notify owner/manager in-app. The deployed scheduler must not promise exact property-local timing unless its infrastructure can deliver it.
 - **FR-REV-001:** Taxes and refundable deposits are liabilities, not revenue. Charged deposit deductions become the configured revenue/charge type. Refunds reduce revenue on refund date; BAD DEBT is a separate loss; OTA commissions are expenses.
 - **FR-REV-002:** Show Gross Revenue and Net Revenue. ADR counts all sold rooms, including a zero-rate room and same-day/day-use rooms. Day use contributes to rooms sold and occupancy without reducing overnight availability. Show occupancy and RevPAR both including and excluding out-of-order rooms.
+- **FR-PNL-001:** Profit & Loss is cash basis for every property: revenue is what the ledger posted up to the business date (future booked nights are left out until they happen, the same as the Revenue screen); tax collected is shown separately and is not revenue; expenses are what was paid — expenses and paid outs on their date, OTA commission once paid to the OTA or deducted by it, wages once payroll is marked Paid (on the paid date). Commission still payable and unpaid wages are not expenses yet. The screen shows how its revenue plus tax equals the Revenue screen total.
 - **FR-RPT-001:** Every report supports custom dates, print, PDF, and Excel. Financial reports support prior-period comparison and drill-down.
 - **FR-RPT-002:** Hotels build and save custom reports/columns. Required standard reports include revenue/metrics, room moves, occupancy, No Show & Late Cancel, cash drops, expenses, payroll, housekeeping productivity, maintenance, guest/stay, folios, company A/R, refunds, bad debt, Night Audit, and a Final Audit control summary. The Final Audit summary combines durable ledger, payment, cash-drop, occupancy, and business-day data, and must never certify an unrun or blocked Night Audit as closed. Reports must read tenant-scoped persisted records when the PMS API is connected.
 - **FR-NOT-001:** One notification center contains overdue invoices, upcoming ID-image deletion, Night Audit failures, and operational alerts. Items remain until read or resolved.
@@ -136,7 +141,7 @@ The first release is employee-only. It supports many hotels, but one owner accou
 - Direct guest/company login
 - Direct email/SMS delivery from the PMS
 - Offline operations
-- Payroll tax/withholding/net-pay calculation
+- Payroll tax filing and exact withholding (Payroll shows estimates only, FR-PAYR-004)
 - Multi-property management under one owner account
 - Help/tutorial section
 

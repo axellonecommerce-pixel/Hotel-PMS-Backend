@@ -48,11 +48,15 @@ No cloud service may be connected, purchased, or deployed before the owner appro
 - Payment allocation/refunds/bad debt/security deposits
 - Company A/R, invoice allocation, credit balance
 - Room state, housekeeping assignment, maintenance/out-of-order inventory
-- Employee time, jurisdiction rules, gross payroll
+- Employee time, state overtime rules (`server/payroll/pay-calculation.ts`), gross payroll, salary or hourly pay, payment method; state rules and withholding estimates on the frontend (`lib/payroll/us-payroll-rules.ts`)
+- Profit & Loss source rows (`api/reports/profit-loss`): cash basis, capped at the business date
+- Property identity (`properties` row) kept in step with Settings › Property; location lists in `frontend/src/lib/locations.ts`
 - Cash shift ledger and calculated over/short
 - Business-day/Night Audit closure
 - Revenue/ADR/RevPAR/occupancy reporting
 - Notification, retention, export, backup/restore
+
+Settings are one JSON document per property (`property_settings.application_settings`). The frontend merges it over `defaultSettings`, including nested objects (property, payroll, invoice, tax), so every property — existing or newly provisioned — has every current setting. The backend never depends on a setting existing; it falls back to the same default.
 
 Money is stored as integer minor units plus ISO currency code. Dates use property-local business dates; timestamps are UTC with timezone conversion at the boundary. Financial operations use database transactions and idempotency keys.
 

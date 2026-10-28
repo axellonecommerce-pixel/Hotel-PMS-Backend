@@ -5,6 +5,7 @@ export type PlatformMotelInput = {
   name: string;
   addressLine1: string;
   city: string;
+  countryCode?: string;
   region: string;
   postalCode: string;
   phone: string;
@@ -29,6 +30,7 @@ type PropertySettingsInput = Pick<
   | "name"
   | "addressLine1"
   | "city"
+  | "countryCode"
   | "region"
   | "postalCode"
   | "phone"
@@ -68,6 +70,7 @@ export function initialApplicationSettings(
       addressLine1: input.addressLine1,
       city: input.city,
       state: input.region,
+      country: input.countryCode || "US",
       postalCode: input.postalCode,
       phone: input.phone,
       email: input.ownerEmail,
@@ -245,8 +248,8 @@ export async function provisionPlatformMotel(input: PlatformMotelInput) {
   try {
     await productionSql().begin(async (tx) => {
       await tx`
-        insert into properties (id,name,address_line_1,city,region,postal_code,phone,timezone,status)
-        values (${propertyId}::uuid,${input.name},${input.addressLine1},${input.city},${input.region},${input.postalCode},${input.phone},${input.timezone},'active')
+        insert into properties (id,name,address_line_1,city,region,postal_code,country_code,phone,timezone,status)
+        values (${propertyId}::uuid,${input.name},${input.addressLine1},${input.city},${input.region},${input.postalCode},${input.countryCode || "US"},${input.phone},${input.timezone},'active')
       `;
       await tx`
         insert into property_memberships (id,property_id,auth_user_id,role,active)
@@ -259,7 +262,7 @@ export async function provisionPlatformMotel(input: PlatformMotelInput) {
       await tx`
         insert into property_settings (property_id,key,value)
         values
-          (${propertyId}::uuid,'currency','{"code":"USD","country":"US"}'::jsonb),
+          (${propertyId}::uuid,'currency',${tx.json({ code: "USD", country: input.countryCode || "US" })}),
           (${propertyId}::uuid,'invoice','{"prefix":"FOL","nextNumber":1,"annualReset":false,"paymentTermsDays":30}'::jsonb),
           (${propertyId}::uuid,'tax','{"percentage":0}'::jsonb),
           (${propertyId}::uuid,'application_settings',${tx.json(applicationSettings)})

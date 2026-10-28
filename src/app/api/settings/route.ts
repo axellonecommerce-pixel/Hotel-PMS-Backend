@@ -229,6 +229,32 @@ function parseStoredSettings(value: unknown) {
   }
 }
 
+/**
+ * Settings › Property is where staff edit the motel's name, address, country,
+ * state and time zone. The properties row is what the platform list, business
+ * dates and payroll read, so keep it the same.
+ */
+async function synchronizePropertyIdentity(tx: Parameters<typeof synchronizeConfiguredInventory>[0], propertyId: string, value: Record<string, unknown>) {
+  const property = value.property && typeof value.property === "object" ? value.property as Record<string, unknown> : null;
+  if (!property) return;
+  const text = (key: string) => typeof property[key] === "string" && (property[key] as string).trim() ? (property[key] as string).trim() : null;
+  const country = text("country");
+  const timezone = text("timezone");
+  let validTimezone: string | null = null;
+  if (timezone) { try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }); validTimezone = timezone; } catch { validTimezone = null; } }
+  await tx`
+    update properties set
+      name=coalesce(${text("name")},name), address_line_1=coalesce(${text("addressLine1")},address_line_1), city=coalesce(${text("city")},city),
+      region=coalesce(${text("state")},region), postal_code=coalesce(${text("postalCode")},postal_code), phone=coalesce(${text("phone")},phone),
+      country_code=coalesce(${country && /^[A-Za-z]{2}$/.test(country) ? country.toUpperCase() : null},country_code),
+      timezone=coalesce(${validTimezone},timezone), updated_at=now()
+    where id=${propertyId}::uuid
+      and (name,address_line_1,city,region,postal_code,phone,coalesce(country_code,''),timezone) is distinct from
+        (coalesce(${text("name")},name),coalesce(${text("addressLine1")},address_line_1),coalesce(${text("city")},city),coalesce(${text("state")},region),
+         coalesce(${text("postalCode")},postal_code),coalesce(${text("phone")},phone),coalesce(${country && /^[A-Za-z]{2}$/.test(country) ? country.toUpperCase() : null},country_code,''),coalesce(${validTimezone},timezone))
+  `;
+}
+
 export async function GET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reports.view");
@@ -260,11 +286,11 @@ export async function GET(request: Request) {
       // have their identity fields in the properties table. Turn those details
       // into the same initial settings used by new motel provisioning.
       const [property] = await productionSql()<Array<{
-        name: string; addressLine1: string; city: string; region: string; postalCode: string; phone: string; timezone: string;
+        name: string; addressLine1: string; city: string; region: string; postalCode: string; phone: string; timezone: string; countryCode: string | null;
         ownerId: string | null; ownerName: string | null; ownerEmail: string | null;
       }>>`
         select p.name, p.address_line_1 as "addressLine1", p.city, p.region,
-          p.postal_code as "postalCode", p.phone, p.timezone,
+          p.postal_code as "postalCode", p.phone, p.timezone, p.country_code as "countryCode",
           e.id as "ownerId", e.name as "ownerName", e.email as "ownerEmail"
         from properties p
         left join lateral (
@@ -283,6 +309,7 @@ export async function GET(request: Request) {
         addressLine1: property.addressLine1,
         city: property.city,
         region: property.region,
+        countryCode: property.countryCode ?? "US",
         postalCode: property.postalCode,
         phone: property.phone,
         timezone: property.timezone,
@@ -321,6 +348,7 @@ export async function PUT(request: Request) {
         if (inventoryFingerprint(parseStoredSettings(stored?.value)) !== inventoryFingerprint(parsed.data)) {
           await synchronizeConfiguredInventory(tx, session.propertyId, parsed.data);
         }
+        await synchronizePropertyIdentity(tx, session.propertyId, parsed.data);
         await tx`
           insert into property_settings (property_id,key,value,updated_at)
           values (${session.propertyId}::uuid,'application_settings',${tx.json(JSON.parse(JSON.stringify(parsed.data)))},${now})

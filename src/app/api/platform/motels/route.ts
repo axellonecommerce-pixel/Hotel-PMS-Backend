@@ -12,10 +12,13 @@ const motelSchema = z
     name: z.string().trim().min(1),
     addressLine1: z.string().trim().min(1),
     city: z.string().trim().min(1),
+    countryCode: z.string().trim().regex(/^[A-Za-z]{2}$/).transform((value) => value.toUpperCase()).default("US"),
     region: z.string().trim().min(1),
     postalCode: z.string().trim().min(1),
     phone: z.string().trim().min(1),
-    timezone: z.string().trim().min(1),
+    timezone: z.string().trim().min(1).refine((zone) => {
+      try { new Intl.DateTimeFormat("en-US", { timeZone: zone }); return true; } catch { return false; }
+    }, "Choose a valid time zone."),
     ownerName: z.string().trim().min(1),
     ownerEmail: z.string().trim().email(),
     ownerPassword: z.string().min(10).max(128).optional(),
@@ -41,7 +44,7 @@ export async function GET(request: Request) {
         { status: 503 },
       );
     const motels = await productionSql()<Array<Record<string, unknown>>>`
-      select p.id,p.name,p.city,p.region,p.phone,p.status as "propertyStatus",p.created_at as "createdAt",
+      select p.id,p.name,p.city,p.region,p.country_code as "countryCode",p.timezone,p.phone,p.status as "propertyStatus",p.created_at as "createdAt",
         s.plan_name as "planName",s.billing_cycle as "billingCycle",s.amount_cents as "amountCents",s.currency_code as "currencyCode",
         s.starts_on as "startsOn",s.expires_on as "expiresOn",s.status as "subscriptionStatus",s.notes,
         owner.email as "ownerEmail", owner.name as "ownerName",

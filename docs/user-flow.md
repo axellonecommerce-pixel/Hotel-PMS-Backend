@@ -124,6 +124,42 @@ flowchart TD
   H --> I[Drop remainder and close shift]
 ```
 
+## 6a. Payroll run
+
+```mermaid
+flowchart TD
+  A[Owner sets the property's state in Settings › Property] --> B[Choose pay schedule: weekly, biweekly, semi-monthly or monthly]
+  B --> C[Set each employee: hourly rate or salary per period]
+  C --> D[Housekeepers clock in and out]
+  D --> E[Payroll splits hours: regular, overtime, double time by state]
+  E --> F[Review gross, estimated taxes and take-home; fix rates below minimum wage]
+  F --> G[Approve]
+  G --> H[Mark Paid: Cash, Check, Direct deposit or Other, with the paid date]
+  H --> I[Profit & Loss counts the wages on the paid date]
+```
+
+## 6b. Profit & Loss
+
+```mermaid
+flowchart TD
+  A[Choose period] --> B[Period still running ends at today's business date]
+  B --> C[Revenue: posted room nights and charges, tax shown separately]
+  C --> D[Expenses: paid expenses, paid outs, paid or deducted OTA commission, paid payroll]
+  D --> E[Net profit, Schedule C view, print / CSV]
+```
+
+## 6c. Create a motel (platform admin)
+
+```mermaid
+flowchart TD
+  A[Platform › Create motel] --> B[Enter name, address and phone]
+  B --> C[Choose country, then state / province]
+  C --> D[Time zone suggested from the state; can be changed]
+  D --> E[Owner login and subscription]
+  E --> F[Property, settings, business day and owner created in one transaction]
+  F --> G[Owner signs in: Settings › Property shows country, state and time zone; Payroll shows that state's rules]
+```
+
 ## 7. Maintenance and housekeeping
 
 ```mermaid
