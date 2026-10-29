@@ -44,7 +44,7 @@ export async function GET(request: Request) {
         { status: 503 },
       );
     const motels = await productionSql()<Array<Record<string, unknown>>>`
-      select p.id,p.name,p.city,p.region,p.country_code as "countryCode",p.timezone,p.phone,p.status as "propertyStatus",p.created_at as "createdAt",
+      select p.id,p.name,p.address_line_1 as "addressLine1",p.postal_code as "postalCode",p.city,p.region,p.country_code as "countryCode",p.timezone,p.phone,p.status as "propertyStatus",p.created_at as "createdAt",
         s.plan_name as "planName",s.billing_cycle as "billingCycle",s.amount_cents as "amountCents",s.currency_code as "currencyCode",
         s.starts_on as "startsOn",s.expires_on as "expiresOn",s.status as "subscriptionStatus",s.notes,
         owner.email as "ownerEmail", owner.name as "ownerName",

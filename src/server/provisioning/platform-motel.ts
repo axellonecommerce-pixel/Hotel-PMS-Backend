@@ -287,3 +287,24 @@ export async function provisionPlatformMotel(input: PlatformMotelInput) {
     reusedExistingAuthUser: !ownerAuth.created,
   };
 }
+
+
+/** Change a platform owner's sign-in email and/or password (Supabase Auth admin API). */
+export async function updateOwnerAuthUser(authUserId: string, change: { email?: string; password?: string }) {
+  const baseUrl = process.env.SUPABASE_URL?.replace(/\/$/, "");
+  const secret = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!baseUrl || !secret) throw new Error("Supabase administrator access is not configured.");
+  const body: Record<string, unknown> = {};
+  if (change.email) { body.email = change.email; body.email_confirm = true; }
+  if (change.password) body.password = change.password;
+  if (!Object.keys(body).length) return;
+  const response = await fetch(`${baseUrl}/auth/v1/admin/users/${authUserId}`, {
+    method: "PUT",
+    headers: { apikey: secret, authorization: `Bearer ${secret}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const result = (await response.json().catch(() => ({}))) as { msg?: string; message?: string };
+    throw new Error(result.msg ?? result.message ?? "The owner sign-in could not be updated.");
+  }
+}

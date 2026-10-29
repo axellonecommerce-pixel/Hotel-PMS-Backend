@@ -24,7 +24,7 @@ const updateSchema = z.union([
     salaryCents: z.number().int().min(0).max(10_000_000).optional(),
   }),
 ]);
-type StoredPayroll = { payroll?: { frequency?: string }; property?: { state?: string } };
+type StoredPayroll = { payroll?: { frequency?: string }; property?: { state?: string }; employees?: Array<{ name?: string }> };
 type EntryMeta = { adjustmentCents?: number; status?: string; doubleTimeMinutes?: number };
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const rangeSchema = z.object({ start: isoDate.optional(), end: isoDate.optional() }).refine((value) => {
@@ -147,10 +147,18 @@ export async function GET(request: Request) {
       // Keep inactive employees in this response too. Their historical pay
       // entries remain part of payroll and omitting them leaves the frontend
       // with an entry whose employee cannot be resolved.
+      // Payroll is for the people added under Settings › Employees. A staff
+      // sign-in (Users & Roles) also has an employee record; it is left out
+      // unless the same person is added as an employee.
+      const payrollNames = (Array.isArray(configured?.value?.employees) ? configured.value.employees : [])
+        .map((employee) => employee?.name?.trim().toLowerCase()).filter((name): name is string => Boolean(name));
       const employees = await tx<Employee[]>`
         select id,name,job_role as role,hourly_rate_cents as "hourlyRateCents",pay_method as "payType",fixed_rate_cents as "salaryCents",active
-        from employees where property_id=${session.propertyId}::uuid order by active desc,name
+        from employees where property_id=${session.propertyId}::uuid
+          and (membership_id is null or lower(name) = any(${payrollNames}::text[]))
+        order by active desc,name
       `;
+      const payrollIds = employees.map((employee) => employee.id);
       // Earlier periods with unpaid entries are recounted too, so time
       // entered after a period ended is included.
       const openPeriods = await tx<Array<{ id: string; start: string; end: string }>>`
@@ -164,7 +172,8 @@ export async function GET(request: Request) {
           pe.gross_pay_cents as "grossPayCents",pe.calculation_type as "calculationType",pe.description,pe.paid,pe.paid_on::text as "paidOn",pe.payment_method as "paymentMethod",pe.pay_period_id as "periodId",
           (select count(*) from housekeeping_records h where h.property_id=pe.property_id and h.housekeeper_employee_id=pe.employee_id
             and h.assignment_status='completed' and h.service_date between ${period.start}::date and ${period.end}::date)::int as "roomsCleaned"
-        from payroll_entries pe where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id=${period.id}::uuid order by pe.created_at
+        from payroll_entries pe where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id=${period.id}::uuid
+          and (pe.employee_id = any(${payrollIds}::uuid[]) or pe.paid) order by pe.created_at
       `;
       // A custom date range only stays in history once it is approved or paid.
       const history = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; periodId: string; startsOn: string; endsOn: string; roomsCleaned: number }>>`
@@ -176,7 +185,7 @@ export async function GET(request: Request) {
         from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id join employees e on e.id=pe.employee_id
         where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id<>${period.id}::uuid
           and (pp.status<>'custom' or pe.paid or pe.description like '%"Approved"%')
-          and (pe.paid or pe.gross_pay_cents<>0 or pe.regular_minutes<>0)
+          and (pe.paid or ((pe.gross_pay_cents<>0 or pe.regular_minutes<>0) and pe.employee_id = any(${payrollIds}::uuid[])))
         order by pp.ends_on desc,e.name limit 100
       `;
       const mapEntry = (entry: typeof entries[number]) => {

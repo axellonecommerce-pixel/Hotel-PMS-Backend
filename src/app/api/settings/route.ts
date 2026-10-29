@@ -11,7 +11,7 @@ import { initialApplicationSettings } from "@/server/provisioning/platform-motel
 
 type ConfiguredRoomType = { id?: string; name?: string; shortLabel?: string; maxOccupancy?: number; baseRateCents?: number; active?: boolean; sortOrder?: number };
 type ConfiguredRoom = { number?: string; roomTypeId?: string; floor?: number; buildingId?: string; housekeepingStatus?: string; serviceStatus?: string; smokingAllowed?: boolean; mapColumn?: number; mapRow?: number; mapWidth?: number; mapHeight?: number };
-type ConfiguredEmployee = { name?: string; role?: string; hourlyRateCents?: number; status?: string };
+type ConfiguredEmployee = { name?: string; role?: string; hourlyRateCents?: number; status?: string; payType?: string; salaryCents?: number };
 type ConfiguredPromotion = { id?: string; name?: string; discountType?: "Percentage" | "Fixed Amount"; discountValue?: number; roomTypeIds?: string[]; startDate?: string; endDate?: string; active?: boolean };
 type ConfiguredBookingChannel = { name?: string; type?: "Direct" | "OTA" | "Company"; commissionPercent?: number; active?: boolean };
 
@@ -182,18 +182,22 @@ async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: st
   // housekeeping, maintenance, payroll, and time workflows.
   const employeeRows = configuredEmployees
     .filter((employee) => employee.name?.trim() && employee.role?.trim())
-    .map((employee) => ({ name: employee.name!.trim(), role: employee.role!.trim(), rate: Math.max(0, employee.hourlyRateCents ?? 0), active: employee.status !== "Inactive" }));
+    .map((employee) => {
+      const salaried = employee.payType === "salary";
+      return { name: employee.name!.trim(), role: employee.role!.trim(), rate: Math.max(0, employee.hourlyRateCents ?? 0), active: employee.status !== "Inactive",
+        payType: salaried ? "salary" : "hourly", salary: salaried ? Math.max(0, employee.salaryCents ?? 0) : null };
+    });
   if (employeeRows.length) {
     await tx`
       with input as (
-        select * from jsonb_to_recordset(${tx.json(employeeRows)}) as x(name text,role text,rate int,active boolean)
+        select * from jsonb_to_recordset(${tx.json(employeeRows)}) as x(name text,role text,rate int,active boolean,"payType" text,salary int)
       ), updated as (
-        update employees e set job_role=i.role,hourly_rate_cents=i.rate,active=i.active,updated_at=now()
+        update employees e set job_role=i.role,hourly_rate_cents=i.rate,active=i.active,pay_method=i."payType",fixed_rate_cents=i.salary,updated_at=now()
         from input i where e.property_id=${propertyId}::uuid and lower(e.name)=lower(i.name)
         returning lower(e.name) as name
       )
-      insert into employees (property_id,name,job_role,pay_method,hourly_rate_cents,active)
-      select ${propertyId}::uuid,i.name,i.role,'hourly',i.rate,i.active from input i
+      insert into employees (property_id,name,job_role,pay_method,hourly_rate_cents,fixed_rate_cents,active)
+      select ${propertyId}::uuid,i.name,i.role,i."payType",i.rate,i.salary,i.active from input i
       where lower(i.name) not in (select name from updated)
     `;
   }
