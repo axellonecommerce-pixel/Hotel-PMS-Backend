@@ -81,3 +81,20 @@ export function workweekBounds(start: string, end: string) {
   const weekday = (date: string) => (dayNumber(date) + 3) % 7;
   return { from: shift(start, -weekday(start)), to: shift(end, 6 - weekday(end)) };
 }
+
+export type PayChange = { effectiveDate?: string; payType?: string; fromHourlyCents?: number; toHourlyCents?: number; fromSalaryCents?: number; toSalaryCents?: number };
+
+/**
+ * The pay in force for a period: the latest pay increase dated on or before
+ * the period's first day, or (before the first increase) the pay it replaced.
+ * With no increases recorded, the employee's current pay.
+ */
+export function payForPeriod(employee: { payType: string | null; hourlyRateCents: number | null; salaryCents: number | null }, changes: PayChange[] | undefined, periodStart: string) {
+  const dated = (changes ?? []).filter((change) => typeof change.effectiveDate === "string").sort((a, b) => a.effectiveDate!.localeCompare(b.effectiveDate!));
+  const current = { payType: employee.payType === "salary" ? "salary" : "hourly", hourly: employee.hourlyRateCents ?? 0, salary: employee.salaryCents ?? 0 };
+  if (!dated.length) return current;
+  const applied = [...dated].reverse().find((change) => change.effectiveDate! <= periodStart);
+  if (applied) return { payType: applied.payType === "salary" ? "salary" : applied.payType === "hourly" ? "hourly" : current.payType, hourly: applied.toHourlyCents ?? current.hourly, salary: applied.toSalaryCents ?? current.salary };
+  const first = dated[0];
+  return { payType: current.payType, hourly: first.fromHourlyCents ?? current.hourly, salary: first.fromSalaryCents ?? current.salary };
+}

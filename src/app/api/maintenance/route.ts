@@ -188,7 +188,7 @@ export async function PATCH(request: Request) {
       }
       const [row] = await tx<OrderRow[]>`
         update maintenance_orders set
-          status=${parsed.data.action === "unblock" ? "resolved" : parsed.data.action === "complete" ? "completed" : existing.status},
+          status=${parsed.data.action === "unblock" ? "resolved" : parsed.data.action === "complete" ? (existing.rentable ? "resolved" : "completed") : existing.status},
           rentable=${parsed.data.action === "unblock" ? true : existing.rentable},
           notes=${tx.json(JSON.parse(JSON.stringify(extra)))}::text,
           completed_at=case when ${parsed.data.action === "complete"} then now() else completed_at end,
@@ -197,6 +197,9 @@ export async function PATCH(request: Request) {
         where id=${existing.id}::uuid
         returning id,(select number from rooms where id=room_id) as "roomNumber",problem as note,initcap(priority) as priority,assigned_worker as "assignedWorker",cost_cents as "costCents",rentable,status,notes,created_at as "createdAt",completed_at as "completedAt",returned_to_service_at as "returnedToServiceAt"
       `;
+      // A rentable issue never took the room out of service, so finishing its
+      // work ("Mark Fixed") resolves it. A blocking issue stays "completed"
+      // until "Make Available" returns the room to service.
       // "Make Available" is the controlled return-to-service action. A
       // repaired room becomes rentable but dirty, so it cannot be treated as
       // guest-ready until Housekeeping completes the clean.

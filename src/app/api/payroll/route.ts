@@ -4,7 +4,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
-import { grossPayCents, splitWorkedMinutes, workweekBounds, type WorkDay } from "@/server/payroll/pay-calculation";
+import { grossPayCents, payForPeriod, splitWorkedMinutes, workweekBounds, type PayChange, type WorkDay } from "@/server/payroll/pay-calculation";
 
 const PAYROLL_PAYMENT_METHODS = ["Cash", "Check", "Direct deposit", "Other"] as const;
 const updateSchema = z.union([
@@ -24,7 +24,8 @@ const updateSchema = z.union([
     salaryCents: z.number().int().min(0).max(10_000_000).optional(),
   }),
 ]);
-type StoredPayroll = { payroll?: { frequency?: string }; property?: { state?: string }; employees?: Array<{ name?: string }> };
+type StoredPayroll = { payroll?: { frequency?: string }; property?: { state?: string }; employees?: Array<{ name?: string; payChanges?: PayChange[] }> };
+
 type EntryMeta = { adjustmentCents?: number; status?: string; doubleTimeMinutes?: number };
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const rangeSchema = z.object({ start: isoDate.optional(), end: isoDate.optional() }).refine((value) => {
@@ -75,7 +76,7 @@ type Tx = TransactionSql<Record<string, never>>;
  * overtime and double time by the property's state, or the fixed salary.
  * A paid entry keeps exactly what was paid.
  */
-async function recountPeriods(tx: Tx, propertyId: string, state: string, employees: Employee[], periods: Array<{ id: string; start: string; end: string }>) {
+async function recountPeriods(tx: Tx, propertyId: string, state: string, employees: Employee[], periods: Array<{ id: string; start: string; end: string }>, payChanges: Map<string, PayChange[]>) {
   if (!periods.length) return;
   const from = workweekBounds(periods.reduce((min, period) => period.start < min ? period.start : min, periods[0].start), periods[0].end).from;
   const to = workweekBounds(periods[0].start, periods.reduce((max, period) => period.end > max ? period.end : max, periods[0].end)).to;
@@ -89,9 +90,10 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
   const daysByEmployee = new Map<string, WorkDay[]>();
   for (const row of worked) daysByEmployee.set(row.employeeId, [...(daysByEmployee.get(row.employeeId) ?? []), { date: row.date, minutes: row.minutes }]);
   const rows = periods.flatMap((period) => employees.map((employee) => {
-    const salaried = employee.payType === "salary";
+    const pay = payForPeriod(employee, payChanges.get((employee.name ?? "").trim().toLowerCase()), period.start);
+    const salaried = pay.payType === "salary";
     const split = splitWorkedMinutes(daysByEmployee.get(employee.id) ?? [], period.start, period.end, state);
-    const rate = salaried ? employee.salaryCents ?? 0 : employee.hourlyRateCents ?? 0;
+    const rate = salaried ? pay.salary : pay.hourly;
     // Salaried (exempt) staff are paid the same amount each pay period.
     const hours = salaried ? { regularMinutes: split.regularMinutes + split.overtimeMinutes + split.doubleTimeMinutes, overtimeMinutes: 0, doubleTimeMinutes: 0 } : split;
     return {
@@ -166,7 +168,10 @@ export async function GET(request: Request) {
         join payroll_entries pe on pe.pay_period_id=pp.id and pe.paid=false
         where pp.property_id=${session.propertyId}::uuid and pp.id<>${period.id}::uuid and pp.ends_on >= ${shiftDate(today, -186)}::date
       `;
-      await recountPeriods(tx, session.propertyId, state, employees, [period, ...openPeriods]);
+      const payChanges = new Map((Array.isArray(configured?.value?.employees) ? configured.value.employees : [])
+        .filter((employee) => employee?.name && Array.isArray(employee.payChanges))
+        .map((employee) => [employee.name!.trim().toLowerCase(), employee.payChanges!] as const));
+      await recountPeriods(tx, session.propertyId, state, employees, [period, ...openPeriods], payChanges);
       const entries = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; periodId: string; roomsCleaned?: number }>>`
         select pe.id,pe.employee_id as "employeeId",pe.regular_minutes as "regularMinutes",pe.overtime_minutes as "overtimeMinutes",pe.rate_cents as "hourlyRateCents",
           pe.gross_pay_cents as "grossPayCents",pe.calculation_type as "calculationType",pe.description,pe.paid,pe.paid_on::text as "paidOn",pe.payment_method as "paymentMethod",pe.pay_period_id as "periodId",

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { grossPayCents, splitWorkedMinutes, stateCode, workweekBounds } from "./pay-calculation";
+import { grossPayCents, payForPeriod, splitWorkedMinutes, stateCode, workweekBounds } from "./pay-calculation";
 
 const nineHourDays = (dates: string[]) => dates.map((date) => ({ date, minutes: 9 * 60 }));
 
@@ -26,5 +26,15 @@ describe("payroll overtime by state", () => {
     expect(stateCode("california")).toBe("CA");
     expect(stateCode("tx")).toBe("TX");
     expect(stateCode("Ontario")).toBe("");
+  });
+});
+
+describe("pay increases", () => {
+  const employee = { payType: "hourly", hourlyRateCents: 1800, salaryCents: null };
+  const changes = [{ effectiveDate: "2026-11-01", payType: "hourly", fromHourlyCents: 1500, toHourlyCents: 1800 }];
+  it("uses the old rate until the first pay period starting on or after the increase", () => {
+    expect(payForPeriod(employee, changes, "2026-10-26").hourly).toBe(1500);
+    expect(payForPeriod(employee, changes, "2026-11-02").hourly).toBe(1800);
+    expect(payForPeriod(employee, undefined, "2026-10-26").hourly).toBe(1800);
   });
 });
