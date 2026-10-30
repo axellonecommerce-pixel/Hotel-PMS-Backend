@@ -98,3 +98,14 @@ export function payForPeriod(employee: { payType: string | null; hourlyRateCents
   const first = dated[0];
   return { payType: current.payType, hourly: first.fromHourlyCents ?? current.hourly, salary: first.fromSalaryCents ?? current.salary };
 }
+
+/**
+ * Salary for one pay period. A period that starts before the employee's
+ * start date pays only the days from the start date on, by calendar days.
+ */
+export function salaryForPeriod(salaryCents: number, periodStart: string, periodEnd: string, startDate?: string) {
+  if (!startDate || startDate <= periodStart) return salaryCents;
+  if (startDate > periodEnd) return 0;
+  const periodDays = dayNumber(periodEnd) - dayNumber(periodStart) + 1;
+  return Math.round(salaryCents * (dayNumber(periodEnd) - dayNumber(startDate) + 1) / periodDays);
+}

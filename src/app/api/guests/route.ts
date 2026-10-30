@@ -8,7 +8,7 @@ import { deletePrivateFiles } from "@/server/storage/private-files";
 type Address = { addressLine1?: string; postalCode?: string; city?: string; state?: string; country?: string; countryCode?: string };
 // These profile values live with the configurable guest preferences so they
 // remain durable without requiring an unsafe production schema migration.
-type Preferences = { fixedRateCents?: number; dateOfBirth?: string; idExpires?: string; secondaryPhone?: string; secondaryEmail?: string; roomPreferences?: Record<string, unknown> };
+type Preferences = { paymentSourceNotes?: Record<string, string>; fixedRateCents?: number; dateOfBirth?: string; idExpires?: string; secondaryPhone?: string; secondaryEmail?: string; roomPreferences?: Record<string, unknown> };
 
 const blankAsNull = <T extends z.ZodTypeAny>(schema: T) => z.preprocess((value) => (value === "" ? null : value), schema);
 const guestStatusSchema = z.enum(["Regular", "Returning", "New", "Do Not Rent"]);
@@ -17,7 +17,11 @@ const paymentSourceSchema = z.object({
   label: z.string().trim().min(1).max(120),
   last4: z.string().regex(/^\d{4}$/).optional(),
   tokenReference: z.string().trim().max(200).optional(),
+  note: z.string().trim().max(500).optional(),
 });
+// guest_payment_sources has no note column; notes live in the guest's
+// preferences, keyed by the source's label and reference.
+const paymentSourceKey = (source: { label: string; tokenReference?: string | null }) => `${source.label.trim().toLowerCase()}|${(source.tokenReference ?? "").trim()}`;
 // Any one detail is enough (a plate may be unknown at first); all blank removes the vehicle.
 const vehicleSchema = z.object({
   plate: z.string().trim().max(40).default(""),
@@ -145,7 +149,7 @@ async function listGuests(propertyId: string) {
       email: guest.email ?? undefined, secondaryPhone: prefs.secondaryPhone, secondaryEmail: prefs.secondaryEmail, status: apiStatus(guest.guestStatus), fixedRateCents: prefs.fixedRateCents, dateOfBirth: prefs.dateOfBirth, idExpires: prefs.idExpires, roomPreferences: prefs.roomPreferences,
       idType: identity?.idType, driverLicenseNumber: identity?.idNumber, notes: guest.remarks ?? undefined, dnrRemarks: guest.dnrReason ?? undefined,
       vehicle: vehicle ? { plate: vehicle.plate, make: vehicle.make ?? "", color: vehicle.color ?? "", year: vehicle.year ?? "" } : undefined,
-      savedPaymentSources: (sourcesByGuest.get(guest.id) ?? []).map((source) => ({ id: source.id, label: source.label ?? source.method, last4: source.last4 ?? undefined, tokenReference: source.externalReference ?? "" })),
+      savedPaymentSources: (sourcesByGuest.get(guest.id) ?? []).map((source) => { const label = source.label ?? source.method; const tokenReference = source.externalReference ?? ""; return { id: source.id, label, last4: source.last4 ?? undefined, tokenReference, note: prefs.paymentSourceNotes?.[paymentSourceKey({ label, tokenReference })] }; }),
       remarkEntries: (remarksByGuest.get(guest.id) ?? []).map((remark) => ({ id: remark.id, text: remark.text, createdAt: remark.createdAt })),
       totalStays: guestStays.length, lastStayDate: guestStays[0]?.checkoutDate,
       stayHistory: guestStays.map((stay) => ({ ...stay, room: stay.room ?? "Unassigned", paymentType: "Credit" })),
@@ -188,6 +192,10 @@ export async function PATCH(request: Request) {
       if (input.dateOfBirth !== undefined) preferences.dateOfBirth = input.dateOfBirth ?? undefined;
       if (input.idExpires !== undefined) preferences.idExpires = input.idExpires ?? undefined;
       if (input.roomPreferences !== undefined) preferences.roomPreferences = input.roomPreferences;
+      if (input.savedPaymentSources !== undefined) {
+        const sourceNotes = Object.fromEntries(input.savedPaymentSources.filter((source) => source.note).map((source) => [paymentSourceKey(source), source.note!]));
+        preferences.paymentSourceNotes = Object.keys(sourceNotes).length ? sourceNotes : undefined;
+      }
       const notes = input.notes ?? null;
       const dnrRemarks = input.dnrRemarks ?? null;
       const dnrCode = input.dnrCode ?? null;

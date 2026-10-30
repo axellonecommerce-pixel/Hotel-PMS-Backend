@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { grossPayCents, payForPeriod, splitWorkedMinutes, stateCode, workweekBounds } from "./pay-calculation";
+import { grossPayCents, payForPeriod, salaryForPeriod, splitWorkedMinutes, stateCode, workweekBounds } from "./pay-calculation";
 
 const nineHourDays = (dates: string[]) => dates.map((date) => ({ date, minutes: 9 * 60 }));
 
@@ -36,5 +36,16 @@ describe("pay increases", () => {
     expect(payForPeriod(employee, changes, "2026-10-26").hourly).toBe(1500);
     expect(payForPeriod(employee, changes, "2026-11-02").hourly).toBe(1800);
     expect(payForPeriod(employee, undefined, "2026-10-26").hourly).toBe(1800);
+  });
+});
+
+describe("salary for a back-dated start", () => {
+  it("pays the full salary once employed for the whole period", () => {
+    expect(salaryForPeriod(230000, "2026-10-05", "2026-10-11", "2026-09-01")).toBe(230000);
+    expect(salaryForPeriod(230000, "2026-10-05", "2026-10-11")).toBe(230000);
+  });
+  it("pays the days from the start date in the first period and nothing before it", () => {
+    expect(salaryForPeriod(70000, "2026-10-05", "2026-10-11", "2026-10-09")).toBe(30000);
+    expect(salaryForPeriod(70000, "2026-10-05", "2026-10-11", "2026-10-12")).toBe(0);
   });
 });

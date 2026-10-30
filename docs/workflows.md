@@ -46,9 +46,10 @@ A motel is one `properties` row. Everything else is scoped to it by `property_id
 2. **Settings › Payroll:** pay schedule (weekly, biweekly, semi-monthly or monthly), plus an optional city or county minimum wage.
 3. **Employees:** add them in Settings › Employees with pay type, rate or salary, usual payment method and tax withholding ("No tax" pays the full gross). Payroll lists only these employees, not staff sign-ins. Pay can also be changed from the Payroll drawer.
    Advances and pay increases are recorded on the employee too: advances come back out of the next take-home pay; a pay increase starts with the first pay period that begins on or after its date.
-4. **Hours:** the time clock provides them. The server splits them into regular, overtime and double time by state, with Monday-to-Sunday workweeks.
+   The start date decides when pay begins: Payroll creates every pay period since then and lists it in the Pay Schedule with its pay date and amount.
+4. **Hours:** the time clock provides them. The server splits them into regular, overtime and double time by state, with Monday-to-Sunday workweeks. For a past pay period the clock did not record, open it in the Pay Schedule and type the hours worked.
 5. **Review:** check gross pay, estimated deductions and estimated take-home. Payroll flags rates below the minimum wage.
-6. **Approve, then Mark Paid:** record the method (Cash, Check, Direct deposit or Other) and the paid date. To change a paid entry, mark it Pending first.
+6. **Approve, then Mark Paid:** record the method (Cash, Check, Direct deposit or Other) and the paid date, for the current period or any period in the Pay Schedule. Overdue periods are flagged. Use the Employee filter or search to see one person. To change a paid entry, mark it Pending first.
 7. **Profit & Loss** includes the paid wages under Schedule C line 26.
 
 State data is a reference compiled for 2026; see the "as of" date on the Payroll screen. Review it each January and July, when minimum wages change. Taxes are estimates; the PMS does not file payroll.

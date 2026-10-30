@@ -49,6 +49,7 @@ No cloud service may be connected, purchased, or deployed before the owner appro
 - Company A/R, invoice allocation, credit balance
 - Room state, housekeeping assignment, maintenance/out-of-order inventory
 - Employee time, state overtime rules (`server/payroll/pay-calculation.ts`), gross payroll, salary or hourly pay, payment method; state rules and withholding estimates on the frontend (`lib/payroll/us-payroll-rules.ts`)
+- Back-dated pay: `GET /api/payroll` creates the schedule's pay periods from the earliest employee start date and returns them as `history` (the Pay Schedule, current period included, with `periodStart`, `periodEnd`, `payDate`). `PATCH /api/payroll` with `{ action: "hours", id, hours }` stores typed-in hours on an unpaid hourly entry (`hours: null` returns to the time clock). Salary in the start-date period is prorated (`salaryForPeriod`).
 - Profit & Loss source rows (`api/reports/profit-loss`): cash basis, capped at the business date
 - Property identity (`properties` row) kept in step with Settings › Property; location lists in `frontend/src/lib/locations.ts`
 - Cash shift ledger and calculated over/short

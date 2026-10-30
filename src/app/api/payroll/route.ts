@@ -4,10 +4,22 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
-import { grossPayCents, payForPeriod, splitWorkedMinutes, workweekBounds, type PayChange, type WorkDay } from "@/server/payroll/pay-calculation";
+import { grossPayCents, payForPeriod, salaryForPeriod, splitWorkedMinutes, workweekBounds, type PayChange, type WorkDay } from "@/server/payroll/pay-calculation";
 
 const PAYROLL_PAYMENT_METHODS = ["Cash", "Check", "Direct deposit", "Other"] as const;
 const updateSchema = z.union([
+  // Checked first: the status update below would also accept { id } and drop "action".
+  // Hours typed in for a pay period the time clock did not record (for
+  // example before the employee was set up); null goes back to the clock.
+  z.object({
+    action: z.literal("hours"),
+    id: z.string().uuid(),
+    hours: z.object({
+      regularMinutes: z.number().int().min(0).max(744 * 60),
+      overtimeMinutes: z.number().int().min(0).max(744 * 60),
+      doubleTimeMinutes: z.number().int().min(0).max(744 * 60),
+    }).nullable(),
+  }),
   z.object({
     id: z.string().uuid(),
     status: z.enum(["Pending", "Approved", "Paid"]).optional(),
@@ -24,9 +36,12 @@ const updateSchema = z.union([
     salaryCents: z.number().int().min(0).max(10_000_000).optional(),
   }),
 ]);
-type StoredPayroll = { payroll?: { frequency?: string }; property?: { state?: string }; employees?: Array<{ name?: string; payChanges?: PayChange[] }> };
+type StoredPayroll = { payroll?: { frequency?: string }; property?: { state?: string }; employees?: Array<{ name?: string; payChanges?: PayChange[]; startDate?: string }> };
 
-type EntryMeta = { adjustmentCents?: number; status?: string; doubleTimeMinutes?: number };
+type ManualHours = { regularMinutes: number; overtimeMinutes: number; doubleTimeMinutes: number };
+type EntryMeta = { adjustmentCents?: number; status?: string; doubleTimeMinutes?: number; manualHours?: ManualHours };
+/** Back-dated start dates create pay periods up to this far back. */
+const SCHEDULE_DAYS = 400;
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const rangeSchema = z.object({ start: isoDate.optional(), end: isoDate.optional() }).refine((value) => {
   if (!value.start && !value.end) return true;
@@ -71,13 +86,27 @@ function parseDescription(value: string | null): EntryMeta {
 type Employee = { id: string; name: string | null; role: string | null; hourlyRateCents: number | null; payType: string | null; salaryCents: number | null; active: boolean };
 type Tx = TransactionSql<Record<string, never>>;
 
+type PayrollSetup = { payChanges: Map<string, PayChange[]>; startDates: Map<string, string>; currentPeriodId: string };
+const nameKey = (name: string | null | undefined) => (name ?? "").trim().toLowerCase();
+
 /**
  * Recount unpaid entries of the given periods from the time clock: regular,
  * overtime and double time by the property's state, or the fixed salary.
- * A paid entry keeps exactly what was paid.
+ * A paid entry keeps exactly what was paid, and hours typed in for a period
+ * replace the time clock for it.
+ *
+ * An employee with a start date (Settings › Employees) is paid from that
+ * date on and has nothing before it. Without one, an employee is counted in
+ * the current period and in periods where they already have an entry.
  */
-async function recountPeriods(tx: Tx, propertyId: string, state: string, employees: Employee[], periods: Array<{ id: string; start: string; end: string }>, payChanges: Map<string, PayChange[]>) {
+async function recountPeriods(tx: Tx, propertyId: string, state: string, employees: Employee[], periods: Array<{ id: string; start: string; end: string }>, setup: PayrollSetup) {
   if (!periods.length) return;
+  const periodIds = periods.map((period) => period.id);
+  const existing = await tx<Array<{ periodId: string; employeeId: string; description: string | null; paid: boolean }>>`
+    select pay_period_id as "periodId",employee_id as "employeeId",description,paid from payroll_entries
+    where property_id=${propertyId}::uuid and pay_period_id = any(${periodIds}::uuid[])
+  `;
+  const existingByKey = new Map(existing.map((entry) => [`${entry.periodId}|${entry.employeeId}`, entry]));
   const from = workweekBounds(periods.reduce((min, period) => period.start < min ? period.start : min, periods[0].start), periods[0].end).from;
   const to = workweekBounds(periods[0].start, periods.reduce((max, period) => period.end > max ? period.end : max, periods[0].end)).to;
   const worked = await tx<Array<{ employeeId: string; date: string; minutes: number }>>`
@@ -89,18 +118,32 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
   `;
   const daysByEmployee = new Map<string, WorkDay[]>();
   for (const row of worked) daysByEmployee.set(row.employeeId, [...(daysByEmployee.get(row.employeeId) ?? []), { date: row.date, minutes: row.minutes }]);
-  const rows = periods.flatMap((period) => employees.map((employee) => {
-    const pay = payForPeriod(employee, payChanges.get((employee.name ?? "").trim().toLowerCase()), period.start);
+  const notEmployedYet: Array<{ period: string; employee: string }> = [];
+  const rows = periods.flatMap((period) => employees.flatMap((employee) => {
+    const key = `${period.id}|${employee.id}`;
+    const startDate = setup.startDates.get(nameKey(employee.name));
+    if (startDate ? startDate > period.end : period.id !== setup.currentPeriodId && !existingByKey.has(key)) {
+      if (startDate && existingByKey.has(key)) notEmployedYet.push({ period: period.id, employee: employee.id });
+      return [];
+    }
+    const pay = payForPeriod(employee, setup.payChanges.get(nameKey(employee.name)), period.start);
     const salaried = pay.payType === "salary";
     const split = splitWorkedMinutes(daysByEmployee.get(employee.id) ?? [], period.start, period.end, state);
     const rate = salaried ? pay.salary : pay.hourly;
+    const manual = salaried ? undefined : parseDescription(existingByKey.get(key)?.description ?? null).manualHours;
     // Salaried (exempt) staff are paid the same amount each pay period.
-    const hours = salaried ? { regularMinutes: split.regularMinutes + split.overtimeMinutes + split.doubleTimeMinutes, overtimeMinutes: 0, doubleTimeMinutes: 0 } : split;
-    return {
+    const hours = salaried ? { regularMinutes: split.regularMinutes + split.overtimeMinutes + split.doubleTimeMinutes, overtimeMinutes: 0, doubleTimeMinutes: 0 } : manual ?? split;
+    return [{
       period: period.id, employee: employee.id, type: salaried ? "salary" : "hourly", regular: hours.regularMinutes, overtime: hours.overtimeMinutes,
-      double: hours.doubleTimeMinutes, rate, gross: salaried ? rate : grossPayCents(hours, rate),
-    };
+      double: hours.doubleTimeMinutes, rate, gross: salaried ? salaryForPeriod(rate, period.start, period.end, startDate) : grossPayCents(hours, rate),
+    }];
   }));
+  // A start date moved later removes the unpaid pay from before it.
+  if (notEmployedYet.length) await tx`
+    delete from payroll_entries pe using jsonb_to_recordset(${tx.json(notEmployedYet)}) as x(period uuid,employee uuid)
+    where pe.property_id=${propertyId}::uuid and pe.pay_period_id=x.period and pe.employee_id=x.employee and pe.paid=false
+  `;
+  if (!rows.length) return;
   await tx`
     insert into payroll_entries (property_id,pay_period_id,employee_id,calculation_type,regular_minutes,overtime_minutes,rate_cents,description,gross_pay_cents,paid)
     select ${propertyId}::uuid,x.period,x.employee,x.type,x.regular,x.overtime,x.rate,
@@ -161,17 +204,39 @@ export async function GET(request: Request) {
         order by active desc,name
       `;
       const payrollIds = employees.map((employee) => employee.id);
+      const settingsEmployees = Array.isArray(configured?.value?.employees) ? configured.value.employees : [];
+      const payChanges = new Map(settingsEmployees
+        .filter((employee) => employee?.name && Array.isArray(employee.payChanges))
+        .map((employee) => [nameKey(employee.name), employee.payChanges!] as const));
+      const scheduleFrom = shiftDate(today, -SCHEDULE_DAYS);
+      const startDates = new Map(settingsEmployees
+        .filter((employee) => employee?.name && typeof employee.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(employee.startDate))
+        .map((employee) => [nameKey(employee.name), employee.startDate!] as const));
+      // An employee who started before this pay period has a pay period for
+      // every schedule period since the start date, so back pay shows up.
+      const employedNames = new Set(employees.map((employee) => nameKey(employee.name)));
+      const earliestStart = [...startDates].filter(([name]) => employedNames.has(name)).map(([, date]) => date).sort()[0];
+      const backPeriods: Array<{ start: string; end: string; payDate: string }> = [];
+      if (earliestStart && earliestStart < currentDates.start) {
+        for (let dates = previousDates; dates.end >= earliestStart && dates.end >= scheduleFrom; dates = datesForPeriod(shiftDate(dates.start, -1), frequency)) {
+          backPeriods.push({ ...dates, payDate: shiftDate(dates.end, 3) });
+        }
+      }
+      if (backPeriods.length) await tx`
+        insert into pay_periods (property_id,starts_on,ends_on,scheduled_pay_date,status)
+        select ${session.propertyId}::uuid,x.start,x."end",x."payDate",'open' from jsonb_to_recordset(${tx.json(backPeriods)}) as x(start date,"end" date,"payDate" date)
+        on conflict (property_id,starts_on,ends_on) do nothing
+      `;
       // Earlier periods with unpaid entries are recounted too, so time
       // entered after a period ended is included.
+      const backStarts = backPeriods.map((dates) => dates.start);
       const openPeriods = await tx<Array<{ id: string; start: string; end: string }>>`
-        select distinct pp.id,pp.starts_on::text as start,pp.ends_on::text as end from pay_periods pp
-        join payroll_entries pe on pe.pay_period_id=pp.id and pe.paid=false
-        where pp.property_id=${session.propertyId}::uuid and pp.id<>${period.id}::uuid and pp.ends_on >= ${shiftDate(today, -186)}::date
+        select pp.id,pp.starts_on::text as start,pp.ends_on::text as end from pay_periods pp
+        where pp.property_id=${session.propertyId}::uuid and pp.id<>${period.id}::uuid and pp.ends_on >= ${scheduleFrom}::date
+          and (exists (select 1 from payroll_entries pe where pe.pay_period_id=pp.id and pe.paid=false)
+            or (pp.status<>'custom' and pp.starts_on::text = any(${backStarts}::text[])))
       `;
-      const payChanges = new Map((Array.isArray(configured?.value?.employees) ? configured.value.employees : [])
-        .filter((employee) => employee?.name && Array.isArray(employee.payChanges))
-        .map((employee) => [employee.name!.trim().toLowerCase(), employee.payChanges!] as const));
-      await recountPeriods(tx, session.propertyId, state, employees, [period, ...openPeriods], payChanges);
+      await recountPeriods(tx, session.propertyId, state, employees, [period, ...openPeriods], { payChanges, startDates, currentPeriodId: period.id });
       const entries = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; periodId: string; roomsCleaned?: number }>>`
         select pe.id,pe.employee_id as "employeeId",pe.regular_minutes as "regularMinutes",pe.overtime_minutes as "overtimeMinutes",pe.rate_cents as "hourlyRateCents",
           pe.gross_pay_cents as "grossPayCents",pe.calculation_type as "calculationType",pe.description,pe.paid,pe.paid_on::text as "paidOn",pe.payment_method as "paymentMethod",pe.pay_period_id as "periodId",
@@ -180,18 +245,23 @@ export async function GET(request: Request) {
         from payroll_entries pe where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id=${period.id}::uuid
           and (pe.employee_id = any(${payrollIds}::uuid[]) or pe.paid) order by pe.created_at
       `;
-      // A custom date range only stays in history once it is approved or paid.
-      const history = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; periodId: string; startsOn: string; endsOn: string; roomsCleaned: number }>>`
+      // The pay schedule: every pay period of the last ~13 months, with what
+      // is paid and what is still to pay. A custom date range only stays once
+      // it is approved or paid; empty pay shows only for employees with a
+      // start date (back pay still to enter) or the current period.
+      const startedIds = employees.filter((employee) => startDates.has(nameKey(employee.name))).map((employee) => employee.id);
+      const history = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; periodId: string; startsOn: string; endsOn: string; payDate: string; roomsCleaned: number }>>`
         select pe.id,pe.employee_id as "employeeId",pe.regular_minutes as "regularMinutes",pe.overtime_minutes as "overtimeMinutes",pe.rate_cents as "hourlyRateCents",
           pe.gross_pay_cents as "grossPayCents",pe.calculation_type as "calculationType",pe.description,pe.paid,pe.paid_on::text as "paidOn",pe.payment_method as "paymentMethod",
-          pe.pay_period_id as "periodId",pp.starts_on::text as "startsOn",pp.ends_on::text as "endsOn",
+          pe.pay_period_id as "periodId",pp.starts_on::text as "startsOn",pp.ends_on::text as "endsOn",pp.scheduled_pay_date::text as "payDate",
           (select count(*) from housekeeping_records h where h.property_id=pe.property_id and h.housekeeper_employee_id=pe.employee_id
             and h.assignment_status='completed' and h.service_date between pp.starts_on and pp.ends_on)::int as "roomsCleaned"
         from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id join employees e on e.id=pe.employee_id
-        where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id<>${period.id}::uuid
-          and (pp.status<>'custom' or pe.paid or pe.description like '%"Approved"%')
-          and (pe.paid or ((pe.gross_pay_cents<>0 or pe.regular_minutes<>0) and pe.employee_id = any(${payrollIds}::uuid[])))
-        order by pp.ends_on desc,e.name limit 100
+        where pe.property_id=${session.propertyId}::uuid and pp.ends_on >= ${scheduleFrom}::date
+          and (pp.id=${period.id}::uuid or pp.status<>'custom' or pe.paid or pe.description like '%"Approved"%')
+          and (pe.paid or (pe.employee_id = any(${payrollIds}::uuid[])
+            and (pp.id=${period.id}::uuid or pe.gross_pay_cents<>0 or pe.regular_minutes<>0 or pe.employee_id = any(${startedIds}::uuid[]))))
+        order by pp.ends_on desc,e.name limit 1000
       `;
       const mapEntry = (entry: typeof entries[number]) => {
         const meta = parseDescription(entry.description);
@@ -200,6 +270,7 @@ export async function GET(request: Request) {
           overtimeMinutes: entry.overtimeMinutes ?? 0, doubleTimeMinutes: meta.doubleTimeMinutes ?? 0, payType: entry.calculationType === "salary" ? "salary" : "hourly",
           hourlyRateCents: entry.hourlyRateCents ?? 0, grossPayCents: entry.grossPayCents ?? 0, adjustmentCents: meta.adjustmentCents ?? 0,
           paymentStatus: entry.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending", paidOn: entry.paidOn, paymentMethod: entry.paymentMethod,
+          hoursEntered: Boolean(meta.manualHours),
           ...("roomsCleaned" in entry ? { roomsCleaned: Number(entry.roomsCleaned) } : {}),
         };
       };
@@ -224,7 +295,7 @@ export async function GET(request: Request) {
           };
         }),
         entries: entries.map(mapEntry),
-        history: history.map((entry) => ({ ...mapEntry(entry), periodLabel: `${entry.startsOn} to ${entry.endsOn}` })),
+        history: history.map((entry) => ({ ...mapEntry(entry), periodLabel: `${entry.startsOn} to ${entry.endsOn}`, periodStart: entry.startsOn, periodEnd: entry.endsOn, payDate: entry.payDate })),
       };
     });
     return Response.json(result);
@@ -238,6 +309,33 @@ export async function PATCH(request: Request) {
     if (!parsed.success) return Response.json({ error: "Payroll update is invalid." }, { status: 400 });
     if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
     const input = parsed.data;
+    if ("action" in input && input.action === "hours") {
+      const hours = input.hours;
+      const result = await productionSql().begin(async (tx) => {
+        const [current] = await tx<Array<{ description: string | null; paid: boolean; calculationType: string; rateCents: number | null }>>`
+          select description,paid,calculation_type as "calculationType",rate_cents as "rateCents" from payroll_entries
+          where id=${input.id}::uuid and property_id=${session.propertyId}::uuid for update
+        `;
+        if (!current) return "missing" as const;
+        if (current.paid) return "paid" as const;
+        if (current.calculationType === "salary") return "salary" as const;
+        const meta = parseDescription(current.description);
+        const description = { ...meta, manualHours: hours ?? undefined, doubleTimeMinutes: hours?.doubleTimeMinutes ?? meta.doubleTimeMinutes ?? 0 };
+        // With hours typed in, pay is worked out now; back to the time clock,
+        // the next payroll load recounts it.
+        if (hours) await tx`
+          update payroll_entries set regular_minutes=${hours.regularMinutes},overtime_minutes=${hours.overtimeMinutes},
+            gross_pay_cents=${grossPayCents(hours, current.rateCents ?? 0)},description=${tx.json(description)}::text,updated_at=now()
+          where id=${input.id}::uuid and property_id=${session.propertyId}::uuid
+        `;
+        else await tx`update payroll_entries set description=${tx.json(description)}::text,updated_at=now() where id=${input.id}::uuid and property_id=${session.propertyId}::uuid`;
+        return "updated" as const;
+      });
+      if (result === "missing") return Response.json({ error: "Payroll entry not found." }, { status: 404 });
+      if (result === "paid") return Response.json({ error: "This pay is already marked paid. Mark it Pending to change the hours." }, { status: 409 });
+      if (result === "salary") return Response.json({ error: "Salary pay does not depend on hours." }, { status: 400 });
+      return Response.json({ updated: true });
+    }
     if ("action" in input) {
       if (input.payType === "salary" && !input.salaryCents) return Response.json({ error: "Enter the salary paid each pay period." }, { status: 400 });
       if (input.payType === "hourly" && !input.hourlyRateCents) return Response.json({ error: "Enter the hourly rate." }, { status: 400 });

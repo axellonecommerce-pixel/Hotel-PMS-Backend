@@ -19,13 +19,20 @@ const entrySchema = z.object({
 
 type EntryRow = { id: string; workDate: string; employeeName: string; clockIn: string; clockOut: string | null; breakStart: string | null; breakEnd: string | null; breakMinutes: number; hourlyRateCents: number | null; roomsCleaned: number; rooms: string[] };
 
+/** Clock times are entered and shown in the motel's own time zone. */
+async function propertyZone(propertyId: string) {
+  const [property] = await productionSql()<Array<{ timezone: string | null }>>`select timezone from properties where id=${propertyId}::uuid`;
+  return property?.timezone || "America/Los_Angeles";
+}
+
 async function listEntries(propertyId: string) {
+  const zone = await propertyZone(propertyId);
   return productionSql()<EntryRow[]>`
     select te.id,te.work_date::text as "workDate",e.name as "employeeName",
-      to_char(te.clock_in_at at time zone 'America/Los_Angeles','HH24:MI') as "clockIn",
-      case when te.clock_out_at is null then null else to_char(te.clock_out_at at time zone 'America/Los_Angeles','HH24:MI') end as "clockOut",
-      case when te.break_start_at is null then null else to_char(te.break_start_at at time zone 'America/Los_Angeles','HH24:MI') end as "breakStart",
-      case when te.break_end_at is null then null else to_char(te.break_end_at at time zone 'America/Los_Angeles','HH24:MI') end as "breakEnd",
+      to_char(te.clock_in_at at time zone ${zone}::text,'HH24:MI') as "clockIn",
+      case when te.clock_out_at is null then null else to_char(te.clock_out_at at time zone ${zone}::text,'HH24:MI') end as "clockOut",
+      case when te.break_start_at is null then null else to_char(te.break_start_at at time zone ${zone}::text,'HH24:MI') end as "breakStart",
+      case when te.break_end_at is null then null else to_char(te.break_end_at at time zone ${zone}::text,'HH24:MI') end as "breakEnd",
       te.break_minutes as "breakMinutes",e.hourly_rate_cents as "hourlyRateCents",
       coalesce((select count(*) from housekeeping_records h where h.property_id=te.property_id and h.housekeeper_employee_id=te.employee_id and h.service_date=te.work_date and h.assignment_status='completed'),0)::int as "roomsCleaned",
       coalesce((select array_agg(r.number order by r.number) from housekeeping_records h join rooms r on r.id=h.room_id where h.property_id=te.property_id and h.housekeeper_employee_id=te.employee_id and h.service_date=te.work_date and h.assignment_status='completed'),'{}') as rooms
@@ -52,6 +59,7 @@ export async function POST(request: Request) {
     const input = parsed.data;
     if (input.clockOut && input.clockOut <= input.clockIn) return Response.json({ error: "Clock-out must be later than clock-in." }, { status: 400 });
     if ((input.breakStart || input.breakEnd) && (!input.breakStart || !input.breakEnd || input.breakEnd <= input.breakStart)) return Response.json({ error: "Break end must be later than break start." }, { status: 400 });
+    const zone = await propertyZone(session.propertyId);
     const entry = await productionSql().begin(async (tx) => {
       const [employee] = await tx<Array<{ id: string }>>`
         select id from employees where property_id=${session.propertyId}::uuid and active=true and lower(name)=lower(${input.employeeName}) limit 1 for update
@@ -70,7 +78,7 @@ export async function POST(request: Request) {
         for (const roomId of roomIds) {
           await tx`
             insert into housekeeping_records (property_id,room_id,housekeeper_employee_id,service_date,service_type,cleanliness_status,assignment_status,completed_at)
-            values (${session.propertyId}::uuid,${roomId}::uuid,${employee.id}::uuid,${input.workDate}::date,'standard','clean','completed',(${completedAt}::timestamp at time zone 'America/Los_Angeles'))
+            values (${session.propertyId}::uuid,${roomId}::uuid,${employee.id}::uuid,${input.workDate}::date,'standard','clean','completed',(${completedAt}::text::timestamp at time zone ${zone}::text))
             on conflict (room_id,service_date) do update set housekeeper_employee_id=excluded.housekeeper_employee_id, assignment_status='completed',
               completed_at=coalesce(housekeeping_records.completed_at, excluded.completed_at),
               cleanliness_status=case when ${input.workDate}::date < current_date then 'clean' else housekeeping_records.cleanliness_status end
@@ -81,19 +89,19 @@ export async function POST(request: Request) {
         insert into time_entries (property_id,employee_id,work_date,clock_in_at,clock_out_at,break_start_at,break_end_at,lunch_taken,break_minutes,correction_note)
         values (
           ${session.propertyId}::uuid,${employee.id}::uuid,${input.workDate},
-          (${input.workDate}::date + ${input.clockIn}::time) at time zone 'America/Los_Angeles',
-          case when ${input.clockOut ?? null}::text is null then null else (${input.workDate}::date + ${input.clockOut ?? null}::time) at time zone 'America/Los_Angeles' end,
-          case when ${input.breakStart ?? null}::text is null then null else (${input.workDate}::date + ${input.breakStart ?? null}::time) at time zone 'America/Los_Angeles' end,
-          case when ${input.breakEnd ?? null}::text is null then null else (${input.workDate}::date + ${input.breakEnd ?? null}::time) at time zone 'America/Los_Angeles' end,
+          (${input.workDate}::date + ${input.clockIn}::time) at time zone ${zone}::text,
+          case when ${input.clockOut ?? null}::text is null then null else (${input.workDate}::date + ${input.clockOut ?? null}::time) at time zone ${zone}::text end,
+          case when ${input.breakStart ?? null}::text is null then null else (${input.workDate}::date + ${input.breakStart ?? null}::time) at time zone ${zone}::text end,
+          case when ${input.breakEnd ?? null}::text is null then null else (${input.workDate}::date + ${input.breakEnd ?? null}::time) at time zone ${zone}::text end,
           ${Boolean(input.breakStart && input.breakEnd)},${input.breakMinutes},${input.correctionNote ?? null}
         )
         on conflict (employee_id,work_date) do update set
           clock_in_at=excluded.clock_in_at,clock_out_at=excluded.clock_out_at,break_start_at=excluded.break_start_at,break_end_at=excluded.break_end_at,lunch_taken=excluded.lunch_taken,break_minutes=excluded.break_minutes,correction_note=excluded.correction_note
         returning id,work_date::text as "workDate",(select name from employees where id=employee_id) as "employeeName",
-          to_char(clock_in_at at time zone 'America/Los_Angeles','HH24:MI') as "clockIn",
-          case when clock_out_at is null then null else to_char(clock_out_at at time zone 'America/Los_Angeles','HH24:MI') end as "clockOut",
-          case when break_start_at is null then null else to_char(break_start_at at time zone 'America/Los_Angeles','HH24:MI') end as "breakStart",
-          case when break_end_at is null then null else to_char(break_end_at at time zone 'America/Los_Angeles','HH24:MI') end as "breakEnd",
+          to_char(clock_in_at at time zone ${zone}::text,'HH24:MI') as "clockIn",
+          case when clock_out_at is null then null else to_char(clock_out_at at time zone ${zone}::text,'HH24:MI') end as "clockOut",
+          case when break_start_at is null then null else to_char(break_start_at at time zone ${zone}::text,'HH24:MI') end as "breakStart",
+          case when break_end_at is null then null else to_char(break_end_at at time zone ${zone}::text,'HH24:MI') end as "breakEnd",
           break_minutes as "breakMinutes",(select hourly_rate_cents from employees where id=employee_id) as "hourlyRateCents",
           coalesce((select count(*) from housekeeping_records h where h.property_id=time_entries.property_id and h.housekeeper_employee_id=time_entries.employee_id and h.service_date=time_entries.work_date and h.assignment_status='completed'),0)::int as "roomsCleaned",
           coalesce((select array_agg(r.number order by r.number) from housekeeping_records h join rooms r on r.id=h.room_id where h.property_id=time_entries.property_id and h.housekeeper_employee_id=time_entries.employee_id and h.service_date=time_entries.work_date and h.assignment_status='completed'),'{}') as rooms

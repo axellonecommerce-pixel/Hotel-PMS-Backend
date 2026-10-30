@@ -129,8 +129,9 @@ flowchart TD
 ```mermaid
 flowchart TD
   A[Owner sets the property's state in Settings › Property] --> B[Choose pay schedule: weekly, biweekly, semi-monthly or monthly]
-  B --> C[Set each employee: hourly rate or salary per period]
-  C --> D[Housekeepers clock in and out]
+  B --> C[Set each employee: hourly rate or salary per period, and start date]
+  C --> C2[Payroll creates every pay period since the start date: Pay Schedule shows pay date, amount, Paid or Pending]
+  C2 --> D[Housekeepers clock in and out, or staff type hours for a past period]
   D --> E[Payroll splits hours: regular, overtime, double time by state]
   E --> F[Review gross, estimated taxes and take-home; fix rates below minimum wage]
   F --> G[Approve]

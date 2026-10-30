@@ -63,6 +63,9 @@ These rules apply to humans, AI coding tools, both repositories, database work, 
 - State rules and 2026 tax tables live in `frontend/src/lib/payroll/us-payroll-rules.ts` with their sources and an "as of" date. Review them every January and July (minimum wage changes) and update the date.
 - Tax amounts are estimates and must be labelled as estimates. Never present them as filed or exact withholding.
 - Loading payroll creates the period for the saved schedule, so the screen must wait for saved settings before loading.
+- An employee with a start date has a pay entry in every period from that date on (back to `SCHEDULE_DAYS`, 400 days) and none before it; moving the start date later removes unpaid entries before it. Without a start date, an employee is counted in the current period and in periods where they already have an entry.
+- Hours typed in for a period are stored on the entry (`manualHours`) and are not overwritten by the time clock recount. Paid entries are never recounted.
+- Clock times use the property's time zone, never a fixed zone. A text parameter cast to `timestamp` must go through `::text::timestamp`; postgres.js otherwise sends it as a time with zone and shifts it.
 
 ## 5. Database changes
 
