@@ -53,7 +53,33 @@ export async function POST(request: Request) {
         values (${invoice.propertyId}::uuid,'manager','INVOICE_REMINDER','Company invoice requires follow-up',${`${invoice.number} was due ${invoice.dueDate}.`},'invoice',${invoice.id}::uuid)`;
     });
     const recurringExpensesPosted = await sql.begin((tx) => postDueRecurringExpenses(tx));
-    return Response.json({ warned: expiring.length, deleted: expired.length, invoiceReminders: reminders.length, recurringExpensesPosted });
+    // Pay reminders: the day before and on each employee's pay date (in the
+    // motel's time zone), for pay not paid, deleted or only a custom range.
+    const payDue = await sql<Array<{ id: string; propertyId: string; name: string; cents: number; start: string; end: string; payDate: string; when: "today" | "tomorrow" }>>`
+      with local as (select id,(now() at time zone coalesce(timezone,'America/Los_Angeles'))::date as today from properties)
+      select pe.id,pe.property_id as "propertyId",e.name,
+        (pe.gross_pay_cents + coalesce(case when pe.description ~ '^\\s*\\{' then (pe.description::jsonb->>'adjustmentCents')::int end,0))::int as cents,
+        pp.starts_on::text as start,pp.ends_on::text as "end",pp.scheduled_pay_date::text as "payDate",
+        case when pp.scheduled_pay_date=l.today then 'today' else 'tomorrow' end as "when"
+      from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id join employees e on e.id=pe.employee_id join local l on l.id=pe.property_id
+      where pe.paid=false and e.active and pp.scheduled_pay_date in (l.today, l.today + 1)
+        and coalesce(pe.description,'') !~ '"removed": ?true'
+        and (pp.status<>'custom' or coalesce(pe.description,'') like '%"Approved"%')
+        and pe.gross_pay_cents > 0
+    `;
+    let payReminders = 0;
+    for (const due of payDue) {
+      const title = `Pay ${due.name} ${due.when}`;
+      const message = `$${(due.cents / 100).toFixed(2)} for ${due.start} to ${due.end}, pay date ${due.payDate}. Open Payroll and press Pay.`;
+      const inserted = await sql`
+        insert into notifications (property_id,recipient_role,type,title,message,resource_type,resource_id)
+        select ${due.propertyId}::uuid,role,'PAYROLL_REMINDER',${title},${message},'payroll_entry',${due.id}::uuid from unnest(array['owner','manager']) as role
+        where not exists (select 1 from notifications n where n.property_id=${due.propertyId}::uuid and n.type='PAYROLL_REMINDER' and n.resource_id=${due.id}::uuid and n.title=${title})
+        returning id
+      `;
+      if (inserted.length) payReminders += 1;
+    }
+    return Response.json({ warned: expiring.length, deleted: expired.length, invoiceReminders: reminders.length, recurringExpensesPosted, payReminders });
   }
   const now = new Date();
   const warningCutoff = new Date(now.getTime() + 7 * 86_400_000).toISOString();
