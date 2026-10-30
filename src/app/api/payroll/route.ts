@@ -283,16 +283,16 @@ export async function GET(request: Request) {
           and exists (select 1 from payroll_entries pe where pe.pay_period_id=pp.id and pe.paid=false)
       `;
       await recountPeriods(tx, session.propertyId, state, employees, [...periodRows, ...openPeriods], { payChanges, startDates, frequencyOf, shownPeriodOf });
-      type EntryRow = { id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; periodId: string; startsOn: string; endsOn: string; payDate: string; roomsCleaned: number };
+      type EntryRow = { id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; periodId: string; startsOn: string; endsOn: string; payDate: string; periodStatus: string; roomsCleaned: number };
       // The pay schedule: every pay period of the last ~13 months, with what
       // is paid and what is still to pay. A custom date range only stays once
       // it is approved or paid; empty pay shows only for employees with a
       // start date (back pay still to enter) or the periods shown.
       const startedIds = employees.filter((employee) => startDates.has(nameKey(employee.name))).map((employee) => employee.id);
-      const history = await tx<EntryRow[]>`
+      const scheduleRows = await tx<EntryRow[]>`
         select pe.id,pe.employee_id as "employeeId",pe.regular_minutes as "regularMinutes",pe.overtime_minutes as "overtimeMinutes",pe.rate_cents as "hourlyRateCents",
           pe.gross_pay_cents as "grossPayCents",pe.calculation_type as "calculationType",pe.description,pe.paid,pe.paid_on::text as "paidOn",pe.payment_method as "paymentMethod",
-          pe.pay_period_id as "periodId",pp.starts_on::text as "startsOn",pp.ends_on::text as "endsOn",pp.scheduled_pay_date::text as "payDate",
+          pe.pay_period_id as "periodId",pp.starts_on::text as "startsOn",pp.ends_on::text as "endsOn",pp.scheduled_pay_date::text as "payDate",pp.status as "periodStatus",
           (select count(*) from housekeeping_records h where h.property_id=pe.property_id and h.housekeeper_employee_id=pe.employee_id
             and h.assignment_status='completed' and h.service_date between pp.starts_on and pp.ends_on)::int as "roomsCleaned"
         from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id join employees e on e.id=pe.employee_id
@@ -302,9 +302,14 @@ export async function GET(request: Request) {
             and (pp.id = any(${shownIds}::uuid[]) or pe.gross_pay_cents<>0 or pe.regular_minutes<>0 or pe.employee_id = any(${startedIds}::uuid[]))))
         order by pp.ends_on desc,e.name limit 1000
       `.then((rows) => rows.filter((row) => !parseDescription(row.description).removed));
+      // A custom date range is for checking hours and pay; it overlaps the
+      // pay periods, so it is not part of the schedule unless it was already
+      // approved or paid that way.
+      const isLooseCustom = (entry: EntryRow) => entry.periodStatus === "custom" && !entry.paid && parseDescription(entry.description).status !== "Approved";
+      const history = scheduleRows.filter((entry) => !isLooseCustom(entry));
       // The period table: each employee's shown period (paid staff who are no
       // longer on payroll still show in the motel's period).
-      const entries = history.filter((entry) => shownPeriodOf.has(entry.employeeId) ? shownPeriodOf.get(entry.employeeId) === entry.periodId : entry.periodId === period.id);
+      const entries = scheduleRows.filter((entry) => shownPeriodOf.has(entry.employeeId) ? shownPeriodOf.get(entry.employeeId) === entry.periodId : entry.periodId === period.id);
       const mapEntry = (entry: EntryRow) => {
         const meta = parseDescription(entry.description);
         return {
@@ -314,12 +319,13 @@ export async function GET(request: Request) {
           paymentStatus: entry.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending", paidOn: entry.paidOn, paymentMethod: entry.paymentMethod,
           hoursEntered: Boolean(meta.manualHours), roomsCleaned: Number(entry.roomsCleaned),
           periodLabel: `${entry.startsOn} to ${entry.endsOn}`, periodStart: entry.startsOn, periodEnd: entry.endsOn, payDate: entry.payDate,
+          customRange: entry.periodStatus === "custom",
         };
       };
       return {
         frequency,
         state,
-        period: { id: period.id, label: `${period.start} to ${period.end}`, startDate: period.start, endDate: period.end, payDate: period.payDate },
+        period: { id: period.id, label: `${period.start} to ${period.end}`, startDate: period.start, endDate: period.end, payDate: period.payDate, custom: period.status === "custom" },
         currentPeriod: currentDates,
         previousPeriod: previousDates,
         employees: employees.map((employee) => {
@@ -418,12 +424,16 @@ export async function PATCH(request: Request) {
       return Response.json({ updated: true });
     }
     const updated = await productionSql().begin(async (tx) => {
-      const [current] = await tx<Array<{ description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null }>>`
-        select description,paid,paid_on::text as "paidOn",payment_method as "paymentMethod" from payroll_entries
-        where id=${input.id}::uuid and property_id=${session.propertyId}::uuid for update
+      const [current] = await tx<Array<{ description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; custom: boolean }>>`
+        select pe.description,pe.paid,pe.paid_on::text as "paidOn",pe.payment_method as "paymentMethod",pp.status='custom' as custom
+        from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id
+        where pe.id=${input.id}::uuid and pe.property_id=${session.propertyId}::uuid for update of pe
       `;
       if (!current) return "missing" as const;
       const meta = parseDescription(current.description);
+      // Paying a custom date range would pay hours again that its pay periods
+      // already pay. Earlier approved or paid ranges can still be undone.
+      if (current.custom && !current.paid && meta.status !== "Approved" && (input.status === "Approved" || input.status === "Paid")) return "custom" as const;
       const status = input.status ?? (current.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending");
       if (current.paid && input.adjustmentCents !== undefined && input.adjustmentCents !== (meta.adjustmentCents ?? 0)) return "paid" as const;
       const paid = status === "Paid";
@@ -438,6 +448,7 @@ export async function PATCH(request: Request) {
     });
     if (updated === "missing") return Response.json({ error: "Payroll entry not found." }, { status: 404 });
     if (updated === "paid") return Response.json({ error: "This pay is already marked paid. Mark it Pending to change the adjustment." }, { status: 409 });
+    if (updated === "custom") return Response.json({ error: "A custom date range is only for checking hours. Pay each pay period from the Pay Schedule instead." }, { status: 409 });
     return Response.json({ updated: true });
   } catch (error) { return propertyAccessResponse(error); }
 }
