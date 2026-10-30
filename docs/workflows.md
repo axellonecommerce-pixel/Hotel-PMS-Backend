@@ -45,11 +45,12 @@ A motel is one `properties` row. Everything else is scoped to it by `property_id
 1. **Settings › Property:** country and state. This decides the payroll rules: minimum wage, overtime, tax brackets, pay frequency, final pay and breaks.
 2. **Settings › Payroll:** the motel's pay schedule (weekly, biweekly, semi-monthly or monthly), plus an optional city or county minimum wage. An employee paid on a different schedule gets their own in Settings › Employees › Pay Schedule.
 3. **Employees:** add them in Settings › Employees with pay type, rate or salary, usual payment method and tax withholding ("No tax" pays the full gross). Payroll lists only these employees, not staff sign-ins. Pay can also be changed from the Payroll drawer.
-   Advances and pay increases are recorded on the employee too: advances come back out of the next take-home pay; a pay increase starts with the first pay period that begins on or after its date.
+   Pay increases are recorded on the employee; advances are recorded in Payroll › Advances and come back out of the next take-home pay; a pay increase starts with the first pay period that begins on or after its date.
    The start date decides when pay begins: Payroll creates every pay period since then and lists it in the Pay Schedule with its pay date and amount.
 4. **Hours:** the time clock provides them. The server splits them into regular, overtime and double time by state, with Monday-to-Sunday workweeks. For a past pay period the clock did not record, open it in the Pay Schedule and type the hours worked.
 5. **Review:** check gross pay, estimated deductions and estimated take-home. Payroll flags rates below the minimum wage.
-6. **Approve, then Mark Paid:** record the method (Cash, Check, Direct deposit or Other) and the paid date, for the current period or any period in the Pay Schedule. Overdue periods are flagged. Use the Employee filter or search to see one person. To change a paid entry, mark it Pending first.
+6. **Approve, then Mark Paid:** record the method (Cash, Check, Direct deposit or Other) and the paid date, for the current period or any period in the Pay Schedule. Overdue periods are flagged. Use the Employee filter or search to see one person. To change a paid entry's amount, mark it Pending first; its method and paid date can be edited directly. Delete removes unpaid pay entered by mistake.
+7a. **Leaving employees:** pay or delete what is still owed, then set them Inactive in Settings › Employees. Someone who was ever paid can only be made inactive; their paid payroll stays.
 7. **Profit & Loss** includes the paid wages under Schedule C line 26.
 
 State data is a reference compiled for 2026; see the "as of" date on the Payroll screen. Review it each January and July, when minimum wages change. Taxes are estimates; the PMS does not file payroll.

@@ -65,6 +65,8 @@ These rules apply to humans, AI coding tools, both repositories, database work, 
 - Loading payroll creates the period for the saved schedule, so the screen must wait for saved settings before loading.
 - An employee with a start date has a pay entry in every period from that date on (back to `SCHEDULE_DAYS`, 400 days) and none before it; moving the start date later removes unpaid entries before it. Without a start date, an employee is counted in the current period and in periods where they already have an entry.
 - Each employee's periods follow their own pay schedule (`payFrequency` in Settings › Employees, else the motel's). An untouched unpaid entry in a period that is not on the employee's schedule (left from an earlier schedule) is removed; approved, adjusted or typed-in entries are kept.
+- A deleted pay entry keeps its row with `removed: true` so the recount never adds it again; lists and owed totals skip it. Inactive employees are not recounted.
+- `GET /api/payroll/status` is the read-only per-employee summary (paid count, owed) that Settings uses to block Delete and Inactive; owed counts what the Pay Schedule shows.
 - Hours typed in for a period are stored on the entry (`manualHours`) and are not overwritten by the time clock recount. Paid entries are never recounted.
 - Clock times use the property's time zone, never a fixed zone. A text parameter cast to `timestamp` must go through `::text::timestamp`; postgres.js otherwise sends it as a time with zone and shifts it.
 

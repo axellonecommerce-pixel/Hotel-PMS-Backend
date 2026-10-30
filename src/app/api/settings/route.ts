@@ -203,8 +203,8 @@ async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: st
   }
   // An employee deleted in Settings is removed. Staff with a login are
   // managed under Staff Logins and are never in this list, so skip them. An
-  // employee with history (shifts, time, payroll, …) is deactivated instead
-  // so those records keep their employee.
+  // employee with history (shifts, time, paid payroll, …) is deactivated
+  // instead so those records keep their employee and stay unchanged.
   if (Array.isArray(value.employees)) {
     const keptNames = employeeRows.map((employee) => employee.name.toLowerCase());
     const removed = await tx<Array<{ id: string }>>`
@@ -212,6 +212,13 @@ async function synchronizeConfiguredInventory(tx: TransactionSql, propertyId: st
       where property_id=${propertyId}::uuid and membership_id is null and not (lower(name) = any(${keptNames}::text[]))
     `;
     for (const employee of removed) {
+      // Unpaid $0 or deleted pay goes with the employee; paid pay (and any
+      // owed pay) stays, so the employee is then kept as inactive.
+      await tx`
+        delete from payroll_entries where employee_id=${employee.id}::uuid and paid=false
+          and (gross_pay_cents + coalesce(case when description ~ '^\\s*\\{' then (description::jsonb->>'adjustmentCents')::int end,0) <= 0
+            or coalesce(description,'') ~ '"removed": ?true')
+      `;
       try {
         await tx.savepoint((sp) => sp`delete from employees where id=${employee.id}::uuid`);
       } catch {

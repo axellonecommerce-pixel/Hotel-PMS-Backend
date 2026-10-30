@@ -10,6 +10,9 @@ const PAYROLL_PAYMENT_METHODS = ["Cash", "Check", "Direct deposit", "Other"] as 
 const updateSchema = z.union([
   // Checked first. The status update below is strict, so a request with
   // invalid hours is refused instead of being read as a status change.
+  // Delete a pay entry entered by mistake. It stays deleted: Payroll does
+  // not count that employee in that period again. Paid pay is never deleted.
+  z.object({ action: z.literal("delete"), id: z.string().uuid() }),
   // Hours typed in for a pay period the time clock did not record (for
   // example before the employee was set up); null goes back to the clock.
   z.object({
@@ -41,7 +44,7 @@ type StoredPayroll = { payroll?: { frequency?: string }; property?: { state?: st
 const PAY_FREQUENCIES = ["Weekly", "Biweekly", "Semi-monthly", "Monthly"];
 
 type ManualHours = { regularMinutes: number; overtimeMinutes: number; doubleTimeMinutes: number };
-type EntryMeta = { adjustmentCents?: number; status?: string; doubleTimeMinutes?: number; manualHours?: ManualHours };
+type EntryMeta = { adjustmentCents?: number; status?: string; doubleTimeMinutes?: number; manualHours?: ManualHours; removed?: boolean };
 /** Back-dated start dates create pay periods up to this far back. */
 const SCHEDULE_DAYS = 400;
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -114,7 +117,8 @@ const nameKey = (name: string | null | undefined) => (name ?? "").trim().toLower
  * (Settings › Employees) they have every period of it from that date on and
  * nothing before it; without one, the period Payroll shows and periods where
  * they already have an entry. A custom date range counts for the employees
- * shown in it.
+ * shown in it. Inactive employees get no new pay (what they have is kept),
+ * and a deleted entry is never counted again.
  */
 async function recountPeriods(tx: Tx, propertyId: string, state: string, employees: Employee[], periods: PeriodRow[], setup: PayrollSetup) {
   if (!periods.length) return;
@@ -144,6 +148,9 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
     const meta = parseDescription(current?.description ?? null);
     // An untouched unpaid entry left from an earlier schedule is removed.
     const untouched = current && !current.paid && meta.status !== "Approved" && !meta.adjustmentCents && !meta.manualHours;
+    // Deleted pay is never counted again. An inactive employee gets no new
+    // pay, and pay they already have is kept as it is (to pay or delete).
+    if (meta.removed || !employee.active) return [];
     let counted: boolean;
     if (startDate && startDate > period.end) counted = false;
     else if (period.status === "custom") counted = shown || Boolean(current);
@@ -294,7 +301,7 @@ export async function GET(request: Request) {
           and (pe.paid or (pe.employee_id = any(${payrollIds}::uuid[])
             and (pp.id = any(${shownIds}::uuid[]) or pe.gross_pay_cents<>0 or pe.regular_minutes<>0 or pe.employee_id = any(${startedIds}::uuid[]))))
         order by pp.ends_on desc,e.name limit 1000
-      `;
+      `.then((rows) => rows.filter((row) => !parseDescription(row.description).removed));
       // The period table: each employee's shown period (paid staff who are no
       // longer on payroll still show in the motel's period).
       const entries = history.filter((entry) => shownPeriodOf.has(entry.employeeId) ? shownPeriodOf.get(entry.employeeId) === entry.periodId : entry.periodId === period.id);
@@ -345,6 +352,21 @@ export async function PATCH(request: Request) {
     if (!parsed.success) return Response.json({ error: "Payroll update is invalid." }, { status: 400 });
     if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
     const input = parsed.data;
+    if ("action" in input && input.action === "delete") {
+      const result = await productionSql().begin(async (tx) => {
+        const [current] = await tx<Array<{ description: string | null; paid: boolean }>>`
+          select description,paid from payroll_entries where id=${input.id}::uuid and property_id=${session.propertyId}::uuid for update
+        `;
+        if (!current) return "missing" as const;
+        if (current.paid) return "paid" as const;
+        const description = { ...parseDescription(current.description), removed: true, status: "Pending" };
+        await tx`update payroll_entries set description=${tx.json(description)}::text,updated_at=now() where id=${input.id}::uuid and property_id=${session.propertyId}::uuid`;
+        return "deleted" as const;
+      });
+      if (result === "missing") return Response.json({ error: "Payroll entry not found." }, { status: 404 });
+      if (result === "paid") return Response.json({ error: "Paid pay cannot be deleted. Mark it Pending first if it was not really paid." }, { status: 409 });
+      return Response.json({ deleted: true });
+    }
     if ("action" in input && input.action === "hours") {
       const hours = input.hours;
       const result = await productionSql().begin(async (tx) => {
