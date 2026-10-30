@@ -80,7 +80,7 @@ The first release is employee-only. It supports many hotels, but one owner accou
 ### 3.6 Payments, refunds, debt, and deposits
 
 - **FR-PAY-001:** Methods: cash, credit card, debit card, check, bank transfer, direct bill, and other. Other requires a note.
-- **FR-PAY-002:** Cards are processed outside the PMS. Optional recorded fields are card type, last four digits, and approval/reference number. Full card/CVV storage is forbidden. A guest's saved payment source (Payments › Payment Sources) stores a card label, an optional processor reference of any length up to 200 characters, and an optional note for the motel; no card digits are asked for.
+- **FR-PAY-002:** Cards are processed outside the PMS. Optional recorded fields are card type, last four digits, and approval/reference number. Full card/CVV storage is forbidden. A guest's saved payment source (Payments › Payment Sources) stores a card label, an optional processor reference of any length up to 200 characters, an optional number (a reference or last digits; a full card number is refused) and date (e.g. expiry), and an optional note for the motel. Saved sources are listed with Edit and Delete.
 - **FR-PAY-003:** Incorrect payments may be permanently deleted by authorized roles. Refunds select the original payment, support multiple partial refunds, and cannot exceed the unrefunded amount.
 - **FR-PAY-004:** BAD DEBT settles an uncollectible guest balance for checkout and posts as a separate loss/expense.
 - **FR-DEP-001:** Security deposits are per room, including groups, and may be card authorization or cash. Deductions require notes, support multiple reasons, allow partial release, and can optionally appear on the printed folio.

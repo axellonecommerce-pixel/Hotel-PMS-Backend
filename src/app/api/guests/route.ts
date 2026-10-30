@@ -8,7 +8,8 @@ import { deletePrivateFiles } from "@/server/storage/private-files";
 type Address = { addressLine1?: string; postalCode?: string; city?: string; state?: string; country?: string; countryCode?: string };
 // These profile values live with the configurable guest preferences so they
 // remain durable without requiring an unsafe production schema migration.
-type Preferences = { paymentSourceNotes?: Record<string, string>; fixedRateCents?: number; dateOfBirth?: string; idExpires?: string; secondaryPhone?: string; secondaryEmail?: string; roomPreferences?: Record<string, unknown> };
+type SourceDetails = { note?: string; number?: string; date?: string };
+type Preferences = { paymentSourceNotes?: Record<string, string>; paymentSourceDetails?: Record<string, SourceDetails>; fixedRateCents?: number; dateOfBirth?: string; idExpires?: string; secondaryPhone?: string; secondaryEmail?: string; roomPreferences?: Record<string, unknown> };
 
 const blankAsNull = <T extends z.ZodTypeAny>(schema: T) => z.preprocess((value) => (value === "" ? null : value), schema);
 const guestStatusSchema = z.enum(["Regular", "Returning", "New", "Do Not Rent"]);
@@ -18,9 +19,12 @@ const paymentSourceSchema = z.object({
   last4: z.string().regex(/^\d{4}$/).optional(),
   tokenReference: z.string().trim().max(200).optional(),
   note: z.string().trim().max(500).optional(),
+  // A reference number (not a full card number) and a date, e.g. expiry.
+  number: z.string().trim().max(60).refine((value) => !/^\d{13,19}$/.test(value.replace(/[\s-]/g, "")), "Never store a full card number.").optional(),
+  date: z.string().trim().max(40).optional(),
 });
-// guest_payment_sources has no note column; notes live in the guest's
-// preferences, keyed by the source's label and reference.
+// guest_payment_sources has no note, number or date columns; they live in the
+// guest's preferences, keyed by the source's label and reference.
 const paymentSourceKey = (source: { label: string; tokenReference?: string | null }) => `${source.label.trim().toLowerCase()}|${(source.tokenReference ?? "").trim()}`;
 // Any one detail is enough (a plate may be unknown at first); all blank removes the vehicle.
 const vehicleSchema = z.object({
@@ -149,7 +153,7 @@ async function listGuests(propertyId: string) {
       email: guest.email ?? undefined, secondaryPhone: prefs.secondaryPhone, secondaryEmail: prefs.secondaryEmail, status: apiStatus(guest.guestStatus), fixedRateCents: prefs.fixedRateCents, dateOfBirth: prefs.dateOfBirth, idExpires: prefs.idExpires, roomPreferences: prefs.roomPreferences,
       idType: identity?.idType, driverLicenseNumber: identity?.idNumber, notes: guest.remarks ?? undefined, dnrRemarks: guest.dnrReason ?? undefined,
       vehicle: vehicle ? { plate: vehicle.plate, make: vehicle.make ?? "", color: vehicle.color ?? "", year: vehicle.year ?? "" } : undefined,
-      savedPaymentSources: (sourcesByGuest.get(guest.id) ?? []).map((source) => { const label = source.label ?? source.method; const tokenReference = source.externalReference ?? ""; return { id: source.id, label, last4: source.last4 ?? undefined, tokenReference, note: prefs.paymentSourceNotes?.[paymentSourceKey({ label, tokenReference })] }; }),
+      savedPaymentSources: (sourcesByGuest.get(guest.id) ?? []).map((source) => { const label = source.label ?? source.method; const tokenReference = source.externalReference ?? ""; const key = paymentSourceKey({ label, tokenReference }); const details = prefs.paymentSourceDetails?.[key] ?? { note: prefs.paymentSourceNotes?.[key] }; return { id: source.id, label, last4: source.last4 ?? undefined, tokenReference, note: details.note, number: details.number, date: details.date }; }),
       remarkEntries: (remarksByGuest.get(guest.id) ?? []).map((remark) => ({ id: remark.id, text: remark.text, createdAt: remark.createdAt })),
       totalStays: guestStays.length, lastStayDate: guestStays[0]?.checkoutDate,
       stayHistory: guestStays.map((stay) => ({ ...stay, room: stay.room ?? "Unassigned", paymentType: "Credit" })),
@@ -193,8 +197,10 @@ export async function PATCH(request: Request) {
       if (input.idExpires !== undefined) preferences.idExpires = input.idExpires ?? undefined;
       if (input.roomPreferences !== undefined) preferences.roomPreferences = input.roomPreferences;
       if (input.savedPaymentSources !== undefined) {
-        const sourceNotes = Object.fromEntries(input.savedPaymentSources.filter((source) => source.note).map((source) => [paymentSourceKey(source), source.note!]));
-        preferences.paymentSourceNotes = Object.keys(sourceNotes).length ? sourceNotes : undefined;
+        const details = Object.fromEntries(input.savedPaymentSources.filter((source) => source.note || source.number || source.date)
+          .map((source) => [paymentSourceKey(source), { note: source.note || undefined, number: source.number || undefined, date: source.date || undefined }]));
+        preferences.paymentSourceDetails = Object.keys(details).length ? details : undefined;
+        preferences.paymentSourceNotes = undefined;
       }
       const notes = input.notes ?? null;
       const dnrRemarks = input.dnrRemarks ?? null;
