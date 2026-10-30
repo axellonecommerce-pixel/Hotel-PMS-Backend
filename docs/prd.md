@@ -41,7 +41,7 @@ The first release is employee-only. It supports many hotels, but one owner accou
 ### 3.2 Guests and identity
 
 - **FR-GST-001:** A reservation may contain multiple guests. Each guest stores name, phone, address, ID type/number, ID image, dated append-only remark entries, DNR information, and payment-source metadata. Adding a new guest remark never replaces an earlier remark.
-- **FR-GST-002:** ID images may be uploaded or scanned and are retained for one year. Staff receive an in-app notification seven days before automatic image deletion and can download the guest profile plus image as PDF. Other guest/stay data is retained until an authorized deletion.
+- **FR-GST-002:** ID images may be uploaded or scanned and are retained for one year. Staff receive an in-app notification seven days before automatic image deletion and can download the guest profile plus image as PDF. Other guest/stay data is retained until an authorized deletion. Scan ID reads, on the device: a US/Canadian driver license or state ID from the barcode on the back; any passport photo page or ID card with machine-readable <<< lines (e.g. the back of a Mexican INE voter card; H/M read as male/female for Mexico). IDs with neither are typed in.
 - **FR-GST-003:** Excel/CSV guest import is supported; ID type and ID number are mandatory. Other bulk imports are out of scope.
 - **FR-GST-004:** Matching ID numbers automatically merge duplicate profiles. The newest profile details win; remarks and DNR data merge; identical payment sources deduplicate; distinct payment sources remain.
 - **FR-GST-005:** DNR opens a warning rather than a hard block. Staff may override only after entering a reason. All guest and DNR remarks appear in reservations.
