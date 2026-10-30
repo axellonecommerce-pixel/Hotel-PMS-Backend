@@ -23,9 +23,10 @@ const paymentSourceSchema = z.object({
   number: z.string().trim().max(60).refine((value) => !/^\d{13,19}$/.test(value.replace(/[\s-]/g, "")), "Never store a full card number.").optional(),
   date: z.string().trim().max(40).optional(),
 });
-// guest_payment_sources has no note, number or date columns; they live in the
-// guest's preferences, keyed by the source's label and reference.
-const paymentSourceKey = (source: { label: string; tokenReference?: string | null }) => `${source.label.trim().toLowerCase()}|${(source.tokenReference ?? "").trim()}`;
+// The number is kept in guest_payment_sources.last4 (free text). There are no
+// note or date columns; those live in the guest's preferences, keyed by the
+// source's label, reference and number.
+const paymentSourceKey = (source: { label: string; tokenReference?: string | null; number?: string | null }) => `${source.label.trim().toLowerCase()}|${(source.tokenReference ?? "").trim()}|${(source.number ?? "").trim()}`;
 // Any one detail is enough (a plate may be unknown at first); all blank removes the vehicle.
 const vehicleSchema = z.object({
   plate: z.string().trim().max(40).default(""),
@@ -153,7 +154,7 @@ async function listGuests(propertyId: string) {
       email: guest.email ?? undefined, secondaryPhone: prefs.secondaryPhone, secondaryEmail: prefs.secondaryEmail, status: apiStatus(guest.guestStatus), fixedRateCents: prefs.fixedRateCents, dateOfBirth: prefs.dateOfBirth, idExpires: prefs.idExpires, roomPreferences: prefs.roomPreferences,
       idType: identity?.idType, driverLicenseNumber: identity?.idNumber, notes: guest.remarks ?? undefined, dnrRemarks: guest.dnrReason ?? undefined,
       vehicle: vehicle ? { plate: vehicle.plate, make: vehicle.make ?? "", color: vehicle.color ?? "", year: vehicle.year ?? "" } : undefined,
-      savedPaymentSources: (sourcesByGuest.get(guest.id) ?? []).map((source) => { const label = source.label ?? source.method; const tokenReference = source.externalReference ?? ""; const key = paymentSourceKey({ label, tokenReference }); const details = prefs.paymentSourceDetails?.[key] ?? { note: prefs.paymentSourceNotes?.[key] }; return { id: source.id, label, last4: source.last4 ?? undefined, tokenReference, note: details.note, number: details.number, date: details.date }; }),
+      savedPaymentSources: (sourcesByGuest.get(guest.id) ?? []).map((source) => { const label = source.label ?? source.method; const tokenReference = source.externalReference ?? ""; const number = source.last4 ?? ""; const details = prefs.paymentSourceDetails?.[paymentSourceKey({ label, tokenReference, number })] ?? { note: prefs.paymentSourceNotes?.[`${label.trim().toLowerCase()}|${tokenReference.trim()}`] }; return { id: source.id, label, tokenReference, number: number || undefined, note: details.note, date: details.date }; }),
       remarkEntries: (remarksByGuest.get(guest.id) ?? []).map((remark) => ({ id: remark.id, text: remark.text, createdAt: remark.createdAt })),
       totalStays: guestStays.length, lastStayDate: guestStays[0]?.checkoutDate,
       stayHistory: guestStays.map((stay) => ({ ...stay, room: stay.room ?? "Unassigned", paymentType: "Credit" })),
@@ -198,7 +199,7 @@ export async function PATCH(request: Request) {
       if (input.roomPreferences !== undefined) preferences.roomPreferences = input.roomPreferences;
       if (input.savedPaymentSources !== undefined) {
         const details = Object.fromEntries(input.savedPaymentSources.filter((source) => source.note || source.number || source.date)
-          .map((source) => [paymentSourceKey(source), { note: source.note || undefined, number: source.number || undefined, date: source.date || undefined }]));
+          .map((source) => [paymentSourceKey({ ...source, number: source.number || source.last4 }), { note: source.note || undefined, date: source.date || undefined }]));
         preferences.paymentSourceDetails = Object.keys(details).length ? details : undefined;
         preferences.paymentSourceNotes = undefined;
       }
@@ -213,7 +214,7 @@ export async function PATCH(request: Request) {
       }
       if (input.savedPaymentSources !== undefined) {
         await tx`delete from guest_payment_sources where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid`;
-        for (const source of input.savedPaymentSources) await tx`insert into guest_payment_sources (property_id,guest_id,method,label,last4,external_reference) values (${session.propertyId}::uuid,${input.guestId}::uuid,'card',${source.label},${source.last4 || null},${source.tokenReference || null})`;
+        for (const source of input.savedPaymentSources) await tx`insert into guest_payment_sources (property_id,guest_id,method,label,last4,external_reference) values (${session.propertyId}::uuid,${input.guestId}::uuid,'card',${source.label},${source.number || source.last4 || null},${source.tokenReference || null})`;
       }
       if (input.remarkEntries !== undefined) {
         // Remarks are a dated, append-only guest record. The client includes

@@ -33,13 +33,16 @@ export type WorkDay = { date: string; minutes: number };
 export type PaySplit = { regularMinutes: number; overtimeMinutes: number; doubleTimeMinutes: number };
 
 const dayNumber = (date: string) => Math.floor(Date.parse(`${date}T12:00:00Z`) / 86_400_000);
+/** Days since the workweek started (0–6). `weekStart`: 0 Sunday … 6 Saturday; day 0 (1970-01-01) was a Thursday. */
+const daysIntoWeek = (date: string, weekStart: number) => (((dayNumber(date) + 4 - weekStart) % 7) + 7) % 7;
 
 /**
- * Split worked minutes for the days inside [start, end]. Workweeks run Monday
- * to Sunday (the same weeks as weekly pay periods) and weekly overtime counts the whole week, so `days` should
- * include the days of the first and last week that fall outside the period.
+ * Split worked minutes for the days inside [start, end]. Workweeks start on
+ * `weekStart` (0 Sunday … 6 Saturday, Monday by default), the same weeks as
+ * weekly pay periods, and weekly overtime counts the whole week, so `days`
+ * should include the days of the first and last week that fall outside the period.
  */
-export function splitWorkedMinutes(days: WorkDay[], start: string, end: string, state: string): PaySplit {
+export function splitWorkedMinutes(days: WorkDay[], start: string, end: string, state: string, weekStart = 1): PaySplit {
   const daily = DAILY_OVERTIME[stateCode(state)];
   const byDate = new Map<string, number>();
   for (const day of days) byDate.set(day.date, (byDate.get(day.date) ?? 0) + Math.max(0, day.minutes));
@@ -56,8 +59,7 @@ export function splitWorkedMinutes(days: WorkDay[], start: string, end: string, 
       overtime = Math.max(0, Math.min(minutes, doubleAfter) - daily.after);
       regular = minutes - overtime - doubleTime;
     }
-    // Monday-start workweek (day 0, 1970-01-01, was a Thursday).
-    const week = Math.floor((dayNumber(date) + 3) / 7);
+    const week = Math.floor((dayNumber(date) - daysIntoWeek(date, weekStart)) / 7);
     const before = weekRegular.get(week) ?? 0;
     const weeklyOvertime = Math.max(0, before + regular - 40 * 60) - Math.max(0, before - 40 * 60);
     regular -= weeklyOvertime;
@@ -75,11 +77,10 @@ export function grossPayCents(split: PaySplit, rateCents: number) {
   return Math.round((split.regularMinutes * rateCents + split.overtimeMinutes * rateCents * 1.5 + split.doubleTimeMinutes * rateCents * 2) / 60);
 }
 
-/** The Monday on or before `start`, and the Sunday on or after `end`. */
-export function workweekBounds(start: string, end: string) {
+/** The first day of the workweek holding `start`, and the last day of the one holding `end`. */
+export function workweekBounds(start: string, end: string, weekStart = 1) {
   const shift = (date: string, days: number) => new Date((dayNumber(date) + days) * 86_400_000 + 43_200_000).toISOString().slice(0, 10);
-  const weekday = (date: string) => (dayNumber(date) + 3) % 7;
-  return { from: shift(start, -weekday(start)), to: shift(end, 6 - weekday(end)) };
+  return { from: shift(start, -daysIntoWeek(start, weekStart)), to: shift(end, 6 - daysIntoWeek(end, weekStart)) };
 }
 
 export type PayChange = { effectiveDate?: string; payType?: string; fromHourlyCents?: number; toHourlyCents?: number; fromSalaryCents?: number; toSalaryCents?: number };

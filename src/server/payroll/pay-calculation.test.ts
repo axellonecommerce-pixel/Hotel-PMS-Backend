@@ -49,3 +49,16 @@ describe("salary for a back-dated start", () => {
     expect(salaryForPeriod(70000, "2026-10-05", "2026-10-11", "2026-10-12")).toBe(0);
   });
 });
+
+describe("workweek start day", () => {
+  it("runs Friday to Thursday when the week starts on Friday", () => {
+    expect(workweekBounds("2026-10-24", "2026-10-29", 5)).toEqual({ from: "2026-10-23", to: "2026-10-29" });
+    expect(workweekBounds("2026-10-24", "2026-10-29")).toEqual({ from: "2026-10-19", to: "2026-11-01" });
+  });
+  it("counts weekly overtime within the Friday workweek", () => {
+    // 4 × 11h Fri–Mon in Texas (weekly only): 44h in one Friday week; split across two Monday weeks.
+    const days = ["2026-10-23", "2026-10-24", "2026-10-25", "2026-10-26"].map((date) => ({ date, minutes: 11 * 60 }));
+    expect(splitWorkedMinutes(days, "2026-10-23", "2026-10-29", "Texas", 5).overtimeMinutes).toBe(240);
+    expect(splitWorkedMinutes(days, "2026-10-23", "2026-10-29", "Texas").overtimeMinutes).toBe(0);
+  });
+});

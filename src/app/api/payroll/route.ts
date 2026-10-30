@@ -40,7 +40,7 @@ const updateSchema = z.union([
     salaryCents: z.number().int().min(0).max(10_000_000).optional(),
   }),
 ]);
-type StoredPayroll = { payroll?: { frequency?: string }; property?: { state?: string }; employees?: Array<{ name?: string; payChanges?: PayChange[]; startDate?: string; payFrequency?: string }> };
+type StoredPayroll = { payroll?: { frequency?: string; weekStartDay?: number; payDay?: number }; property?: { state?: string }; employees?: Array<{ name?: string; payChanges?: PayChange[]; startDate?: string; payFrequency?: string }> };
 const PAY_FREQUENCIES = ["Weekly", "Biweekly", "Semi-monthly", "Monthly"];
 
 type ManualHours = { regularMinutes: number; overtimeMinutes: number; doubleTimeMinutes: number };
@@ -60,7 +60,8 @@ function shiftDate(date: string, days: number) {
   return next.toISOString().slice(0, 10);
 }
 
-function datesForPeriod(today: string, frequency: string) {
+/** Weekly and biweekly periods start on `weekStart` (0 Sunday … 6 Saturday; Monday by default). */
+function datesForPeriod(today: string, frequency: string, weekStart = 1) {
   const date = new Date(`${today}T12:00:00Z`);
   const ymd = (value: Date) => value.toISOString().slice(0, 10);
   if (frequency.toLowerCase().includes("semi")) {
@@ -75,13 +76,26 @@ function datesForPeriod(today: string, frequency: string) {
     return { start: ymd(start), end: ymd(end) };
   }
   const days = frequency.toLowerCase().includes("biweekly") ? 14 : 7;
-  const epoch = Date.UTC(2000, 0, 3);
+  // 2000-01-02 was a Sunday; Monday (the default) keeps the 2000-01-03 anchor.
+  const epoch = Date.UTC(2000, 0, 2 + weekStart);
   const day = Math.floor(date.getTime() / 86_400_000);
   const offset = ((day - Math.floor(epoch / 86_400_000)) % days + days) % days;
   const start = new Date(date.getTime() - offset * 86_400_000);
   const end = new Date(start.getTime() + (days - 1) * 86_400_000);
   return { start: ymd(start), end: ymd(end) };
 }
+
+/**
+ * When a period is paid: for weekly and biweekly pay, the first chosen pay day
+ * (0 Sunday … 6 Saturday) after the period ends; otherwise 3 days after it.
+ */
+function payDateFor(end: string, frequency: string, payDay: number | undefined) {
+  const weekly = /weekly/i.test(frequency) && !/semi/i.test(frequency);
+  if (!weekly || payDay === undefined) return shiftDate(end, 3);
+  const endDay = new Date(`${end}T12:00:00Z`).getUTCDay();
+  return shiftDate(end, ((payDay - endDay + 6) % 7) + 1);
+}
+const weekdayOf = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 6 ? value : undefined;
 
 function parseDescription(value: string | null): EntryMeta {
   try { const parsed = value ? JSON.parse(value) as unknown : {}; return parsed && typeof parsed === "object" ? parsed as EntryMeta : {}; }
@@ -99,10 +113,12 @@ type PayrollSetup = {
   frequencyOf: Map<string, string>;
   /** The period Payroll shows for each employee. */
   shownPeriodOf: Map<string, string>;
+  /** First day of the workweek and of weekly pay periods (0 Sunday … 6 Saturday). */
+  weekStart: number;
 };
 /** True when the period is one of the schedule's own periods (not a custom range or another schedule's). */
-const onSchedule = (period: { start: string; end: string }, frequency: string) => {
-  const dates = datesForPeriod(period.start, frequency);
+const onSchedule = (period: { start: string; end: string }, frequency: string, weekStart: number) => {
+  const dates = datesForPeriod(period.start, frequency, weekStart);
   return dates.start === period.start && dates.end === period.end;
 };
 const nameKey = (name: string | null | undefined) => (name ?? "").trim().toLowerCase();
@@ -128,8 +144,8 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
     where property_id=${propertyId}::uuid and pay_period_id = any(${periodIds}::uuid[])
   `;
   const existingByKey = new Map(existing.map((entry) => [`${entry.periodId}|${entry.employeeId}`, entry]));
-  const from = workweekBounds(periods.reduce((min, period) => period.start < min ? period.start : min, periods[0].start), periods[0].end).from;
-  const to = workweekBounds(periods[0].start, periods.reduce((max, period) => period.end > max ? period.end : max, periods[0].end)).to;
+  const from = workweekBounds(periods.reduce((min, period) => period.start < min ? period.start : min, periods[0].start), periods[0].end, setup.weekStart).from;
+  const to = workweekBounds(periods[0].start, periods.reduce((max, period) => period.end > max ? period.end : max, periods[0].end), setup.weekStart).to;
   const worked = await tx<Array<{ employeeId: string; date: string; minutes: number }>>`
     select employee_id as "employeeId", work_date::text as date,
       sum(greatest(0,extract(epoch from (clock_out_at-clock_in_at))/60-break_minutes))::int as minutes
@@ -154,7 +170,7 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
     let counted: boolean;
     if (startDate && startDate > period.end) counted = false;
     else if (period.status === "custom") counted = shown || Boolean(current);
-    else if (!onSchedule(period, setup.frequencyOf.get(employee.id) ?? "Semi-monthly")) counted = false;
+    else if (!onSchedule(period, setup.frequencyOf.get(employee.id) ?? "Semi-monthly", setup.weekStart)) counted = false;
     else counted = shown || Boolean(startDate) || Boolean(current);
     if (!counted) {
       if (current && !current.paid && ((startDate && startDate > period.end) || (period.status !== "custom" && untouched))) notEmployedYet.push({ period: period.id, employee: employee.id });
@@ -162,7 +178,7 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
     }
     const pay = payForPeriod(employee, setup.payChanges.get(nameKey(employee.name)), period.start);
     const salaried = pay.payType === "salary";
-    const split = splitWorkedMinutes(daysByEmployee.get(employee.id) ?? [], period.start, period.end, state);
+    const split = splitWorkedMinutes(daysByEmployee.get(employee.id) ?? [], period.start, period.end, state, setup.weekStart);
     const rate = salaried ? pay.salary : pay.hourly;
     const manual = salaried ? undefined : meta.manualHours;
     // Salaried (exempt) staff are paid the same amount each pay period.
@@ -210,9 +226,13 @@ export async function GET(request: Request) {
       const frequency = ["Weekly", "Biweekly", "Semi-monthly", "Monthly"].includes(requested) ? requested : configured?.value?.payroll?.frequency ?? "Semi-monthly";
       // Overtime follows the state the property is registered in.
       const state = configured?.value?.property?.state || configured?.region || "";
+      // Week start and pay day: the screen sends what it shows, like the frequency.
+      const paramDay = (name: string) => { const raw = params.get(name); return raw === null || raw === "" ? undefined : weekdayOf(Number(raw)); };
+      const weekStart = paramDay("weekStart") ?? weekdayOf(configured?.value?.payroll?.weekStartDay) ?? 1;
+      const payDay = params.has("payDay") ? paramDay("payDay") : weekdayOf(configured?.value?.payroll?.payDay);
       const today = await propertyBusinessDate(tx, session.propertyId);
-      const currentDates = datesForPeriod(today, frequency);
-      const previousDates = datesForPeriod(shiftDate(currentDates.start, -1), frequency);
+      const currentDates = datesForPeriod(today, frequency, weekStart);
+      const previousDates = datesForPeriod(shiftDate(currentDates.start, -1), frequency, weekStart);
       const sameDates = (one: { start: string; end: string }, two: { start: string; end: string }) => one.start === two.start && one.end === two.end;
       // Staff can run payroll for any dates; This period / Last period show
       // each employee's own current or last period.
@@ -246,22 +266,22 @@ export async function GET(request: Request) {
       // custom range, and for each employee their own current and last period
       // and, from a start date before that, every period since (back pay).
       const wanted = new Map<string, { start: string; end: string; payDate: string; status: string }>();
-      const want = (dates: { start: string; end: string }, status = "open") => {
+      const want = (dates: { start: string; end: string }, scheduleFrequency: string, status = "open") => {
         const key = `${dates.start}|${dates.end}`;
-        if (!wanted.has(key)) wanted.set(key, { ...dates, payDate: shiftDate(dates.end, 3), status });
+        if (!wanted.has(key)) wanted.set(key, { ...dates, payDate: payDateFor(dates.end, scheduleFrequency, payDay), status });
       };
-      want(currentDates); want(previousDates);
-      if (mode === "custom" && range) want(range, "custom");
+      want(currentDates, frequency); want(previousDates, frequency);
+      if (mode === "custom" && range) want(range, "custom", "custom");
       const shownDates = new Map<string, { start: string; end: string }>();
       for (const employee of employees) {
         const employeeFrequency = frequencyOf.get(employee.id)!;
-        const current = datesForPeriod(today, employeeFrequency);
-        const previous = datesForPeriod(shiftDate(current.start, -1), employeeFrequency);
-        want(current); want(previous);
+        const current = datesForPeriod(today, employeeFrequency, weekStart);
+        const previous = datesForPeriod(shiftDate(current.start, -1), employeeFrequency, weekStart);
+        want(current, employeeFrequency); want(previous, employeeFrequency);
         shownDates.set(employee.id, mode === "custom" && range ? range : mode === "previous" ? previous : current);
         const startDate = startDates.get(nameKey(employee.name));
         if (startDate && startDate < current.start) {
-          for (let dates = previous; dates.end >= startDate && dates.end >= scheduleFrom; dates = datesForPeriod(shiftDate(dates.start, -1), employeeFrequency)) want(dates);
+          for (let dates = previous; dates.end >= startDate && dates.end >= scheduleFrom; dates = datesForPeriod(shiftDate(dates.start, -1), employeeFrequency, weekStart)) want(dates, employeeFrequency);
         }
       }
       const periodRows = await tx<Array<PeriodRow & { payDate: string }>>`
@@ -282,7 +302,7 @@ export async function GET(request: Request) {
           and not (pp.id = any(${periodRows.map((row) => row.id)}::uuid[]))
           and exists (select 1 from payroll_entries pe where pe.pay_period_id=pp.id and pe.paid=false)
       `;
-      await recountPeriods(tx, session.propertyId, state, employees, [...periodRows, ...openPeriods], { payChanges, startDates, frequencyOf, shownPeriodOf });
+      await recountPeriods(tx, session.propertyId, state, employees, [...periodRows, ...openPeriods], { payChanges, startDates, frequencyOf, shownPeriodOf, weekStart });
       type EntryRow = { id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; periodId: string; startsOn: string; endsOn: string; payDate: string; periodStatus: string; roomsCleaned: number };
       // The pay schedule: every pay period of the last ~13 months, with what
       // is paid and what is still to pay. A custom date range only stays once
@@ -324,6 +344,8 @@ export async function GET(request: Request) {
       };
       return {
         frequency,
+        weekStart,
+        payDay: payDay ?? null,
         state,
         period: { id: period.id, label: `${period.start} to ${period.end}`, startDate: period.start, endDate: period.end, payDate: period.payDate, custom: period.status === "custom" },
         currentPeriod: currentDates,
