@@ -43,7 +43,7 @@ A motel is one `properties` row. Everything else is scoped to it by `property_id
 ## 3. Payroll workflow
 
 1. **Settings › Property:** country and state. This decides the payroll rules: minimum wage, overtime, tax brackets, pay frequency, final pay and breaks.
-2. **Settings › Payroll:** pay schedule (weekly, biweekly, semi-monthly or monthly), plus an optional city or county minimum wage.
+2. **Settings › Payroll:** the motel's pay schedule (weekly, biweekly, semi-monthly or monthly), plus an optional city or county minimum wage. An employee paid on a different schedule gets their own in Settings › Employees › Pay Schedule.
 3. **Employees:** add them in Settings › Employees with pay type, rate or salary, usual payment method and tax withholding ("No tax" pays the full gross). Payroll lists only these employees, not staff sign-ins. Pay can also be changed from the Payroll drawer.
    Advances and pay increases are recorded on the employee too: advances come back out of the next take-home pay; a pay increase starts with the first pay period that begins on or after its date.
    The start date decides when pay begins: Payroll creates every pay period since then and lists it in the Pay Schedule with its pay date and amount.

@@ -8,7 +8,8 @@ import { grossPayCents, payForPeriod, salaryForPeriod, splitWorkedMinutes, workw
 
 const PAYROLL_PAYMENT_METHODS = ["Cash", "Check", "Direct deposit", "Other"] as const;
 const updateSchema = z.union([
-  // Checked first: the status update below would also accept { id } and drop "action".
+  // Checked first. The status update below is strict, so a request with
+  // invalid hours is refused instead of being read as a status change.
   // Hours typed in for a pay period the time clock did not record (for
   // example before the employee was set up); null goes back to the clock.
   z.object({
@@ -26,7 +27,7 @@ const updateSchema = z.union([
     adjustmentCents: z.number().int().min(-10_000_000).max(10_000_000).optional(),
     paymentMethod: z.enum(PAYROLL_PAYMENT_METHODS).optional(),
     paidOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  }),
+  }).strict(),
   // Pay setup: hourly (rate × clocked hours) or a fixed salary per pay period.
   z.object({
     action: z.literal("employee"),
@@ -36,7 +37,8 @@ const updateSchema = z.union([
     salaryCents: z.number().int().min(0).max(10_000_000).optional(),
   }),
 ]);
-type StoredPayroll = { payroll?: { frequency?: string }; property?: { state?: string }; employees?: Array<{ name?: string; payChanges?: PayChange[]; startDate?: string }> };
+type StoredPayroll = { payroll?: { frequency?: string }; property?: { state?: string }; employees?: Array<{ name?: string; payChanges?: PayChange[]; startDate?: string; payFrequency?: string }> };
+const PAY_FREQUENCIES = ["Weekly", "Biweekly", "Semi-monthly", "Monthly"];
 
 type ManualHours = { regularMinutes: number; overtimeMinutes: number; doubleTimeMinutes: number };
 type EntryMeta = { adjustmentCents?: number; status?: string; doubleTimeMinutes?: number; manualHours?: ManualHours };
@@ -86,7 +88,20 @@ function parseDescription(value: string | null): EntryMeta {
 type Employee = { id: string; name: string | null; role: string | null; hourlyRateCents: number | null; payType: string | null; salaryCents: number | null; active: boolean };
 type Tx = TransactionSql<Record<string, never>>;
 
-type PayrollSetup = { payChanges: Map<string, PayChange[]>; startDates: Map<string, string>; currentPeriodId: string };
+type PeriodRow = { id: string; start: string; end: string; status: string };
+type PayrollSetup = {
+  payChanges: Map<string, PayChange[]>;
+  startDates: Map<string, string>;
+  /** Each employee's own pay schedule (Settings › Employees, else the motel's). */
+  frequencyOf: Map<string, string>;
+  /** The period Payroll shows for each employee. */
+  shownPeriodOf: Map<string, string>;
+};
+/** True when the period is one of the schedule's own periods (not a custom range or another schedule's). */
+const onSchedule = (period: { start: string; end: string }, frequency: string) => {
+  const dates = datesForPeriod(period.start, frequency);
+  return dates.start === period.start && dates.end === period.end;
+};
 const nameKey = (name: string | null | undefined) => (name ?? "").trim().toLowerCase();
 
 /**
@@ -95,11 +110,13 @@ const nameKey = (name: string | null | undefined) => (name ?? "").trim().toLower
  * A paid entry keeps exactly what was paid, and hours typed in for a period
  * replace the time clock for it.
  *
- * An employee with a start date (Settings › Employees) is paid from that
- * date on and has nothing before it. Without one, an employee is counted in
- * the current period and in periods where they already have an entry.
+ * Each employee is paid on their own pay schedule. With a start date
+ * (Settings › Employees) they have every period of it from that date on and
+ * nothing before it; without one, the period Payroll shows and periods where
+ * they already have an entry. A custom date range counts for the employees
+ * shown in it.
  */
-async function recountPeriods(tx: Tx, propertyId: string, state: string, employees: Employee[], periods: Array<{ id: string; start: string; end: string }>, setup: PayrollSetup) {
+async function recountPeriods(tx: Tx, propertyId: string, state: string, employees: Employee[], periods: PeriodRow[], setup: PayrollSetup) {
   if (!periods.length) return;
   const periodIds = periods.map((period) => period.id);
   const existing = await tx<Array<{ periodId: string; employeeId: string; description: string | null; paid: boolean }>>`
@@ -122,15 +139,25 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
   const rows = periods.flatMap((period) => employees.flatMap((employee) => {
     const key = `${period.id}|${employee.id}`;
     const startDate = setup.startDates.get(nameKey(employee.name));
-    if (startDate ? startDate > period.end : period.id !== setup.currentPeriodId && !existingByKey.has(key)) {
-      if (startDate && existingByKey.has(key)) notEmployedYet.push({ period: period.id, employee: employee.id });
+    const current = existingByKey.get(key);
+    const shown = setup.shownPeriodOf.get(employee.id) === period.id;
+    const meta = parseDescription(current?.description ?? null);
+    // An untouched unpaid entry left from an earlier schedule is removed.
+    const untouched = current && !current.paid && meta.status !== "Approved" && !meta.adjustmentCents && !meta.manualHours;
+    let counted: boolean;
+    if (startDate && startDate > period.end) counted = false;
+    else if (period.status === "custom") counted = shown || Boolean(current);
+    else if (!onSchedule(period, setup.frequencyOf.get(employee.id) ?? "Semi-monthly")) counted = false;
+    else counted = shown || Boolean(startDate) || Boolean(current);
+    if (!counted) {
+      if (current && !current.paid && ((startDate && startDate > period.end) || (period.status !== "custom" && untouched))) notEmployedYet.push({ period: period.id, employee: employee.id });
       return [];
     }
     const pay = payForPeriod(employee, setup.payChanges.get(nameKey(employee.name)), period.start);
     const salaried = pay.payType === "salary";
     const split = splitWorkedMinutes(daysByEmployee.get(employee.id) ?? [], period.start, period.end, state);
     const rate = salaried ? pay.salary : pay.hourly;
-    const manual = salaried ? undefined : parseDescription(existingByKey.get(key)?.description ?? null).manualHours;
+    const manual = salaried ? undefined : meta.manualHours;
     // Salaried (exempt) staff are paid the same amount each pay period.
     const hours = salaried ? { regularMinutes: split.regularMinutes + split.overtimeMinutes + split.doubleTimeMinutes, overtimeMinutes: 0, doubleTimeMinutes: 0 } : manual ?? split;
     return [{
@@ -138,7 +165,7 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
       double: hours.doubleTimeMinutes, rate, gross: salaried ? salaryForPeriod(rate, period.start, period.end, startDate) : grossPayCents(hours, rate),
     }];
   }));
-  // A start date moved later removes the unpaid pay from before it.
+  // A start date moved later, or a changed pay schedule, removes unpaid pay that no longer applies.
   if (notEmployedYet.length) await tx`
     delete from payroll_entries pe using jsonb_to_recordset(${tx.json(notEmployedYet)}) as x(period uuid,employee uuid)
     where pe.property_id=${propertyId}::uuid and pe.pay_period_id=x.period and pe.employee_id=x.employee and pe.paid=false
@@ -179,24 +206,18 @@ export async function GET(request: Request) {
       const today = await propertyBusinessDate(tx, session.propertyId);
       const currentDates = datesForPeriod(today, frequency);
       const previousDates = datesForPeriod(shiftDate(currentDates.start, -1), frequency);
-      // Staff can run payroll for any dates; the configured period is the default.
-      const custom = range && (range.start !== currentDates.start || range.end !== currentDates.end) && (range.start !== previousDates.start || range.end !== previousDates.end);
-      const periodDates = range ?? currentDates;
-      const payDate = shiftDate(periodDates.end, 3);
-      const [period] = await tx<Array<{ id: string; start: string; end: string; payDate: string; status: string }>>`
-        insert into pay_periods (property_id,starts_on,ends_on,scheduled_pay_date,status)
-        values (${session.propertyId}::uuid,${periodDates.start},${periodDates.end},${payDate},${custom ? "custom" : "open"})
-        on conflict (property_id,starts_on,ends_on) do update set scheduled_pay_date=excluded.scheduled_pay_date
-        returning id,starts_on::text as start,ends_on::text as end,scheduled_pay_date::text as "payDate",status
-      `;
+      const sameDates = (one: { start: string; end: string }, two: { start: string; end: string }) => one.start === two.start && one.end === two.end;
+      // Staff can run payroll for any dates; This period / Last period show
+      // each employee's own current or last period.
+      const mode = !range || sameDates(range, currentDates) ? "current" : sameDates(range, previousDates) ? "previous" : "custom";
       // Keep inactive employees in this response too. Their historical pay
       // entries remain part of payroll and omitting them leaves the frontend
       // with an entry whose employee cannot be resolved.
       // Payroll is for the people added under Settings › Employees. A staff
       // sign-in (Users & Roles) also has an employee record; it is left out
       // unless the same person is added as an employee.
-      const payrollNames = (Array.isArray(configured?.value?.employees) ? configured.value.employees : [])
-        .map((employee) => employee?.name?.trim().toLowerCase()).filter((name): name is string => Boolean(name));
+      const settingsEmployees = Array.isArray(configured?.value?.employees) ? configured.value.employees : [];
+      const payrollNames = settingsEmployees.map((employee) => nameKey(employee?.name)).filter(Boolean);
       const employees = await tx<Employee[]>`
         select id,name,job_role as role,hourly_rate_cents as "hourlyRateCents",pay_method as "payType",fixed_rate_cents as "salaryCents",active
         from employees where property_id=${session.propertyId}::uuid
@@ -204,74 +225,88 @@ export async function GET(request: Request) {
         order by active desc,name
       `;
       const payrollIds = employees.map((employee) => employee.id);
-      const settingsEmployees = Array.isArray(configured?.value?.employees) ? configured.value.employees : [];
-      const payChanges = new Map(settingsEmployees
-        .filter((employee) => employee?.name && Array.isArray(employee.payChanges))
-        .map((employee) => [nameKey(employee.name), employee.payChanges!] as const));
+      const settingsByName = new Map(settingsEmployees.filter((employee) => employee?.name).map((employee) => [nameKey(employee.name), employee] as const));
+      const payChanges = new Map([...settingsByName].filter(([, employee]) => Array.isArray(employee.payChanges)).map(([name, employee]) => [name, employee.payChanges!] as const));
+      const startDates = new Map([...settingsByName]
+        .filter(([, employee]) => typeof employee.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(employee.startDate))
+        .map(([name, employee]) => [name, employee.startDate!] as const));
+      const frequencyOf = new Map(employees.map((employee) => {
+        const own = settingsByName.get(nameKey(employee.name))?.payFrequency;
+        return [employee.id, own && PAY_FREQUENCIES.includes(own) ? own : frequency] as const;
+      }));
       const scheduleFrom = shiftDate(today, -SCHEDULE_DAYS);
-      const startDates = new Map(settingsEmployees
-        .filter((employee) => employee?.name && typeof employee.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(employee.startDate))
-        .map((employee) => [nameKey(employee.name), employee.startDate!] as const));
-      // An employee who started before this pay period has a pay period for
-      // every schedule period since the start date, so back pay shows up.
-      const employedNames = new Set(employees.map((employee) => nameKey(employee.name)));
-      const earliestStart = [...startDates].filter(([name]) => employedNames.has(name)).map(([, date]) => date).sort()[0];
-      const backPeriods: Array<{ start: string; end: string; payDate: string }> = [];
-      if (earliestStart && earliestStart < currentDates.start) {
-        for (let dates = previousDates; dates.end >= earliestStart && dates.end >= scheduleFrom; dates = datesForPeriod(shiftDate(dates.start, -1), frequency)) {
-          backPeriods.push({ ...dates, payDate: shiftDate(dates.end, 3) });
+      // Every pay period needed: the motel's current and last period, the
+      // custom range, and for each employee their own current and last period
+      // and, from a start date before that, every period since (back pay).
+      const wanted = new Map<string, { start: string; end: string; payDate: string; status: string }>();
+      const want = (dates: { start: string; end: string }, status = "open") => {
+        const key = `${dates.start}|${dates.end}`;
+        if (!wanted.has(key)) wanted.set(key, { ...dates, payDate: shiftDate(dates.end, 3), status });
+      };
+      want(currentDates); want(previousDates);
+      if (mode === "custom" && range) want(range, "custom");
+      const shownDates = new Map<string, { start: string; end: string }>();
+      for (const employee of employees) {
+        const employeeFrequency = frequencyOf.get(employee.id)!;
+        const current = datesForPeriod(today, employeeFrequency);
+        const previous = datesForPeriod(shiftDate(current.start, -1), employeeFrequency);
+        want(current); want(previous);
+        shownDates.set(employee.id, mode === "custom" && range ? range : mode === "previous" ? previous : current);
+        const startDate = startDates.get(nameKey(employee.name));
+        if (startDate && startDate < current.start) {
+          for (let dates = previous; dates.end >= startDate && dates.end >= scheduleFrom; dates = datesForPeriod(shiftDate(dates.start, -1), employeeFrequency)) want(dates);
         }
       }
-      if (backPeriods.length) await tx`
+      const periodRows = await tx<Array<PeriodRow & { payDate: string }>>`
         insert into pay_periods (property_id,starts_on,ends_on,scheduled_pay_date,status)
-        select ${session.propertyId}::uuid,x.start,x."end",x."payDate",'open' from jsonb_to_recordset(${tx.json(backPeriods)}) as x(start date,"end" date,"payDate" date)
-        on conflict (property_id,starts_on,ends_on) do nothing
+        select ${session.propertyId}::uuid,x.start,x."end",x."payDate",x.status from jsonb_to_recordset(${tx.json([...wanted.values()])}) as x(start date,"end" date,"payDate" date,status text)
+        on conflict (property_id,starts_on,ends_on) do update set scheduled_pay_date=excluded.scheduled_pay_date
+        returning id,starts_on::text as start,ends_on::text as end,scheduled_pay_date::text as "payDate",status
       `;
+      const periodAt = (dates: { start: string; end: string }) => periodRows.find((row) => sameDates(row, dates))!;
+      const period = periodAt(mode === "custom" && range ? range : mode === "previous" ? previousDates : currentDates);
+      const shownPeriodOf = new Map([...shownDates].map(([employeeId, dates]) => [employeeId, periodAt(dates).id] as const));
+      const shownIds = [...new Set([period.id, ...shownPeriodOf.values()])];
       // Earlier periods with unpaid entries are recounted too, so time
       // entered after a period ended is included.
-      const backStarts = backPeriods.map((dates) => dates.start);
-      const openPeriods = await tx<Array<{ id: string; start: string; end: string }>>`
-        select pp.id,pp.starts_on::text as start,pp.ends_on::text as end from pay_periods pp
-        where pp.property_id=${session.propertyId}::uuid and pp.id<>${period.id}::uuid and pp.ends_on >= ${scheduleFrom}::date
-          and (exists (select 1 from payroll_entries pe where pe.pay_period_id=pp.id and pe.paid=false)
-            or (pp.status<>'custom' and pp.starts_on::text = any(${backStarts}::text[])))
+      const openPeriods = await tx<PeriodRow[]>`
+        select pp.id,pp.starts_on::text as start,pp.ends_on::text as end,pp.status from pay_periods pp
+        where pp.property_id=${session.propertyId}::uuid and pp.ends_on >= ${scheduleFrom}::date
+          and not (pp.id = any(${periodRows.map((row) => row.id)}::uuid[]))
+          and exists (select 1 from payroll_entries pe where pe.pay_period_id=pp.id and pe.paid=false)
       `;
-      await recountPeriods(tx, session.propertyId, state, employees, [period, ...openPeriods], { payChanges, startDates, currentPeriodId: period.id });
-      const entries = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; periodId: string; roomsCleaned?: number }>>`
-        select pe.id,pe.employee_id as "employeeId",pe.regular_minutes as "regularMinutes",pe.overtime_minutes as "overtimeMinutes",pe.rate_cents as "hourlyRateCents",
-          pe.gross_pay_cents as "grossPayCents",pe.calculation_type as "calculationType",pe.description,pe.paid,pe.paid_on::text as "paidOn",pe.payment_method as "paymentMethod",pe.pay_period_id as "periodId",
-          (select count(*) from housekeeping_records h where h.property_id=pe.property_id and h.housekeeper_employee_id=pe.employee_id
-            and h.assignment_status='completed' and h.service_date between ${period.start}::date and ${period.end}::date)::int as "roomsCleaned"
-        from payroll_entries pe where pe.property_id=${session.propertyId}::uuid and pe.pay_period_id=${period.id}::uuid
-          and (pe.employee_id = any(${payrollIds}::uuid[]) or pe.paid) order by pe.created_at
-      `;
+      await recountPeriods(tx, session.propertyId, state, employees, [...periodRows, ...openPeriods], { payChanges, startDates, frequencyOf, shownPeriodOf });
+      type EntryRow = { id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; periodId: string; startsOn: string; endsOn: string; payDate: string; roomsCleaned: number };
       // The pay schedule: every pay period of the last ~13 months, with what
       // is paid and what is still to pay. A custom date range only stays once
       // it is approved or paid; empty pay shows only for employees with a
-      // start date (back pay still to enter) or the current period.
+      // start date (back pay still to enter) or the periods shown.
       const startedIds = employees.filter((employee) => startDates.has(nameKey(employee.name))).map((employee) => employee.id);
-      const history = await tx<Array<{ id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; periodId: string; startsOn: string; endsOn: string; payDate: string; roomsCleaned: number }>>`
+      const history = await tx<EntryRow[]>`
         select pe.id,pe.employee_id as "employeeId",pe.regular_minutes as "regularMinutes",pe.overtime_minutes as "overtimeMinutes",pe.rate_cents as "hourlyRateCents",
           pe.gross_pay_cents as "grossPayCents",pe.calculation_type as "calculationType",pe.description,pe.paid,pe.paid_on::text as "paidOn",pe.payment_method as "paymentMethod",
           pe.pay_period_id as "periodId",pp.starts_on::text as "startsOn",pp.ends_on::text as "endsOn",pp.scheduled_pay_date::text as "payDate",
           (select count(*) from housekeeping_records h where h.property_id=pe.property_id and h.housekeeper_employee_id=pe.employee_id
             and h.assignment_status='completed' and h.service_date between pp.starts_on and pp.ends_on)::int as "roomsCleaned"
         from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id join employees e on e.id=pe.employee_id
-        where pe.property_id=${session.propertyId}::uuid and pp.ends_on >= ${scheduleFrom}::date
-          and (pp.id=${period.id}::uuid or pp.status<>'custom' or pe.paid or pe.description like '%"Approved"%')
+        where pe.property_id=${session.propertyId}::uuid and (pp.ends_on >= ${scheduleFrom}::date or pp.id = any(${shownIds}::uuid[]))
+          and (pp.id = any(${shownIds}::uuid[]) or pp.status<>'custom' or pe.paid or pe.description like '%"Approved"%')
           and (pe.paid or (pe.employee_id = any(${payrollIds}::uuid[])
-            and (pp.id=${period.id}::uuid or pe.gross_pay_cents<>0 or pe.regular_minutes<>0 or pe.employee_id = any(${startedIds}::uuid[]))))
+            and (pp.id = any(${shownIds}::uuid[]) or pe.gross_pay_cents<>0 or pe.regular_minutes<>0 or pe.employee_id = any(${startedIds}::uuid[]))))
         order by pp.ends_on desc,e.name limit 1000
       `;
-      const mapEntry = (entry: typeof entries[number]) => {
+      // The period table: each employee's shown period (paid staff who are no
+      // longer on payroll still show in the motel's period).
+      const entries = history.filter((entry) => shownPeriodOf.has(entry.employeeId) ? shownPeriodOf.get(entry.employeeId) === entry.periodId : entry.periodId === period.id);
+      const mapEntry = (entry: EntryRow) => {
         const meta = parseDescription(entry.description);
         return {
           id: entry.id, payrollPeriodId: entry.periodId, employeeId: entry.employeeId, regularMinutes: entry.regularMinutes,
           overtimeMinutes: entry.overtimeMinutes ?? 0, doubleTimeMinutes: meta.doubleTimeMinutes ?? 0, payType: entry.calculationType === "salary" ? "salary" : "hourly",
           hourlyRateCents: entry.hourlyRateCents ?? 0, grossPayCents: entry.grossPayCents ?? 0, adjustmentCents: meta.adjustmentCents ?? 0,
           paymentStatus: entry.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending", paidOn: entry.paidOn, paymentMethod: entry.paymentMethod,
-          hoursEntered: Boolean(meta.manualHours),
-          ...("roomsCleaned" in entry ? { roomsCleaned: Number(entry.roomsCleaned) } : {}),
+          hoursEntered: Boolean(meta.manualHours), roomsCleaned: Number(entry.roomsCleaned),
+          periodLabel: `${entry.startsOn} to ${entry.endsOn}`, periodStart: entry.startsOn, periodEnd: entry.endsOn, payDate: entry.payDate,
         };
       };
       return {
@@ -292,10 +327,11 @@ export async function GET(request: Request) {
             // Titles vary ("Owner/Admin", "General Manager").
             role: /housekeep/.test(role) ? "Housekeeper" : /(^|[^a-z])(manager|owner)([^a-z]|$)/.test(role) ? "Manager" : "Other Employee",
             status: employee.active ? "Active" : "Inactive",
+            payFrequency: frequencyOf.get(employee.id),
           };
         }),
         entries: entries.map(mapEntry),
-        history: history.map((entry) => ({ ...mapEntry(entry), periodLabel: `${entry.startsOn} to ${entry.endsOn}`, periodStart: entry.startsOn, periodEnd: entry.endsOn, payDate: entry.payDate })),
+        history: history.map(mapEntry),
       };
     });
     return Response.json(result);
