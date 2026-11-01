@@ -368,6 +368,8 @@ export async function PUT(request: Request) {
             else delete saved[key];
           }
         }
+        // A copy stored by an older backend may carry the marker itself.
+        delete saved._changedKeys;
         parsed.data = saved;
         // Most saves (payment types, toggles, tax text) do not touch the
         // inventory, so skip the relational sync when it is unchanged.
