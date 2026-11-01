@@ -85,15 +85,23 @@ function datesForPeriod(today: string, frequency: string, weekStart = 1) {
   return { start: ymd(start), end: ymd(end) };
 }
 
-/** Salary for a period, leaving out days before the start date and days already paid in another period. */
-function salaryNotYetPaid(salaryCents: number, period: { start: string; end: string }, startDate: string | undefined, paid: (date: string) => boolean) {
+/**
+ * Salary for a period, leaving out days before the start date and days
+ * already paid in another period. A full period always pays the full salary,
+ * whatever the month's length. A part period is prorated on a fixed period
+ * length: 30 days a month and 15 a half-month, so a day is worth the same in
+ * a 30- or 31-day month (weekly: 7, biweekly: 14).
+ */
+function salaryNotYetPaid(salaryCents: number, period: { start: string; end: string }, startDate: string | undefined, paid: (date: string) => boolean, frequency: string) {
   let days = 0;
   let owed = 0;
   for (let date = period.start; date <= period.end; date = shiftDate(date, 1)) {
     days += 1;
     if ((!startDate || date >= startDate) && !paid(date)) owed += 1;
   }
-  return owed === days ? salaryCents : Math.round(salaryCents * owed / days);
+  if (owed === days) return salaryCents;
+  const basis = /semi/i.test(frequency) ? 15 : /month/i.test(frequency) ? 30 : days;
+  return Math.round(salaryCents * Math.min(1, owed / basis));
 }
 
 /**
@@ -206,7 +214,7 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
     const hours = salaried ? { regularMinutes: split.regularMinutes + split.overtimeMinutes + split.doubleTimeMinutes, overtimeMinutes: 0, doubleTimeMinutes: 0 } : manual ?? split;
     return [{
       period: period.id, employee: employee.id, type: salaried ? "salary" : "hourly", regular: hours.regularMinutes, overtime: hours.overtimeMinutes,
-      double: hours.doubleTimeMinutes, rate, gross: salaried ? salaryNotYetPaid(rate, period, startDate, (date) => paidDay(employee.id, period.id, date)) : grossPayCents(hours, rate),
+      double: hours.doubleTimeMinutes, rate, gross: salaried ? salaryNotYetPaid(rate, period, startDate, (date) => paidDay(employee.id, period.id, date), period.status === "custom" ? "custom" : setup.frequencyOf.get(employee.id) ?? "Weekly") : grossPayCents(hours, rate),
     }];
   }));
   // A start date moved later, or a changed pay schedule, removes unpaid pay that no longer applies.
@@ -299,7 +307,9 @@ export async function GET(request: Request) {
       for (const employee of employees) {
         const employeeFrequency = frequencyOf.get(employee.id)!;
         const employeeWeekStart = weekStartOf.get(employee.id)!;
-        const employeePayDay = weekdayOf(settingsByName.get(nameKey(employee.name))?.payDay) ?? payDay;
+        // -1: this employee is paid 3 days after the period ends, whatever the motel's pay day.
+        const ownPayDay = settingsByName.get(nameKey(employee.name))?.payDay;
+        const employeePayDay = ownPayDay === -1 ? undefined : weekdayOf(ownPayDay) ?? payDay;
         const current = datesForPeriod(today, employeeFrequency, employeeWeekStart);
         const previous = datesForPeriod(shiftDate(current.start, -1), employeeFrequency, employeeWeekStart);
         want(current, employeeFrequency, employeePayDay); want(previous, employeeFrequency, employeePayDay);

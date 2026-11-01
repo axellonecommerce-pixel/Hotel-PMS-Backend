@@ -5,7 +5,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { OTA_COMMISSION_CATEGORY } from "@/server/finance/ota-commission";
 
-type Row = { source: "room" | "folio" | "misc" | "tax" | "ota" | "expense" | "paidOut" | "payroll"; category: string; month: string; cents: number };
+type Row = { source: "room" | "folio" | "misc" | "tax" | "ota" | "expense" | "paidOut" | "payroll" | "promotion"; category: string; month: string; cents: number };
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
@@ -19,6 +19,9 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
  *   the date it was paid; commission still payable is not an expense yet.
  * - Expenses and cash paid outs are recorded when paid.
  * - Wages count when a payroll entry is marked Paid, on its paid date.
+ * - Promotions: the discount on each posted room night, so the statement can
+ *   show room revenue at the full rate and the promotions as a cost (the
+ *   net is unchanged).
  */
 export async function GET(request: Request) {
   try {
@@ -32,7 +35,7 @@ export async function GET(request: Request) {
     const businessDate = await propertyBusinessDate(sql, session.propertyId);
     const end = range.data.end > businessDate ? businessDate : range.data.end;
     if (end < start) return Response.json({ start, end: range.data.end, postedThrough: businessDate, rows: [] });
-    const [ledger, expenses, paidOuts, payroll] = await Promise.all([
+    const [ledger, expenses, paidOuts, payroll, promotions] = await Promise.all([
       sql<Row[]>`
         select case
             when account='Room Revenue' then 'room'
@@ -66,8 +69,15 @@ export async function GET(request: Request) {
         where property_id=${session.propertyId}::uuid and paid and paid_on between ${start}::date and ${end}::date
         group by 3
       `,
+      sql<Row[]>`
+        select 'promotion' as source, 'Promotions' as category, to_char(nr.stay_date,'YYYY-MM') as month, sum(nr.discount_cents)::int as cents
+        from nightly_rates nr
+        where nr.property_id=${session.propertyId}::uuid and nr.discount_cents > 0 and nr.stay_date between ${start}::date and ${end}::date
+          and exists (select 1 from charges c where c.reservation_room_id=nr.reservation_room_id and c.service_date=nr.stay_date and c.type='Room Rent' and c.status='posted')
+        group by 3
+      `,
     ]);
-    const rows = [...ledger, ...expenses, ...paidOuts, ...payroll].filter((row) => row.cents !== 0);
+    const rows = [...ledger, ...expenses, ...paidOuts, ...payroll, ...promotions].filter((row) => row.cents !== 0);
     return Response.json({ start, end: range.data.end, postedThrough: end, rows });
   } catch (error) { return propertyAccessResponse(error); }
 }

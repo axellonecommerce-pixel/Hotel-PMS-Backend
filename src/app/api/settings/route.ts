@@ -349,11 +349,26 @@ export async function PUT(request: Request) {
     const parsed = settingsSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Settings are invalid." }, { status: 400 });
     const now = new Date().toISOString();
+    // A save names the sections it changed (`_changedKeys`); only those
+    // replace what is stored. Another screen or device holding an older copy
+    // can then never write back a promotion, room or employee that was
+    // removed since it loaded.
+    const { _changedKeys: changedKeys, ...incoming } = parsed.data as Record<string, unknown> & { _changedKeys?: unknown };
+    let saved: Record<string, unknown> = incoming;
     if (hasProductionDatabase()) {
       await productionSql().begin(async (tx) => {
         const [stored] = await tx<Array<{ value: unknown }>>`
           select value from property_settings where property_id=${session.propertyId}::uuid and key='application_settings' for update
         `;
+        const storedValue = parseStoredSettings(stored?.value);
+        if (Array.isArray(changedKeys) && storedValue && typeof storedValue === "object") {
+          saved = { ...(storedValue as Record<string, unknown>) };
+          for (const key of changedKeys) if (typeof key === "string") {
+            if (key in incoming) saved[key] = incoming[key];
+            else delete saved[key];
+          }
+        }
+        parsed.data = saved;
         // Most saves (payment types, toggles, tax text) do not touch the
         // inventory, so skip the relational sync when it is unchanged.
         if (inventoryFingerprint(parseStoredSettings(stored?.value)) !== inventoryFingerprint(parsed.data)) {
@@ -370,8 +385,9 @@ export async function PUT(request: Request) {
           values (${session.propertyId}::uuid,${session.authUserId}::uuid,'settings',${session.propertyId}::uuid,'updated',${Math.floor(Date.now() / 1000)},'{}'::jsonb)
         `;
       });
-      return Response.json({ settings: parsed.data, savedAt: now });
+      return Response.json({ settings: saved, savedAt: now });
     }
+    parsed.data = saved;
     db.insert(propertySettings).values({
       id: `setting-${crypto.randomUUID()}`,
       propertyId: session.propertyId,

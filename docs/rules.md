@@ -68,6 +68,9 @@ These rules apply to humans, AI coding tools, both repositories, database work, 
 - An employee's own `weekStartDay` / `payDay` (Settings › Employees) win over the motel's. Pay frequency is one of Weekly, Biweekly, Semi-monthly, Monthly; any other stored value is read by keyword (default Weekly).
 - The API's database client is replaced after 60 s unused (`server/db/production.ts`): a server paused while idle keeps sockets the database already closed, and queries on them hang.
 - Overlays opened over a drawer (Scan ID, confirmations, toasts) do not count as clicks outside it, so the drawer keeps what was entered.
+- Settings PUT may carry `_changedKeys`: only those top-level sections replace the stored document (merge), so a stale client cannot write back removed promotions, rooms or employees.
+- Salary for a part period is prorated on 30 days a month / 15 a half-month (weekly 7, biweekly 14); a full period always pays the full salary.
+- Each employee stores their own pay schedule, week start and pay day (`payDay: -1` = 3 days after the period ends); new employees start from the motel's values. City/county minimum wage is in Settings › Property.
 - Pay reminders are created by the daily job (`PAYROLL_REMINDER`, owner and manager, once per entry per day).
 - Weekly periods and the overtime workweek start on `payroll.weekStartDay` (0 Sunday … 6 Saturday, default Monday); `payroll.payDay` sets the pay date for weekly and biweekly pay. Changing them leaves untouched unpaid entries of the old weeks to be removed; paid or edited pay stays.
 - A custom date range (`pay_periods.status = 'custom'`) is view-only: approving or paying its entries is refused, and unapproved custom entries are left out of the Pay Schedule and owed totals. Earlier approved or paid custom entries stay.
