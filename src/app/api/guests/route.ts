@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { recordChange } from "@/server/realtime/change-events";
+import { profileDate } from "@/server/guests/profile-dates";
 import { deletePrivateFiles } from "@/server/storage/private-files";
 
 type Address = { addressLine1?: string; postalCode?: string; city?: string; state?: string; country?: string; countryCode?: string };
@@ -11,7 +12,9 @@ type Address = { addressLine1?: string; postalCode?: string; city?: string; stat
 type SourceDetails = { note?: string; number?: string; date?: string };
 type Preferences = { paymentSourceNotes?: Record<string, string>; paymentSourceDetails?: Record<string, SourceDetails>; fixedRateCents?: number; dateOfBirth?: string; idExpires?: string; secondaryPhone?: string; secondaryEmail?: string; roomPreferences?: Record<string, unknown> };
 
-const blankAsNull = <T extends z.ZodTypeAny>(schema: T) => z.preprocess((value) => (value === "" ? null : value), schema);
+// Blank clears the date; another format is read as YYYY-MM-DD, and an unreadable one is left unchanged.
+const profileDateUpdate = z.preprocess((value) => (value === "" || value === null ? null : profileDate(value)), z.string().date().nullable().optional());
+const profileDateInput = z.preprocess((value) => profileDate(value), z.string().date().optional());
 const guestStatusSchema = z.enum(["Regular", "Returning", "New", "Do Not Rent"]);
 const paymentSourceSchema = z.object({
   id: z.string().optional(),
@@ -51,8 +54,8 @@ const updateSchema = z.object({
   countryCode: z.string().max(20).optional(),
   fixedRateCents: z.number().int().min(0).nullable().optional(),
   // A cleared date field arrives as "" and means no date.
-  dateOfBirth: blankAsNull(z.string().date().nullable().optional()),
-  idExpires: blankAsNull(z.string().date().nullable().optional()),
+  dateOfBirth: profileDateUpdate,
+  idExpires: profileDateUpdate,
   notes: z.string().max(20_000).nullable().optional(),
   status: guestStatusSchema.optional(),
   roomPreferences: z.record(z.string(), z.unknown()).optional(),
@@ -84,8 +87,8 @@ const manualGuestSchema = z.object({
   email: z.string().email().or(z.literal("")).optional(),
   idType: z.enum(["US Driver License", "Passport", "Other"]).optional(),
   idNumber: z.string().trim().max(200).optional(),
-  dateOfBirth: z.preprocess((value) => (value === "" ? undefined : value), z.string().date().optional()),
-  idExpires: z.preprocess((value) => (value === "" ? undefined : value), z.string().date().optional()),
+  dateOfBirth: profileDateInput,
+  idExpires: profileDateInput,
   addressLine1: z.string().max(400).optional(),
   city: z.string().max(120).optional(),
   state: z.string().max(120).optional(),
@@ -151,7 +154,7 @@ async function listGuests(propertyId: string) {
     return {
       id: guest.id, createdAt: guest.createdAt, updatedAt: guest.updatedAt, firstName: guest.firstName, lastName: guest.lastName, phone: guest.phone ?? "", phoneNormalized: (guest.phone ?? "").replace(/\D/g, ""),
       city: address.city ?? "", addressLine1: address.addressLine1, postalCode: address.postalCode, state: address.state, country: address.country, countryCode: address.countryCode,
-      email: guest.email ?? undefined, secondaryPhone: prefs.secondaryPhone, secondaryEmail: prefs.secondaryEmail, status: apiStatus(guest.guestStatus), fixedRateCents: prefs.fixedRateCents, dateOfBirth: prefs.dateOfBirth, idExpires: prefs.idExpires, roomPreferences: prefs.roomPreferences,
+      email: guest.email ?? undefined, secondaryPhone: prefs.secondaryPhone, secondaryEmail: prefs.secondaryEmail, status: apiStatus(guest.guestStatus), fixedRateCents: prefs.fixedRateCents, dateOfBirth: profileDate(prefs.dateOfBirth) ?? prefs.dateOfBirth, idExpires: profileDate(prefs.idExpires) ?? prefs.idExpires, roomPreferences: prefs.roomPreferences,
       idType: identity?.idType, driverLicenseNumber: identity?.idNumber, notes: guest.remarks ?? undefined, dnrRemarks: guest.dnrReason ?? undefined,
       vehicle: vehicle ? { plate: vehicle.plate, make: vehicle.make ?? "", color: vehicle.color ?? "", year: vehicle.year ?? "" } : undefined,
       savedPaymentSources: (sourcesByGuest.get(guest.id) ?? []).map((source) => { const label = source.label ?? source.method; const tokenReference = source.externalReference ?? ""; const number = source.last4 ?? ""; const details = prefs.paymentSourceDetails?.[paymentSourceKey({ label, tokenReference, number })] ?? { note: prefs.paymentSourceNotes?.[`${label.trim().toLowerCase()}|${tokenReference.trim()}`] }; return { id: source.id, label, tokenReference, number: number || undefined, note: details.note, date: details.date }; }),
@@ -313,6 +316,12 @@ export async function POST(request: Request) {
         return { guestId: guest.id };
       });
       return Response.json(result, { status: result.merged ? 200 : 201 });
+    }
+    if (body && typeof body === "object" && "guest" in body) {
+      const issue = manual.error?.issues[0];
+      const field = issue?.path.at(-1);
+      const message = issue?.code === "custom" ? issue.message : `Check the guest's ${typeof field === "string" ? field.replace(/([A-Z])/g, " $1").toLowerCase() : "details"}.`;
+      return Response.json({ error: message }, { status: 400 });
     }
     const parsed = importSchema.safeParse(body);
     if (!parsed.success) return Response.json({ error: "Guest import rows are invalid." }, { status: 400 });

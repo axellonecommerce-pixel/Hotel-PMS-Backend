@@ -25,9 +25,9 @@ export async function GET(request: Request, context: { params: Promise<{ reserva
     `;
     if (!reservation) return Response.json({ error: "Reservation not found." }, { status: 404 });
     const [nights, promotions, commission] = await Promise.all([
-      sql<Array<{ date: string; rooms: number; baseCents: number; discountCents: number; finalCents: number; baseRates: number[] }>>`
+      sql<Array<{ date: string; rooms: number; baseCents: number; discountCents: number; finalCents: number; baseRates: number[]; finalRates: number[] }>>`
         select nr.stay_date::text as date,count(*)::int as rooms,sum(nr.base_rate_cents)::int as "baseCents",sum(nr.discount_cents)::int as "discountCents",
-          sum(nr.final_rate_cents)::int as "finalCents",array_agg(nr.base_rate_cents order by rr.id) as "baseRates"
+          sum(nr.final_rate_cents)::int as "finalCents",array_agg(nr.base_rate_cents order by rr.id) as "baseRates",array_agg(nr.final_rate_cents order by rr.id) as "finalRates"
         from nightly_rates nr join reservation_rooms rr on rr.id=nr.reservation_room_id
         where rr.reservation_id=${reservationId}::uuid and rr.property_id=${session.propertyId}::uuid
         group by 1 order by 1
@@ -61,7 +61,8 @@ export async function GET(request: Request, context: { params: Promise<{ reserva
     const roomTotal = nights.reduce((total, night) => total + night.finalCents, 0);
     let commissionLeft = commission.commissionCents;
     const nightly = nights.map((night, index) => {
-      const taxCents = taxFor(night.finalCents);
+      // Taxed per room, per night, as the folio posts it.
+      const taxCents = night.finalRates.reduce((total, rate) => total + taxFor(rate), 0);
       const guestCents = night.finalCents + taxCents;
       const share = index === nights.length - 1 ? commissionLeft : roomTotal ? Math.round((commission.commissionCents * night.finalCents) / roomTotal) : 0;
       commissionLeft -= share;

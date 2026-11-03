@@ -121,3 +121,6 @@ These rules apply to humans, AI coding tools, both repositories, database work, 
 - Architecture decisions that materially change the TRD require owner approval before implementation.
 - Do not mark a feature complete based only on UI appearance; verify persistence, authorization, calculations, and recovery behavior end-to-end.
 - The owner reviews and approves these documents before implementation starts.
+- Price breakdowns tax each room-night separately, as the folio posts it, so a group's breakdown total equals its folio to the cent.
+- Guest profile dates (ID expiry, birth date) are stored as YYYY-MM-DD; other formats are converted when read or saved.
+- The app's main area keeps room for the tablet bar and the iPad home indicator at every width below xl.

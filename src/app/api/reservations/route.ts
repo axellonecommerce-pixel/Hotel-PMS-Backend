@@ -10,6 +10,7 @@ import { canUseRateCode } from "@/domain/rules/rate-code";
 import { calculateTaxCents } from "@/domain/rules/tax";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { bookingChannels, companies, guests, reservationCharges, reservationRooms, reservations, rooms, roomTypes } from "@/server/db/schema";
+import { profileDate } from "@/server/guests/profile-dates";
 import { recordChange } from "@/server/realtime/change-events";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import type { PropertySession } from "@/server/auth/authorization";
@@ -459,8 +460,9 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   const existingPreferences = asRecord(identity?.roomPreferences);
   const guestPreferences = {
     ...existingPreferences,
-    ...(payload.dateOfBirth ? { dateOfBirth: payload.dateOfBirth } : {}),
-    ...(payload.idExpires ? { idExpires: payload.idExpires } : {}),
+    // Stored as YYYY-MM-DD so the guest profile can be saved again later.
+    ...(payload.dateOfBirth ? { dateOfBirth: profileDate(payload.dateOfBirth) ?? payload.dateOfBirth } : {}),
+    ...(payload.idExpires ? { idExpires: profileDate(payload.idExpires) ?? payload.idExpires } : {}),
     ...(payload.fixedRateCents !== undefined ? { fixedRateCents: payload.fixedRateCents } : {}),
   };
   if (guestId) await tx`update guests set first_name=${payload.firstName},last_name=${payload.lastName},phone=coalesce(${normalizePhone(payload.phone) || null},phone),email=coalesce(${payload.email || null},email),address=${tx.json(address as never)},room_preferences=${tx.json(guestPreferences as never)},updated_at=now() where id=${guestId}::uuid`;
