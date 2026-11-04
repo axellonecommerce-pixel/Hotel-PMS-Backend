@@ -40,6 +40,12 @@ A motel is one `properties` row. Everything else is scoped to it by `property_id
 - The Revenue screen total includes tax. Profit & Loss shows revenue without tax, and states that revenue plus tax equals the Revenue total.
 - A period that is still running (this month, this year) ends at today's business date.
 
+## 2a. Online bookings (booking emails)
+
+1. Settings › Online Bookings: turn on, copy the script, paste it into script.google.com while signed in to the motel's Gmail, run **setup** and allow it.
+2. New booking emails become reservations in Arrivals within about 5 minutes; staff get a notification. Assign a room before arrival and scan the guest's ID at check-in.
+3. Check **Booking emails to review** at the top of Arrivals: apply cancellations and changes, resolve possible overbookings, enter unknown bookings by hand (match an unknown room name once in Settings › Online Bookings), then click Done.
+
 ## 3. Payroll workflow
 
 1. **Settings › Property:** country and state. This decides the payroll rules: minimum wage, overtime, tax brackets, pay frequency, final pay and breaks.

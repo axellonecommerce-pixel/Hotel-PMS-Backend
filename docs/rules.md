@@ -25,6 +25,7 @@ These rules apply to humans, AI coding tools, both repositories, database work, 
 - Enforce hotel isolation server-side and at the database layer; hiding UI is not authorization.
 - Redact IDs, tokens, backup data, and payment details from logs/errors.
 - Validate type, signature, size, and authorization for every uploaded/downloaded file.
+- Public endpoints (`/api/public/*`, called by a motel's Gmail import script) never trust the caller: they identify the motel by its private import key, remove card details before reading, store no email text, and never create a second reservation from the same email.
 - Prohibit direct production database edits, mass deletion, restore, or destructive production actions without explicit owner approval and a verified backup.
 
 ## 4. Domain integrity

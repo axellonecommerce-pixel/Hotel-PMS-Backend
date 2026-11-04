@@ -250,7 +250,7 @@ function bookingSourceKey(value: string) {
   return compact;
 }
 
-class ReservationRequestError extends Error {
+export class ReservationRequestError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
 }
 
@@ -368,18 +368,20 @@ type RoomLine = { roomTypeId: string; roomCount: number; roomNumbers: string[]; 
  * `strictPromotions` rejects a promotion that does not fit the room type;
  * extra group lines simply skip it.
  */
-async function checkRoomLine(tx: TransactionSql, session: PropertySession, payload: ReservationPayload, line: RoomLine, strictPromotions: boolean) {
+async function checkRoomLine(tx: TransactionSql, session: PropertySession, payload: ReservationPayload, line: RoomLine, strictPromotions: boolean, alreadySold = false) {
   const roomType = await productionRoomTypeForSettingsId(tx, session.propertyId, line.roomTypeId);
   if (!roomType?.active) throw new ReservationRequestError("Select an active room type.", 409);
   const dayUse = payload.checkoutDate === payload.checkInDate;
   const occupiedUntil = dayUse ? addDays(payload.checkInDate, 1) : payload.checkoutDate;
   const stayNights = Math.round((new Date(`${payload.checkoutDate}T12:00:00Z`).getTime() - new Date(`${payload.checkInDate}T12:00:00Z`).getTime()) / 86_400_000);
   const restriction = rateCalendarRestriction(await rateCalendarDays(tx, session.propertyId, line.roomTypeId, payload.checkInDate, occupiedUntil), payload.checkInDate, stayNights);
-  if (restriction) throw new ReservationRequestError(restriction, 409);
+  // A booking already sold elsewhere (an imported email) is recorded even on a
+  // closed date; free rooms are still checked below.
+  if (restriction && !alreadySold) throw new ReservationRequestError(restriction, 409);
   // Rooms-to-sell caps set on the Rate Calendar.
   const inventory = (await roomInventory(tx, session.propertyId, payload.checkInDate, addDays(occupiedUntil, -1))).get(line.roomTypeId);
   for (const [date, day] of inventory ?? []) {
-    if (day.sellLimit !== null && day.sold + line.roomCount > day.sellLimit) {
+    if (!alreadySold && day.sellLimit !== null && day.sold + line.roomCount > day.sellLimit) {
       throw new ReservationRequestError(`Only ${Math.max(0, day.sellLimit - day.sold)} room(s) of this type can be sold on ${date}.`, 409);
     }
   }
@@ -426,7 +428,11 @@ async function checkRoomLine(tx: TransactionSql, session: PropertySession, paylo
   return { roomType, selectedRooms: selectedRooms as Array<{ id: string; number: string }>, promotions };
 }
 
-export async function createProductionReservationTransaction(tx: TransactionSql, session: PropertySession, payload: ReservationPayload) {
+/**
+ * `alreadySold`: the stay was sold by a website or OTA (an imported booking
+ * email), so Rate Calendar closings and rooms-to-sell caps do not apply.
+ */
+export async function createProductionReservationTransaction(tx: TransactionSql, session: PropertySession, payload: ReservationPayload, options: { alreadySold?: boolean } = {}) {
   await validateProductionRateCode(tx, session.propertyId, payload.rateCode);
   // Equal dates are a day-use stay: one room charge, and the room is held for
   // its arrival date. Overlap checks treat every day-use stay the same way.
@@ -435,7 +441,7 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   const lines: RoomLine[] = [{ roomTypeId: payload.roomTypeId, roomCount: payload.roomCount, roomNumbers: payload.roomNumbers, baseNightlyRatesCents: payload.baseNightlyRatesCents, nightlyRatesCents: payload.nightlyRatesCents }, ...payload.additionalRooms];
   if (new Set(lines.map((line) => line.roomTypeId)).size !== lines.length) throw new ReservationRequestError("List each room type once; set its number of rooms instead.");
   const checkedLines = [];
-  for (const [index, line] of lines.entries()) checkedLines.push({ ...line, ...(await checkRoomLine(tx, session, payload, line, index === 0)) });
+  for (const [index, line] of lines.entries()) checkedLines.push({ ...line, ...(await checkRoomLine(tx, session, payload, line, index === 0, options.alreadySold)) });
   const { roomType } = checkedLines[0];
   const totalRoomCount = lines.reduce((sum, line) => sum + line.roomCount, 0);
   if (payload.companyId) {
