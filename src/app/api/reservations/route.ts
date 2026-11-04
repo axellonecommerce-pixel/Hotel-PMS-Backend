@@ -107,13 +107,17 @@ export async function GET(request: Request) {
         const commissionCents = record.commissionCents;
         // Department remarks saved through PATCH { remark } live in notes.
         let remarks: Record<string, Array<{ id: string; text: string; createdAt: string }>> = {};
+        // The website or OTA booking it came from (imported booking email).
+        let onlineBooking: unknown;
         try {
           const parsedNotes = record.rawNotes ? JSON.parse(record.rawNotes) : null;
           if (parsedNotes?.remarks && typeof parsedNotes.remarks === "object") remarks = parsedNotes.remarks;
+          if (parsedNotes?.online && typeof parsedNotes.online === "object") onlineBooking = parsedNotes.online;
         } catch {
           // Legacy plain-text notes have no structured remarks.
         }
         return {
+          onlineBooking,
           bookingRemarkEntries: remarks.booking ?? [], stayRemarkEntries: remarks.stay ?? [],
           housekeepingRemarkEntries: remarks.housekeeping ?? [], otherRemarkEntries: remarks.other ?? [], id: record.id, version: record.version, confirmationNumber: record.confirmationNumber, guestId: record.guestId, firstName: record.firstName, lastName: record.lastName, phone: record.phone ?? "", room: record.room ?? "Unassigned", groupReservation: reservationRooms.length > 1, reservationRooms, extraGuests, checkInDate: record.checkInDate, checkoutDate: record.checkoutDate, checkedOutDate: record.checkedOutDate ?? undefined, bookedDate: record.bookedDate, checkInTime: "3:00 PM", nights, source: record.source ?? "Direct", paymentType: record.companyId ? "Direct Bill" : "Not entered", companyId: record.companyId ?? undefined, company: record.companyName ?? undefined, roomRentCents: record.roomRentCents, taxCents, totalCents: record.roomRentCents + taxCents, balanceCents: record.balanceCents, status, rateCode: record.rateCode ?? undefined, otaPaymentStatus, commissionPercent: record.commissionBasisPoints / 100, commissionCents, commissionPaidCents: record.commissionPaidCents, collectedCents: record.collectedCents, ...depositView(record.deposit, record.deposit?.transactions ?? []), taxRatePercentage: record.taxRateBasisPoints / 100, taxExempt: record.taxExempt, adults: record.adults, children: record.children, petCount: record.petCount, servicePetCount: record.servicePetCount };
       }) });
@@ -176,6 +180,28 @@ export async function GET(request: Request) {
   }
 }
 
+const cents = z.number().int().nonnegative().max(100_000_000);
+export const onlineBookingSchema = z.object({
+  provider: z.string().max(40),
+  channel: z.string().max(80),
+  confirmation: z.string().max(120),
+  channelConfirmation: z.string().max(120).optional(),
+  /** The room category the guest booked online. */
+  roomTypeName: z.string().max(120).optional(),
+  /** False until staff confirm or change the PMS room type (the online category did not match one). */
+  roomTypeConfirmed: z.boolean(),
+  rooms: z.number().int().positive().max(50),
+  nightlyRatesCents: z.array(cents).max(400),
+  subtotalCents: cents.optional(),
+  taxCents: cents.optional(),
+  totalCents: cents.optional(),
+  commissionCents: cents.optional(),
+  netCents: cents.optional(),
+  paidCents: cents.optional(),
+  receivedAt: z.string().max(40).optional(),
+});
+export type OnlineBooking = z.infer<typeof onlineBookingSchema>;
+
 const payloadSchema = z.object({
   idType: z.enum(["US Driver License", "Passport", "Other"]),
   idNumber: z.string().trim().min(1),
@@ -227,6 +253,9 @@ const payloadSchema = z.object({
   // The exact commission from the OTA extranet, replacing the percentage.
   commissionCents: z.number().int().nonnegative().optional(),
   source: z.string().trim().min(1),
+  // The website or OTA booking an imported booking email described: its
+  // confirmation numbers, room category and price breakdown (kept in notes).
+  online: onlineBookingSchema.optional(),
 });
 
 function normalizeId(idNumber: string) {
@@ -491,7 +520,7 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   if (!bookingSource) throw new ReservationRequestError("Select an active booking source configured in Settings.", 409);
   const otaPaymentStatus = bookingSource.type.toLowerCase() === "ota" ? payload.otaPaymentStatus ?? "Guest Pays Hotel" : null;
   const confirmationNumber = `PMS-${Date.now().toString().slice(-8)}-${Math.floor(Math.random() * 900 + 100)}`;
-  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${totalRoomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${otaPaymentStatus},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: bookingSource.name })}::text) returning id`;
+  const [reservation] = await tx<Array<{ id: string }>>`insert into reservations (property_id,main_guest_id,company_id,confirmation_number,booking_source_id,status,arrival_date,departure_date,group_reservation,tax_rate_basis_points,tax_exempt,tax_exemption_reference,currency_code,ota_payment_status,notes) values (${session.propertyId}::uuid,${guestId}::uuid,${payload.companyId || null}::uuid,${confirmationNumber},${bookingSource.id}::uuid,'reserved',${payload.checkInDate}::date,${payload.checkoutDate}::date,${totalRoomCount > 1},${Math.round(payload.taxRatePercentage * 100)},${payload.taxExempt},${payload.taxExemptionCertificate || null},'USD',${otaPaymentStatus},${tx.json({ adults: payload.adults, children: payload.children, petCount: payload.petCount, servicePetCount: payload.servicePetCount, rateCode: payload.rateCode, source: bookingSource.name, ...(payload.online ? { online: payload.online } : {}) })}::text) returning id`;
   for (const [appliedOrder, promotionId] of payload.promotionIds.entries()) {
     await tx`insert into reservation_promotions (property_id,reservation_id,promotion_id,applied_order) values (${session.propertyId}::uuid,${reservation.id}::uuid,${promotionId}::uuid,${appliedOrder})`;
   }

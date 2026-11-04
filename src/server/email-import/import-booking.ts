@@ -47,6 +47,8 @@ export type ImportEntry = {
   totalCents?: number;
   reservationId?: string;
   confirmationNumber?: string;
+  /** A new booking that needs review, kept (without card details) so staff can add it to Arrivals. */
+  booking?: EmailBooking;
 };
 
 const LOG_KEY = "email_booking_imports";
@@ -85,58 +87,55 @@ async function notify(tx: TransactionSql, propertyId: string, title: string, mes
     values (${propertyId}::uuid,null,'EMAIL_BOOKING',${title},${message},${reservationId ? "reservation" : null},${reservationId ?? null}::uuid)`;
 }
 
-export type ImportResult = { status: "imported" | "duplicate" | "review" | "ignored"; message: string; reservationId?: string };
+type Placed = { reservationId: string; confirmationNumber: string } | { reason: string };
 
-export async function importBookingEmail(sql: Sql, motel: Motel, email: { messageId: string; subject: string; text: string; receivedAt?: string }): Promise<ImportResult> {
-  const booking = parseBookingEmail(email);
-  return sql.begin(async (tx) => {
-    // One import at a time per motel: the log row is the lock.
-    await tx`insert into property_settings (property_id,key,value) values (${motel.propertyId}::uuid,${LOG_KEY},${tx.json({ entries: [] } as never)}) on conflict (property_id,key) do nothing`;
-    const log = await readImportLog(tx, motel.propertyId, true);
-    if (log.some((entry) => entry.messageId === email.messageId)) return { status: "duplicate" as const, message: "Already imported." };
-    const base = { messageId: email.messageId, receivedAt: email.receivedAt, processedAt: new Date().toISOString() };
-    const review = async (reason: string, found?: EmailBooking, reservationId?: string): Promise<ImportResult> => {
-      await writeImportLog(tx, motel.propertyId, [{ ...base, ...(found ? summary(found) : { guest: email.subject.slice(0, 120) }), status: "review", reason, reservationId }, ...log]);
-      await notify(tx, motel.propertyId, "Booking email needs review", `${found ? `${found.channel} · ${found.firstName} ${found.lastName} · ${found.checkIn ?? "?"} → ${found.checkout ?? "?"}: ` : ""}${reason}`, reservationId);
-      return { status: "review", message: reason, reservationId };
-    };
-    if (!booking) return review("This email's format is not known yet. Enter the booking by hand, and send a copy of the email to InnSeva support so it can be read next time.");
+/** The closest room type for a room name the motel has not matched: most words in common, non-smoking first. */
+function closestRoomTypes<T extends { id: string; name: string; active?: boolean; smokingAllowed?: boolean }>(name: string | undefined, roomTypes: T[]) {
+  const words = new Set(roomNameKey(name ?? "").split(" ").filter(Boolean));
+  return roomTypes.filter((type) => type.active !== false)
+    .map((type) => ({ type, score: roomNameKey(type.name).split(" ").filter((word) => words.has(word)).length * 2 - (type.smokingAllowed ? 1 : 0) }))
+    .sort((left, right) => right.score - left.score)
+    .map((item) => item.type);
+}
 
-    const original = log.find((entry) => entry.confirmation === booking.confirmation && entry.reservationId);
-    if (booking.kind !== "new") {
-      const what = booking.kind === "cancelled" ? "cancelled" : "changed";
-      return review(original
-        ? `${booking.channel} ${what} booking ${booking.channelConfirmation ?? booking.confirmation}. Open reservation ${original.confirmationNumber ?? ""} and ${booking.kind === "cancelled" ? "cancel it" : "update the stay"}.`.replace("  ", " ")
-        : `${booking.channel} ${what} booking ${booking.channelConfirmation ?? booking.confirmation}, which was not imported here. Find it in Reservations and ${booking.kind === "cancelled" ? "cancel it" : "update it"}.`, booking, original?.reservationId);
-    }
-    if (original || log.some((entry) => entry.confirmation === booking.confirmation && entry.status !== "review")) {
-      await writeImportLog(tx, motel.propertyId, [{ ...base, ...summary(booking), status: "resolved", reason: "Another copy of an imported booking email." }, ...log]);
-      return { status: "duplicate", message: "This booking was already imported." };
-    }
-    if (!booking.checkIn || !booking.checkout || booking.checkout <= booking.checkIn) return review("The stay dates could not be read.", booking);
-    if (!booking.firstName) return review("The guest's name could not be read.", booking);
-    if (!booking.nightlyRatesCents.length) return review("The room price could not be read.", booking);
-
-    const [settingsRow] = await tx<Array<{ value: StoredSettings }>>`
-      select case when jsonb_typeof(value)='object' then value else (value#>>'{}')::jsonb end as value
-      from property_settings where property_id=${motel.propertyId}::uuid and key='application_settings'`;
-    const settings = settingsRow?.value ?? {};
-    const roomType = matchRoomType(booking.roomTypeName, settings.roomTypes ?? [], motel.settings.roomTypeMatches);
-    if (!roomType) return review(`Room type "${booking.roomTypeName ?? "not shown"}" is not matched to a room type here. Match it in Settings › Online Bookings, then enter this booking.`, booking);
-    const sources = await tx<Array<{ name: string }>>`select name from booking_sources where property_id=${motel.propertyId}::uuid and active=true`;
-    const want = compact(booking.channel);
-    const source = sources.find((item) => compact(item.name) === want)
-      ?? sources.find((item) => want === "website" ? /website|web/.test(compact(item.name)) : compact(item.name).includes(want) || want.includes(compact(item.name)));
-    if (!source) return review(`There is no active reservation source for ${booking.channel}. Add it in Settings › Reservation Sources.`, booking);
-    const rateCodes = (settings.rateCodes ?? []).filter((rate) => rate.active !== false && !/rate (exception|exemption)/i.test(rate.name));
-    const rateCode = (rateCodes.find((rate) => rate.isAvailabilityDefault) ?? rateCodes[0])?.name ?? "RACK";
-    const taxPercentage = Math.max(0, settings.tax?.percentage ?? 0);
-    const contact = booking.email?.toLowerCase() || booking.channelConfirmation || booking.confirmation;
-    const actor = { authUserId: "email", propertyId: motel.propertyId, role: "owner" as const, active: true, systemName: `${booking.channel} email` };
-    let created: Awaited<ReturnType<typeof createProductionReservationTransaction>>;
+/**
+ * Create the reservation for a new booking: the motel's room type for the
+ * online room category (or, when none matches, the closest one with a free
+ * room, marked for staff to confirm before assigning a room or checking
+ * in), the email's nightly prices, and its full price breakdown.
+ */
+async function placeBooking(tx: TransactionSql, motel: Motel, booking: EmailBooking, receivedAt?: string): Promise<Placed> {
+  if (!booking.checkIn || !booking.checkout || booking.checkout <= booking.checkIn) return { reason: "The stay dates could not be read." };
+  if (!booking.firstName) return { reason: "The guest's name could not be read." };
+  if (!booking.nightlyRatesCents.length) return { reason: "The room price could not be read." };
+  const [settingsRow] = await tx<Array<{ value: StoredSettings }>>`
+    select case when jsonb_typeof(value)='object' then value else (value#>>'{}')::jsonb end as value
+    from property_settings where property_id=${motel.propertyId}::uuid and key='application_settings'`;
+  const settings = settingsRow?.value ?? {};
+  const roomTypes = settings.roomTypes ?? [];
+  const matched = matchRoomType(booking.roomTypeName, roomTypes, motel.settings.roomTypeMatches);
+  // A name shared by smoking and non-smoking types is confirmed by staff too.
+  const sameName = matched ? roomTypes.filter((type) => type.active !== false && roomNameKey(type.name) === roomNameKey(matched.name)).length : 0;
+  const savedMatch = booking.roomTypeName ? Boolean(motel.settings.roomTypeMatches[roomNameKey(booking.roomTypeName)]) : false;
+  const candidates = matched ? [matched, ...closestRoomTypes(booking.roomTypeName, roomTypes).filter((type) => type.id !== matched.id)] : closestRoomTypes(booking.roomTypeName, roomTypes);
+  if (!candidates.length) return { reason: "This motel has no active room types." };
+  const sources = await tx<Array<{ name: string; type: string }>>`select name,type from booking_sources where property_id=${motel.propertyId}::uuid and active=true`;
+  const want = compact(booking.channel);
+  const source = sources.find((item) => compact(item.name) === want)
+    ?? sources.find((item) => want === "website" ? /website|web/.test(compact(item.name)) : compact(item.name).includes(want) || want.includes(compact(item.name)));
+  if (!source) return { reason: `There is no active reservation source for ${booking.channel}. Add it in Settings › Reservation Sources, then click Add to Arrivals.` };
+  const rateCodes = (settings.rateCodes ?? []).filter((rate) => rate.active !== false && !/rate (exception|exemption)/i.test(rate.name));
+  const rateCode = (rateCodes.find((rate) => rate.isAvailabilityDefault) ?? rateCodes[0])?.name ?? "RACK";
+  const taxPercentage = Math.max(0, settings.tax?.percentage ?? 0);
+  const contact = booking.email?.toLowerCase() || booking.channelConfirmation || booking.confirmation;
+  const actor = { authUserId: "email", propertyId: motel.propertyId, role: "owner" as const, active: true, systemName: `${booking.channel} email` };
+  // Paid online when the email shows the stay already paid; otherwise the guest pays at the motel.
+  const paidOnline = booking.paidCents !== undefined && booking.totalCents !== undefined && booking.paidCents > 0 && booking.paidCents >= booking.totalCents;
+  for (const [index, roomType] of candidates.entries()) {
+    const confirmed = index === 0 && Boolean(matched) && (savedMatch || sameName <= 1);
     try {
       // A savepoint: a refused booking leaves the log and notification to be written.
-      created = await tx.savepoint((inner) => createProductionReservationTransaction(inner, actor, {
+      const created = await tx.savepoint((inner) => createProductionReservationTransaction(inner, actor, {
         idType: "Other",
         idNumber: `${booking.email ? "WEB" : compact(booking.channel).toUpperCase()}-${contact}`,
         firstName: booking.firstName,
@@ -163,24 +162,80 @@ export async function importBookingEmail(sql: Sql, motel: Motel, email: { messag
         promotionIds: [],
         taxRatePercentage: taxPercentage,
         taxExempt: false,
+        otaPaymentStatus: paidOnline ? "Paid Online" : "Guest Pays Hotel",
         ...(booking.commissionCents !== undefined ? { commissionCents: booking.commissionCents } : {}),
         source: source.name,
+        online: {
+          provider: booking.provider, channel: booking.channel, confirmation: booking.confirmation, channelConfirmation: booking.channelConfirmation,
+          roomTypeName: booking.roomTypeName, roomTypeConfirmed: confirmed, rooms: booking.rooms, nightlyRatesCents: booking.nightlyRatesCents,
+          subtotalCents: booking.subtotalCents, taxCents: booking.taxCents, totalCents: booking.totalCents, commissionCents: booking.commissionCents,
+          netCents: booking.netCents, paidCents: booking.paidCents, receivedAt,
+        },
       }, { alreadySold: true }));
+      const [reservation] = await tx<Array<{ confirmationNumber: string }>>`select confirmation_number as "confirmationNumber" from reservations where id=${created.reservationId}::uuid`;
+      const pmsTax = booking.nightlyRatesCents.reduce((sum, rate) => sum + calculateTaxCents(rate, taxPercentage / 100), 0) * booking.rooms;
+      await logReservationActivity(tx, actor, created.reservationId, "Reservation",
+        `Imported from the ${booking.provider} email · ${booking.channel} confirmation ${booking.channelConfirmation ?? booking.confirmation}${booking.roomTypeName ? ` · booked as "${booking.roomTypeName}"` : ""}${confirmed ? "" : ` · room type ${roomType.name} to confirm`}${booking.totalCents !== undefined ? ` · email total ${money(booking.totalCents)}` : ""}${booking.taxCents !== undefined && Math.abs(booking.taxCents - pmsTax) > booking.nightlyRatesCents.length * booking.rooms ? ` · email tax ${money(booking.taxCents)}, posted ${money(pmsTax)}` : ""}`);
+      await notify(tx, motel.propertyId, `New ${booking.channel} booking`, `${booking.firstName} ${booking.lastName} · ${booking.rooms} × ${roomType.name}${confirmed ? "" : ` (booked as "${booking.roomTypeName ?? "room"}": confirm the room type)`} · ${booking.checkIn} → ${booking.checkout} · ${reservation.confirmationNumber}`, created.reservationId);
+      return { reservationId: created.reservationId, confirmationNumber: reservation.confirmationNumber };
     } catch (error) {
-      if (error instanceof ReservationRequestError) {
-        const full = /inventory|available|rooms? of this type/i.test(error.message);
-        return review(full ? `No ${roomType.name} room is free for these dates: this booking may be an overbooking. Move a stay or contact ${booking.channel}, then enter it by hand.` : error.message, booking);
-      }
-      throw error;
+      if (!(error instanceof ReservationRequestError)) throw error;
+      // No free room of this type: try the next closest type.
+      if (/inventory|available|rooms? of this type/i.test(error.message)) continue;
+      return { reason: error.message };
     }
-    const [reservation] = await tx<Array<{ confirmationNumber: string }>>`select confirmation_number as "confirmationNumber" from reservations where id=${created.reservationId}::uuid`;
-    const emailTax = booking.taxCents;
-    const pmsTax = booking.nightlyRatesCents.reduce((sum, rate) => sum + calculateTaxCents(rate, taxPercentage / 100), 0) * booking.rooms;
-    await logReservationActivity(tx, actor, created.reservationId, "Reservation",
-      `Imported from the ${booking.provider} email · ${booking.channel} confirmation ${booking.channelConfirmation ?? booking.confirmation}${booking.totalCents !== undefined ? ` · email total ${money(booking.totalCents)}` : ""}${emailTax !== undefined && Math.abs(emailTax - pmsTax) > booking.nightlyRatesCents.length * booking.rooms ? ` · email tax ${money(emailTax)}, posted ${money(pmsTax)}` : ""}`);
-    await writeImportLog(tx, motel.propertyId, [{ ...base, ...summary(booking), status: "imported", reservationId: created.reservationId, confirmationNumber: reservation.confirmationNumber }, ...log]);
-    await notify(tx, motel.propertyId, `New ${booking.channel} booking`, `${booking.firstName} ${booking.lastName} · ${booking.rooms} × ${roomType.name} · ${booking.checkIn} → ${booking.checkout} · ${reservation.confirmationNumber}`, created.reservationId);
-    return { status: "imported", message: `Imported as ${reservation.confirmationNumber}.`, reservationId: created.reservationId };
+  }
+  return { reason: `No ${booking.roomTypeName ?? "matching"} room is free for these dates: this booking may be an overbooking. Free a room or contact ${booking.channel}, then click Add to Arrivals.` };
+}
+
+/** Staff add a booking from Needs review to Arrivals (after freeing a room, adding a source, …). */
+export async function addReviewedBooking(sql: Sql, propertyId: string, messageId: string): Promise<{ entries: ImportEntry[]; error?: string; reservationId?: string }> {
+  return sql.begin(async (tx) => {
+    const log = await readImportLog(tx, propertyId, true);
+    const entry = log.find((item) => item.messageId === messageId && item.status === "review");
+    if (!entry?.booking) return { entries: log, error: "This email has no booking details to add. Enter it with New Arrival." };
+    const [row] = await tx<Array<{ value: { emailImport?: unknown } }>>`
+      select case when jsonb_typeof(value)='object' then value else (value#>>'{}')::jsonb end as value from property_settings where property_id=${propertyId}::uuid and key='application_settings'`;
+    const placed = await placeBooking(tx, { propertyId, settings: emailImportSettings(row?.value?.emailImport) }, entry.booking, entry.receivedAt);
+    if ("reason" in placed) return { entries: log, error: placed.reason };
+    const next = log.map((item) => item.messageId === messageId ? { ...item, status: "imported" as const, reason: undefined, booking: undefined, reservationId: placed.reservationId, confirmationNumber: placed.confirmationNumber } : item);
+    await writeImportLog(tx, propertyId, next);
+    return { entries: next, reservationId: placed.reservationId };
+  }) as Promise<{ entries: ImportEntry[]; error?: string; reservationId?: string }>;
+}
+
+export type ImportResult = { status: "imported" | "duplicate" | "review" | "ignored"; message: string; reservationId?: string };
+
+export async function importBookingEmail(sql: Sql, motel: Motel, email: { messageId: string; subject: string; text: string; receivedAt?: string }): Promise<ImportResult> {
+  const booking = parseBookingEmail(email);
+  return sql.begin(async (tx) => {
+    // One import at a time per motel: the log row is the lock.
+    await tx`insert into property_settings (property_id,key,value) values (${motel.propertyId}::uuid,${LOG_KEY},${tx.json({ entries: [] } as never)}) on conflict (property_id,key) do nothing`;
+    const log = await readImportLog(tx, motel.propertyId, true);
+    if (log.some((entry) => entry.messageId === email.messageId)) return { status: "duplicate" as const, message: "Already imported." };
+    const base = { messageId: email.messageId, receivedAt: email.receivedAt, processedAt: new Date().toISOString() };
+    const review = async (reason: string, found?: EmailBooking, reservationId?: string): Promise<ImportResult> => {
+      await writeImportLog(tx, motel.propertyId, [{ ...base, ...(found ? { ...summary(found), booking: found.kind === "new" ? found : undefined } : { guest: email.subject.slice(0, 120) }), status: "review", reason, reservationId }, ...log]);
+      await notify(tx, motel.propertyId, "Booking email needs review", `${found ? `${found.channel} · ${found.firstName} ${found.lastName} · ${found.checkIn ?? "?"} → ${found.checkout ?? "?"}: ` : ""}${reason}`, reservationId);
+      return { status: "review", message: reason, reservationId };
+    };
+    if (!booking) return review("This email's format is not known yet. Enter the booking by hand, and send a copy of the email to InnSeva support so it can be read next time.");
+
+    const original = log.find((entry) => entry.confirmation === booking.confirmation && entry.reservationId);
+    if (booking.kind !== "new") {
+      const what = booking.kind === "cancelled" ? "cancelled" : "changed";
+      return review(original
+        ? `${booking.channel} ${what} booking ${booking.channelConfirmation ?? booking.confirmation}. Open reservation ${original.confirmationNumber ?? ""} and ${booking.kind === "cancelled" ? "cancel it" : "update the stay"}.`.replace("  ", " ")
+        : `${booking.channel} ${what} booking ${booking.channelConfirmation ?? booking.confirmation}, which was not imported here. Find it in Reservations and ${booking.kind === "cancelled" ? "cancel it" : "update it"}.`, booking, original?.reservationId);
+    }
+    if (original || log.some((entry) => entry.confirmation === booking.confirmation && entry.status !== "review")) {
+      await writeImportLog(tx, motel.propertyId, [{ ...base, ...summary(booking), status: "resolved", reason: "Another copy of an imported booking email." }, ...log]);
+      return { status: "duplicate", message: "This booking was already imported." };
+    }
+    const placed = await placeBooking(tx, motel, booking, email.receivedAt);
+    if ("reason" in placed) return review(placed.reason, booking);
+    await writeImportLog(tx, motel.propertyId, [{ ...base, ...summary(booking), status: "imported", reservationId: placed.reservationId, confirmationNumber: placed.confirmationNumber }, ...log]);
+    return { status: "imported", message: `Imported as ${placed.confirmationNumber}.`, reservationId: placed.reservationId };
   }) as Promise<ImportResult>;
 }
 

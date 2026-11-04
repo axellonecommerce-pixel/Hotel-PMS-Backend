@@ -238,6 +238,8 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         if (!guest) throw new MoveError("Add the guest to this reservation (Extra Guests) before assigning a room.");
         await logReservationActivity(tx, session, reservation.id, "Room", `Guest ${guest.name} assigned to Room ${room}`);
       }
+      // Choosing a room type and room settles the room type of an online booking.
+      if (moved.length) await tx`update reservations set notes=jsonb_set(notes::jsonb,'{online,roomTypeConfirmed}','true')::text where id=${reservation.id}::uuid and notes like '{%' and (notes::jsonb->'online') is not null`;
       await tx`update reservations set version=version+1,updated_at=now() where id=${reservation.id}::uuid`;
       const [totals] = await tx<Array<{ roomRentCents: number; taxCents: number; totalCents: number; paidCents: number }>>`
         select

@@ -37,9 +37,15 @@ export type EmailBooking = {
   roomTypeName?: string;
   /** One price per night for one room, before tax. */
   nightlyRatesCents: number[];
+  /** Room rent for the whole stay (all rooms) before tax, as the email states it. */
+  subtotalCents?: number;
   taxCents?: number;
   totalCents?: number;
   commissionCents?: number;
+  /** What the OTA pays the motel after commission. */
+  netCents?: number;
+  /** Already paid online. */
+  paidCents?: number;
 };
 
 /** Card numbers, expiry and security codes never get past this point. */
@@ -77,7 +83,8 @@ const namedDate = (value?: string) => {
 };
 
 const cents = (value?: string) => value === undefined ? undefined : Math.round(Number(value.replace(/,/g, "")) * 100);
-const AMOUNT = String.raw`([\d,]+\.\d{1,2})\s*(?:USD|\$)?`;
+/** The first amount after a label (same line or the next): "69.30 USD", "USD 69.30" or "$69.30". */
+const amountAfter = (text: string, label: string) => cents(new RegExp(`${label}[^\\n\\d]*?\\n?[^\\n\\d]*?(?:USD|\\$)?\\s*([\\d,]+\\.\\d{1,2})`, "i").exec(text)?.[1]);
 /** The value after a label, on the same line or the next. */
 const after = (text: string, label: string, value = String.raw`([^\n]+)`) =>
   new RegExp(`${label}\\s*:?[ \\t]*\\n?[ \\t]*${value}`, "i").exec(text)?.[1]?.trim();
@@ -111,6 +118,10 @@ export function channelName(value: string) {
 
 const kindOf = (text: string): EmailBookingKind => /cancel/i.test(text) ? "cancelled" : /modif|amend|chang|updat/i.test(text) ? "modified" : "new";
 
+/** Lines that are labels or headings in a SellVEL email, never a room type. */
+const SELLVEL_LABEL = /:|^(date|price per night|booking summary|guest details|payment method|cancellation policy|additional note|subtotal|tax|total|new reservation|mobile secured|confirmation)\b/i;
+const ROOM_WORDS = /\b(king|queen|double|twin|single|suite|bed|beds|studio|deluxe|standard|kitchenette|efficiency)\b/i;
+
 function readSellvel(text: string, subject: string): EmailBooking | null {
   if (!/sellvel|cyberwebhotels/i.test(`${subject}\n${text}`)) return null;
   const confirmation = after(text, String.raw`Confirmation\s*#`, String.raw`([A-Z0-9-]+)`);
@@ -119,16 +130,21 @@ function readSellvel(text: string, subject: string): EmailBooking | null {
   const checkIn = usDate(after(text, String.raw`Check-?\s?in\s+Date`));
   const checkout = usDate(after(text, String.raw`Check-?\s?out\s+Date`));
   const rooms = Number(after(text, String.raw`No\.?\s*of\s*Rooms`, String.raw`(\d+)`)) || 1;
-  // The room type is the line above the nightly price table ("Date").
-  const roomTypeName = /\n[ \t]*([^\n]*[A-Za-z][^\n]*?)[ \t]*\n[ \t]*Date\b/.exec(text)?.[1]?.replace(/[^\x20-\x7E]/g, "").trim();
+  const lines = text.split("\n").map((line) => line.replace(/[^\x20-\x7E]/g, " ").replace(/\s+/g, " ").trim()).filter(Boolean);
+  // The room type is the line above the nightly price table ("Date"), or
+  // else a room-like line ("… King Bed") that is not a label.
+  const tableAt = lines.findIndex((line) => /^date\b/i.test(line) && !line.includes(":"));
+  const aboveTable = tableAt > 0 && !SELLVEL_LABEL.test(lines[tableAt - 1]) ? lines[tableAt - 1] : undefined;
+  const roomLike = lines.find((line) => ROOM_WORDS.test(line) && !SELLVEL_LABEL.test(line) && line.length <= 60 && !/\d+\.\d{2}/.test(line));
+  const roomTypeName = aboveTable ?? roomLike;
   const nights = checkIn && checkout ? nightsBetween(checkIn, checkout) : 0;
   // Nightly prices: amounts between "Price Per Night" and "Subtotal".
   const table = /Price\s+Per\s+Night([\s\S]*?)Subtotal/i.exec(text)?.[1] ?? "";
-  const listed = [...table.matchAll(/([\d,]+\.\d{2})\s*USD/gi)].map((match) => cents(match[1])!);
-  const subtotal = cents(/Subtotal[^\n]*?Room\/?s?[\s:]*([\d,]+\.\d{2})/i.exec(text)?.[1]);
+  const listed = [...table.matchAll(/([\d,]+\.\d{2})/g)].map((match) => cents(match[1])!);
+  const subtotal = amountAfter(text, String.raw`Subtotal[^\n]*?Room\/?s?`) ?? amountAfter(text, "Subtotal");
   const nightlyRatesCents = nights > 0 && listed.length === nights ? listed
     : nights > 0 && subtotal !== undefined ? spread(Math.round(subtotal / rooms), nights) : [];
-  const name = splitName(after(text, String.raw`(?:^|\n)[ \t]*Name(?!\s+on)`) ?? "");
+  const name = splitName(after(text, String.raw`(?:^|\n)[ \t]*(?:Guest\s+)?Name(?!\s+on)`) ?? "");
   return {
     provider: "SellVEL",
     kind: kindOf(`${subject}\n${heading}`),
@@ -145,8 +161,9 @@ function readSellvel(text: string, subject: string): EmailBooking | null {
     rooms,
     roomTypeName: roomTypeName || undefined,
     nightlyRatesCents,
-    taxCents: cents(/\bTax\b[^\n]*?\n?[^\n]*?([\d,]+\.\d{2})\s*USD/i.exec(text)?.[1]),
-    totalCents: cents(/(?<!Sub)\bTotal\b[\s:]*([\d,]+\.\d{2})\s*USD/i.exec(text)?.[1]),
+    subtotalCents: subtotal,
+    taxCents: amountAfter(text, String.raw`(?:^|\n)[ \t]*Tax\b(?:\s*\([^)\n]*\))?`),
+    totalCents: amountAfter(text, String.raw`(?:^|\n)[ \t]*Total\b`),
   };
 }
 
@@ -165,7 +182,7 @@ function readStayflexi(text: string, subject: string): EmailBooking | null {
   const roomLines = [...text.matchAll(/(?:^|\n)[ \t]*Room\s*:\s*([^,\n]+)/gi)].map((match) => match[1].trim());
   const plan = /Rate\s+plan\s*:[^\n]*?(\d+)\s*Adult\(?s?\)?,?\s*(\d+)\s*Child/i.exec(text);
   const nights = checkIn && checkout ? nightsBetween(checkIn, checkout) : 0;
-  const subtotal = cents(after(text, String.raw`Subtotal\s*\(ex\.?\s*tax\)`, AMOUNT)) ?? cents(after(text, String.raw`Booking\s+Price`, AMOUNT));
+  const subtotal = amountAfter(text, String.raw`Subtotal\s*\(ex\.?\s*tax\)`) ?? amountAfter(text, String.raw`Booking\s+Price`);
   const rooms = Math.max(1, roomLines.length);
   const channel = channelName(channelText || "OTA");
   const channelConfirmation = new RegExp(`${channelText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+Confirmation\\s+code\\s*:?\\s*\\n?\\s*([A-Z0-9-]+)`, "i").exec(text)?.[1];
@@ -183,15 +200,19 @@ function readStayflexi(text: string, subject: string): EmailBooking | null {
     rooms,
     roomTypeName: roomLines[0],
     nightlyRatesCents: nights > 0 && subtotal !== undefined ? spread(Math.round(subtotal / rooms), nights) : [],
-    taxCents: cents(after(text, String.raw`Hotel\s+Taxes`, AMOUNT)),
-    totalCents: cents(after(text, String.raw`Total\s+charges`, AMOUNT)),
-    commissionCents: cents(after(text, String.raw`OTA\s+commission`, AMOUNT)),
+    subtotalCents: subtotal,
+    taxCents: amountAfter(text, String.raw`Hotel\s+Taxes`),
+    totalCents: amountAfter(text, String.raw`Total\s+charges`),
+    commissionCents: amountAfter(text, String.raw`OTA\s+commission`),
+    netCents: amountAfter(text, String.raw`Net\s+amount`),
+    paidCents: amountAfter(text, String.raw`Total\s+payments`),
   };
 }
 
 /** The booking in an email, or null when no reader knows its format. */
 export function parseBookingEmail(input: { subject: string; text: string }): EmailBooking | null {
-  const text = removeCardDetails(input.text.replace(/\r/g, "").replace(/ /g, " ").replace(/[ \t]+/g, " "));
+  // Gmail's plain text adds blank lines between table rows and *stars* around bold text.
+  const text = removeCardDetails(input.text.replace(/\r/g, "").replace(/\*/g, "").replace(/\n[ \t]*(?=\n)/g, "").replace(/ /g, " ").replace(/[ \t]+/g, " "));
   const subject = input.subject.replace(/\s+/g, " ").trim();
   return readSellvel(text, subject) ?? readStayflexi(text, subject);
 }

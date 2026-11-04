@@ -97,7 +97,7 @@ describe("booking emails", () => {
       firstName: "Alex", lastName: "Sample", email: "alex.sample@example.com", phone: "2505550100",
       address: "12 Test Rd, Victoria, British Columbia CA V8Z 1A1",
       checkIn: "2026-11-03", checkout: "2026-11-05", adults: 2, children: 1, rooms: 1,
-      roomTypeName: "Standard One King Bed", nightlyRatesCents: [6930, 7500], taxCents: 1443, totalCents: 15873,
+      roomTypeName: "Standard One King Bed", nightlyRatesCents: [6930, 7500], subtotalCents: 14430, taxCents: 1443, totalCents: 15873,
     });
   });
 
@@ -109,11 +109,24 @@ describe("booking emails", () => {
     expect(booking?.taxCents).toBe(1443);
   });
 
+  test("Gmail's plain text: blank lines, *bold*, USD first, no Date heading", () => {
+    const messy = sellvel
+      .replace(/\n/g, "\n\n")
+      .replace("Standard One King Bed Â", "*Standard One King Bed*")
+      .replace("\n\nDate\n", "\n")
+      .replace(/([\d.]+) USD/g, "USD $1");
+    const booking = parseBookingEmail({ subject: "Mobile Secured Reservation Form", text: messy });
+    expect(booking?.roomTypeName).toBe("Standard One King Bed");
+    expect(booking?.nightlyRatesCents).toEqual([6930, 7500]);
+    expect([booking?.subtotalCents, booking?.taxCents, booking?.totalCents]).toEqual([14430, 1443, 15873]);
+    expect(booking?.firstName).toBe("Alex");
+  });
+
   test("a Booking.com booking through Stayflexi", () => {
     expect(parseBookingEmail(stayflexi)).toEqual({
       provider: "Stayflexi", kind: "new", channel: "Booking.com", confirmation: "SFBOOKING_35939_4733295424", channelConfirmation: "5766000000",
       firstName: "Jordan", lastName: "Example", checkIn: "2026-10-24", checkout: "2026-10-25", adults: 1, children: 0, rooms: 1,
-      roomTypeName: "Standard 1 King", nightlyRatesCents: [7499], taxCents: 750, totalCents: 8249, commissionCents: 1125,
+      roomTypeName: "Standard 1 King", nightlyRatesCents: [7499], subtotalCents: 7499, taxCents: 750, totalCents: 8249, commissionCents: 1125, netCents: 7124, paidCents: 0,
     });
   });
 

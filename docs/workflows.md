@@ -44,7 +44,9 @@ A motel is one `properties` row. Everything else is scoped to it by `property_id
 
 1. Settings › Online Bookings: turn on, copy the script, paste it into script.google.com while signed in to the motel's Gmail, run **setup** and allow it.
 2. New booking emails become reservations in Arrivals within about 5 minutes; staff get a notification. Assign a room before arrival and scan the guest's ID at check-in.
-3. Check **Booking emails to review** at the top of Arrivals: apply cancellations and changes, resolve possible overbookings, enter unknown bookings by hand (match an unknown room name once in Settings › Online Bookings), then click Done.
+3. An arrival marked **Confirm room type** was booked online as a room category the PMS does not have: keep the room type or change it (the PMS asks before a room is assigned or the guest checks in). Matching the name once in Settings › Online Bookings stops the question for later bookings.
+4. Check **Booking emails to review** at the top of Arrivals: apply cancellations and changes, free a room for a possible overbooking then click **Add to Arrivals**, then Done or Dismiss.
+5. A source or payment entered wrongly is changed on the reservation's Stay tab (Source & Payment); the OTA commission follows.
 
 ## 3. Payroll workflow
 
