@@ -111,7 +111,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         if (occupied) throw new MoveError(`Room ${destination.number} is already booked for these dates.`);
         const [blocked] = await tx<Array<{ id: string }>>`
           select id from maintenance_orders
-          where room_id=${destination.id}::uuid and rentable=false and status not in ('resolved','cancelled')
+          where room_id=${destination.id}::uuid and rentable=false and status not in ('completed','resolved','cancelled')
             and case when notes like '{%' then (notes::jsonb->>'blockFrom')::date end < ${reservation.departureDate}::date
             and case when notes like '{%' then (notes::jsonb->>'blockTo')::date end >= ${reservation.arrivalDate}::date
           limit 1

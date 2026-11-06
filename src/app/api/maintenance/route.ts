@@ -92,7 +92,7 @@ async function releaseRoomIfUnblocked(tx: Tx, propertyId: string, roomNumber: st
   await tx`
     update rooms set service_status='rentable', cleanliness_status=case when ${markDirty} then 'dirty' else cleanliness_status end, updated_at=now()
     where property_id=${propertyId}::uuid and number=${roomNumber}
-      and not exists (select 1 from maintenance_orders mo where mo.room_id=rooms.id and mo.id<>${exceptOrderId}::uuid and mo.rentable=false and mo.status not in ('resolved','cancelled'))
+      and not exists (select 1 from maintenance_orders mo where mo.room_id=rooms.id and mo.id<>${exceptOrderId}::uuid and mo.rentable=false and mo.status not in ('completed','resolved','cancelled'))
   `;
 }
 

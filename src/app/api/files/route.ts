@@ -7,6 +7,17 @@ import { deletePrivateFiles, signedPrivateFileUrl, uploadPrivateFile } from "@/s
 
 const allowedTypes = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
 
+/** The file's first bytes must match its declared type (the browser's type is only a claim). */
+async function contentMatchesType(file: File) {
+  const head = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  const starts = (...bytes: number[]) => bytes.every((byte, index) => head[index] === byte);
+  if (file.type === "image/jpeg") return starts(0xff, 0xd8, 0xff);
+  if (file.type === "image/png") return starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+  if (file.type === "image/webp") return starts(0x52, 0x49, 0x46, 0x46) && head[8] === 0x57 && head[9] === 0x45 && head[10] === 0x42 && head[11] === 0x50;
+  if (file.type === "application/pdf") return starts(0x25, 0x50, 0x44, 0x46);
+  return false;
+}
+
 export async function POST(request: Request) {
   try {
     const form = await request.formData();
@@ -16,6 +27,7 @@ export async function POST(request: Request) {
     if (!(file instanceof File) || !resourceId || !["guest-id", "expense-receipt", "maintenance"].includes(resourceType)) return Response.json({ error: "File and resource details are required." }, { status: 400 });
     const session = await requirePropertySession(request, resourceType === "guest-id" ? "guests.manage" : resourceType === "expense-receipt" ? "expenses.manage" : "maintenance.manage");
     if (!allowedTypes.has(file.type) || file.size > 4_000_000) return Response.json({ error: "Use a JPG, PNG, WebP, or PDF file up to 4 MB." }, { status: 400 });
+    if (!await contentMatchesType(file)) return Response.json({ error: "The file's contents do not match its type. Use a real JPG, PNG, WebP, or PDF file." }, { status: 400 });
     const id = `attachment-${crypto.randomUUID()}`;
     const storageKey = `${session.propertyId}/${resourceType}/${crypto.randomUUID()}`;
     await uploadPrivateFile(storageKey, file);
@@ -75,7 +87,7 @@ export async function GET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reports.view");
     const id = new URL(request.url).searchParams.get("id");
-    if (!id) return Response.json({ error: "Attachment ID is required." }, { status: 400 });
+    if (!id || (hasProductionDatabase() && !/^[0-9a-f-]{36}$/i.test(id))) return Response.json({ error: "Attachment ID is required." }, { status: 400 });
     if (hasProductionDatabase()) {
       const [attachment] = await productionSql()<Array<{ storageKey: string; mimeType: string }>>`
         select storage_key as "storageKey",mime_type as "mimeType" from attachments

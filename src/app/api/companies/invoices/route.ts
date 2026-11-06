@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { recordChange } from "@/server/realtime/change-events";
+import { postPaymentLedger } from "@/server/finance/payment-ledger";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 
 const companyQuerySchema = z.object({ companyId: z.string().uuid() });
@@ -162,6 +163,7 @@ export async function POST(request: Request) {
         values (${session.propertyId}::uuid,${input.companyId}::uuid,${input.method},${input.amountCents},'USD',${await propertyBusinessDate(tx, session.propertyId)}::date,${input.reference ?? null})
         returning id,effective_date::text as "effectiveDate"
       `;
+      await postPaymentLedger(tx, session.propertyId, created.id);
       for (const allocation of input.allocations) {
         await tx`insert into invoice_payment_allocations (property_id,payment_id,invoice_id,amount_cents) values (${session.propertyId}::uuid,${created.id}::uuid,${allocation.invoiceId}::uuid,${allocation.amountCents})`;
         const invoice = invoices.find((item) => item.id === allocation.invoiceId)!;

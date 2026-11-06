@@ -1,5 +1,6 @@
 import type { TransactionSql } from "postgres";
 
+import { bankAccountFor, creditAccountFor, isBankMethod, type BankAccount } from "@/server/finance/cash-sources";
 import { postProductionLedger } from "@/server/finance/production-finance";
 
 type Tx = TransactionSql<Record<string, never>>;
@@ -26,6 +27,7 @@ type DueRecurringExpense = {
   paymentMethod: string;
   amountCents: number;
   recurrence: Recurrence;
+  bankAccountId: string | null;
   nextDueDate: string;
   businessDate: string;
 };
@@ -39,7 +41,7 @@ export async function postDueRecurringExpenses(tx: Tx) {
   const schedules = await tx<DueRecurringExpense[]>`
     select re.id,re.property_id as "propertyId",re.vendor_id as "vendorId",re.category,
       re.description,re.payment_method as "paymentMethod",re.amount_cents as "amountCents",
-      re.frequency as recurrence,re.next_run_on::text as "nextDueDate",
+      re.frequency as recurrence,re.next_run_on::text as "nextDueDate",re.bank_account_id as "bankAccountId",
       (now() at time zone p.timezone)::date::text as "businessDate"
     from recurring_expenses re join properties p on p.id=re.property_id
     where re.active=true and re.next_run_on <= (now() at time zone p.timezone)::date
@@ -51,10 +53,21 @@ export async function postDueRecurringExpenses(tx: Tx) {
     let generated = 0;
     while (dueDate <= schedule.businessDate) {
       if (generated >= 366) throw new Error(`Recurring expense ${schedule.id} has too many overdue occurrences.`);
+      // A recurring cash bill is paid from the safe: nobody is at the drawer
+      // when the schedule posts it, and the drawer must still balance.
+      const cash = schedule.paymentMethod.trim().toLowerCase() === "cash";
+      // A bank bill comes out of the account chosen for it (or the default account).
+      const bank: BankAccount | null = isBankMethod(schedule.paymentMethod)
+        ? await bankAccountFor(tx, schedule.propertyId, schedule.bankAccountId).catch(() => bankAccountFor(tx, schedule.propertyId)).catch(() => null)
+        : null;
       const [expense] = await tx<Array<{ id: string }>>`
-        insert into expenses (property_id,vendor_id,expense_date,category,description,payment_method,amount_cents)
-        values (${schedule.propertyId}::uuid,${schedule.vendorId}::uuid,${dueDate}::date,${schedule.category},${schedule.description},${schedule.paymentMethod},${schedule.amountCents})
+        insert into expenses (property_id,vendor_id,expense_date,category,description,payment_method,amount_cents,cash_source,bank_account_id)
+        values (${schedule.propertyId}::uuid,${schedule.vendorId}::uuid,${dueDate}::date,${schedule.category},${schedule.description},${schedule.paymentMethod},${schedule.amountCents},${cash ? "safe" : null},${bank?.id ?? null}::uuid)
         returning id
+      `;
+      if ((cash || bank) && schedule.amountCents > 0) await tx`
+        insert into cash_movements (property_id,business_date,from_location,to_location,amount_cents,kind,resource_type,resource_id,description,bank_account_id)
+        values (${schedule.propertyId}::uuid,${dueDate}::date,${cash ? "safe" : "bank"},null,${schedule.amountCents},'expense','expense',${expense.id}::uuid,${`Recurring expense: ${schedule.description}`},${bank?.id ?? null}::uuid)
       `;
       await postProductionLedger(tx, {
         propertyId: schedule.propertyId,
@@ -63,7 +76,7 @@ export async function postDueRecurringExpenses(tx: Tx) {
         resourceId: expense.id,
         description: `Recurring expense: ${schedule.description}`,
         debitAccount: `Expense:${schedule.category}`,
-        creditAccount: ["Cash", "Check", "Debit Card"].includes(schedule.paymentMethod) ? "Cash" : "Accounts Payable",
+        creditAccount: creditAccountFor(schedule.paymentMethod, cash ? "safe" : null, bank),
         amountCents: schedule.amountCents,
       });
       dueDate = nextRecurringExpenseDate(dueDate, schedule.recurrence);

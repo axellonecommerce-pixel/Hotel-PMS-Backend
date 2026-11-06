@@ -3,7 +3,9 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
-import { propertyBusinessDate } from "@/server/finance/production-finance";
+import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+import { BankAccountError, bankAccountFor, CASH_ACCOUNTS, CASH_SOURCES, creditAccountFor, isBankMethod, payOut, reverseCashOut, type CashSource } from "@/server/finance/cash-sources";
+import { ShiftRequiredError } from "@/server/finance/shift-guard";
 import { grossPayCents, payForPeriod, splitWorkedMinutes, type PayChange, type WorkDay } from "@/server/payroll/pay-calculation";
 
 const PAYROLL_PAYMENT_METHODS = ["Cash", "Check", "Direct deposit", "Other"] as const;
@@ -30,6 +32,13 @@ const updateSchema = z.union([
     adjustmentCents: z.number().int().min(-10_000_000).max(10_000_000).optional(),
     paymentMethod: z.enum(PAYROLL_PAYMENT_METHODS).optional(),
     paidOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    // Required when paid in cash: the Cash Drop drawer or the safe.
+    cashSource: z.enum(CASH_SOURCES).optional(),
+    // Paid by check or direct deposit: the bank account it came out of.
+    bankAccountId: z.string().uuid().optional(),
+    // What was actually handed over (take-home: gross less withheld tax and
+    // advances taken back). Defaults to the gross pay.
+    paidAmountCents: z.number().int().min(0).max(10_000_000).optional(),
   }).strict(),
   // Pay setup: hourly (rate × clocked hours) or a fixed salary per pay period.
   z.object({
@@ -338,7 +347,7 @@ export async function GET(request: Request) {
           and exists (select 1 from payroll_entries pe where pe.pay_period_id=pp.id and pe.paid=false)
       `;
       await recountPeriods(tx, session.propertyId, state, employees, [...periodRows, ...openPeriods], { payChanges, startDates, frequencyOf, shownPeriodOf, weekStartOf });
-      type EntryRow = { id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; periodId: string; startsOn: string; endsOn: string; payDate: string; periodStatus: string; roomsCleaned: number };
+      type EntryRow = { id: string; employeeId: string; regularMinutes: number; overtimeMinutes: number; hourlyRateCents: number | null; grossPayCents: number; calculationType: string; description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; cashSource: string | null; bankAccountId: string | null; periodId: string; startsOn: string; endsOn: string; payDate: string; periodStatus: string; roomsCleaned: number };
       // The pay schedule: every pay period of the last ~13 months, with what
       // is paid and what is still to pay. A custom date range only stays once
       // it is approved or paid; empty pay shows only for employees with a
@@ -346,7 +355,7 @@ export async function GET(request: Request) {
       const startedIds = employees.filter((employee) => startDates.has(nameKey(employee.name))).map((employee) => employee.id);
       const scheduleRows = await tx<EntryRow[]>`
         select pe.id,pe.employee_id as "employeeId",pe.regular_minutes as "regularMinutes",pe.overtime_minutes as "overtimeMinutes",pe.rate_cents as "hourlyRateCents",
-          pe.gross_pay_cents as "grossPayCents",pe.calculation_type as "calculationType",pe.description,pe.paid,pe.paid_on::text as "paidOn",pe.payment_method as "paymentMethod",
+          pe.gross_pay_cents as "grossPayCents",pe.calculation_type as "calculationType",pe.description,pe.paid,pe.paid_on::text as "paidOn",pe.payment_method as "paymentMethod",pe.cash_source as "cashSource",pe.bank_account_id as "bankAccountId",
           pe.pay_period_id as "periodId",pp.starts_on::text as "startsOn",pp.ends_on::text as "endsOn",pp.scheduled_pay_date::text as "payDate",pp.status as "periodStatus",
           (select count(*) from housekeeping_records h where h.property_id=pe.property_id and h.housekeeper_employee_id=pe.employee_id
             and h.assignment_status='completed' and h.service_date between pp.starts_on and pp.ends_on)::int as "roomsCleaned"
@@ -371,7 +380,7 @@ export async function GET(request: Request) {
           id: entry.id, payrollPeriodId: entry.periodId, employeeId: entry.employeeId, regularMinutes: entry.regularMinutes,
           overtimeMinutes: entry.overtimeMinutes ?? 0, doubleTimeMinutes: meta.doubleTimeMinutes ?? 0, payType: entry.calculationType === "salary" ? "salary" : "hourly",
           hourlyRateCents: entry.hourlyRateCents ?? 0, grossPayCents: entry.grossPayCents ?? 0, adjustmentCents: meta.adjustmentCents ?? 0,
-          paymentStatus: entry.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending", paidOn: entry.paidOn, paymentMethod: entry.paymentMethod,
+          paymentStatus: entry.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending", paidOn: entry.paidOn, paymentMethod: entry.paymentMethod, cashSource: entry.cashSource ?? undefined, bankAccountId: entry.bankAccountId ?? undefined,
           hoursEntered: Boolean(meta.manualHours), roomsCleaned: Number(entry.roomsCleaned),
           periodLabel: `${entry.startsOn} to ${entry.endsOn}`, periodStart: entry.startsOn, periodEnd: entry.endsOn, payDate: entry.payDate,
           customRange: entry.periodStatus === "custom",
@@ -482,9 +491,10 @@ export async function PATCH(request: Request) {
       return Response.json({ updated: true });
     }
     const updated = await productionSql().begin(async (tx) => {
-      const [current] = await tx<Array<{ description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; custom: boolean }>>`
-        select pe.description,pe.paid,pe.paid_on::text as "paidOn",pe.payment_method as "paymentMethod",pp.status='custom' as custom
-        from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id
+      const [current] = await tx<Array<{ description: string | null; paid: boolean; paidOn: string | null; paymentMethod: string | null; custom: boolean; grossPayCents: number; cashSource: CashSource | null; bankAccountId: string | null; employee: string }>>`
+        select pe.description,pe.paid,pe.paid_on::text as "paidOn",pe.payment_method as "paymentMethod",pp.status='custom' as custom,
+          pe.gross_pay_cents as "grossPayCents",pe.cash_source as "cashSource",pe.bank_account_id as "bankAccountId",coalesce(e.name,'Employee') as employee
+        from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id left join employees e on e.id=pe.employee_id
         where pe.id=${input.id}::uuid and pe.property_id=${session.propertyId}::uuid for update of pe
       `;
       if (!current) return "missing" as const;
@@ -498,15 +508,70 @@ export async function PATCH(request: Request) {
       const paymentMethod = paid ? input.paymentMethod ?? current.paymentMethod ?? "Cash" : null;
       const paidOn = paid ? input.paidOn ?? current.paidOn ?? await propertyBusinessDate(tx, session.propertyId) : null;
       const description = { ...meta, adjustmentCents: input.adjustmentCents ?? meta.adjustmentCents ?? 0, status };
+      const cashSource: CashSource | null = paid && paymentMethod === "Cash" ? input.cashSource ?? current.cashSource ?? null : null;
+      if (paid && paymentMethod === "Cash" && !cashSource) return "source" as const;
+      // Check and direct deposit pay comes out of a bank account (the default when not chosen).
+      const bankAccount = paid && isBankMethod(paymentMethod) ? await bankAccountFor(tx, session.propertyId, input.bankAccountId ?? current.bankAccountId) : null;
+      const amountCents = current.grossPayCents + (description.adjustmentCents ?? 0);
+      const oldAmountCents = current.grossPayCents + (meta.adjustmentCents ?? 0);
+      // Money only moves when what was paid changes: paid or not, how, from where, or how much.
+      // A wage paid in cash before cash sources existed has no source; naming
+      // one now only labels it and must not take the cash out a second time.
+      const sourceChanged = (current.cashSource !== null && current.cashSource !== cashSource)
+        || (current.bankAccountId !== null && current.bankAccountId !== (bankAccount?.id ?? null));
+      const moneyChanged = current.paid !== paid || (paid && (current.paymentMethod !== paymentMethod || sourceChanged || oldAmountCents !== amountCents));
+      if (moneyChanged && current.paid) {
+        const today = await propertyBusinessDate(tx, session.propertyId);
+        const returned = await reverseCashOut(tx, { propertyId: session.propertyId, authUserId: session.authUserId, resourceType: "payroll", resourceId: input.id, description: `Wages for ${current.employee} un-paid · cash returned` });
+        // Reverse whatever the ledger holds for this wage, account by account.
+        const lines = await tx<Array<{ account: string; netCents: number }>>`
+          select account, sum(debit_cents-credit_cents)::int as "netCents" from ledger_entries
+          where property_id=${session.propertyId}::uuid and resource_type='payroll' and resource_id=${input.id}::uuid
+          group by account having sum(debit_cents-credit_cents) <> 0
+        `;
+        for (const line of lines) await tx`
+          insert into ledger_entries (property_id,business_date,account,debit_cents,credit_cents,resource_type,resource_id,description)
+          values (${session.propertyId}::uuid,${today}::date,${line.account},${line.netCents < 0 ? -line.netCents : 0},${line.netCents > 0 ? line.netCents : 0},'payroll',${input.id}::uuid,${`Wages for ${current.employee} reversed`})
+        `;
+        // Cash from a closed drawer shift went back into the safe, not the drawer.
+        if (returned?.location === "safe" && current.cashSource === "drawer") await postProductionLedger(tx, {
+          propertyId: session.propertyId, businessDate: today, resourceType: "payroll", resourceId: input.id,
+          description: `Returned wage cash put in the safe`, debitAccount: CASH_ACCOUNTS.safe, creditAccount: CASH_ACCOUNTS.drawer, amountCents: returned.amountCents,
+        });
+      }
       await tx`
-        update payroll_entries set paid=${paid},paid_on=${paidOn}::date,payment_method=${paymentMethod},description=${tx.json(description)}::text,updated_at=now()
+        update payroll_entries set paid=${paid},paid_on=${paidOn}::date,payment_method=${paymentMethod},cash_source=${cashSource},bank_account_id=${bankAccount?.id ?? null}::uuid,description=${tx.json(description)}::text,updated_at=now()
         where id=${input.id}::uuid and property_id=${session.propertyId}::uuid
       `;
+      if (moneyChanged && paid && amountCents > 0) {
+        const handedCents = Math.min(amountCents, input.paidAmountCents ?? amountCents);
+        const source = cashSource ?? (bankAccount ? "bank" as const : null);
+        if (source) await payOut(tx, {
+          propertyId: session.propertyId, authUserId: session.authUserId, source, bankAccount, amountCents: handedCents,
+          kind: "payroll", resourceType: "payroll", resourceId: input.id, paidTo: current.employee, reason: "Payroll",
+          description: `Wages paid to ${current.employee}`,
+        });
+        await postProductionLedger(tx, {
+          propertyId: session.propertyId, businessDate: paidOn!, resourceType: "payroll", resourceId: input.id,
+          description: `Wages paid to ${current.employee} (${paymentMethod}${cashSource ? ` · ${cashSource === "drawer" ? "Cash Drop" : "Safe"}` : bankAccount ? ` · ${bankAccount.name}` : ""})`,
+          debitAccount: "Payroll Expense", creditAccount: creditAccountFor(paymentMethod ?? "Cash", cashSource, bankAccount), amountCents: handedCents,
+        });
+        // Tax withheld and advances taken back are part of the wage but were not handed over now.
+        if (amountCents > handedCents) await postProductionLedger(tx, {
+          propertyId: session.propertyId, businessDate: paidOn!, resourceType: "payroll", resourceId: input.id,
+          description: `Wages for ${current.employee}: withheld tax and advances repaid`,
+          debitAccount: "Payroll Expense", creditAccount: "Payroll Withholding & Advances", amountCents: amountCents - handedCents,
+        });
+      }
       return "updated" as const;
     });
     if (updated === "missing") return Response.json({ error: "Payroll entry not found." }, { status: 404 });
     if (updated === "paid") return Response.json({ error: "This pay is already marked paid. Mark it Pending to change the adjustment." }, { status: 409 });
+    if (updated === "source") return Response.json({ error: "Choose where the cash came from: Cash Drop (front desk drawer) or Cash in Safe." }, { status: 400 });
     if (updated === "custom") return Response.json({ error: "A custom date range is only for checking hours. Pay each pay period from the Pay Schedule instead." }, { status: 409 });
     return Response.json({ updated: true });
-  } catch (error) { return propertyAccessResponse(error); }
+  } catch (error) {
+    if (error instanceof ShiftRequiredError || error instanceof BankAccountError) return Response.json({ error: error.message }, { status: 409 });
+    return propertyAccessResponse(error);
+  }
 }

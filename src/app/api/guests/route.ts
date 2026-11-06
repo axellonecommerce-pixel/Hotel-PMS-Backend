@@ -133,11 +133,17 @@ async function listGuests(propertyId: string) {
   const remarks = await sql<Array<{ guestId: string; id: string; text: string; createdAt: string }>>`
     select guest_id as "guestId",id,remark as text,created_at::text as "createdAt" from guest_remarks where property_id=${propertyId}::uuid order by created_at
   `;
-  const stays = await sql<Array<{ guestId: string; id: string; room: string | null; checkInDate: string; checkoutDate: string; rateCents: number; totalCents: number }>>`
+  // Stay totals are what the guest was billed: every posted charge plus its
+  // taxes (room tax, occupancy tax, …). Rate is the average nightly room rate.
+  const stays = await sql<Array<{ guestId: string; id: string; room: string | null; checkInDate: string; checkoutDate: string; rateCents: number; taxCents: number; totalCents: number; paymentType: string | null }>>`
     select r.main_guest_id as "guestId",r.id,coalesce((select room.number from reservation_rooms rr left join rooms room on room.id=rr.room_id where rr.reservation_id=r.id order by rr.created_at limit 1),'Unassigned') as room,
       r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
-      coalesce((select sum(nr.final_rate_cents) from nightly_rates nr join reservation_rooms rr on rr.id=nr.reservation_room_id where rr.reservation_id=r.id),0)::int as "rateCents",
-      coalesce((select sum(c.amount_cents) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)::int as "totalCents"
+      coalesce((select round(avg(nr.final_rate_cents)) from nightly_rates nr join reservation_rooms rr on rr.id=nr.reservation_room_id where rr.reservation_id=r.id),0)::int as "rateCents",
+      coalesce((select sum(ct.amount_cents) from charge_taxes ct join charges c on c.id=ct.charge_id join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)::int as "taxCents",
+      (coalesce((select sum(c.amount_cents) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)
+        + coalesce((select sum(ct.amount_cents) from charge_taxes ct join charges c on c.id=ct.charge_id join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0))::int as "totalCents",
+      (select string_agg(distinct p.method, ', ') from payments p join payment_allocations pa on pa.payment_id=p.id join folios f on f.id=pa.folio_id
+        where f.reservation_id=r.id and upper(p.method)<>'OTA COMMISSION') as "paymentType"
     from reservations r where r.property_id=${propertyId}::uuid and r.status='checked_out' order by r.departure_date desc
   `;
   const identityByGuest = new Map(identities.map((identity) => [identity.guestId, identity]));
@@ -160,7 +166,7 @@ async function listGuests(propertyId: string) {
       savedPaymentSources: (sourcesByGuest.get(guest.id) ?? []).map((source) => { const label = source.label ?? source.method; const tokenReference = source.externalReference ?? ""; const number = source.last4 ?? ""; const details = prefs.paymentSourceDetails?.[paymentSourceKey({ label, tokenReference, number })] ?? { note: prefs.paymentSourceNotes?.[`${label.trim().toLowerCase()}|${tokenReference.trim()}`] }; return { id: source.id, label, tokenReference, number: number || undefined, note: details.note, date: details.date }; }),
       remarkEntries: (remarksByGuest.get(guest.id) ?? []).map((remark) => ({ id: remark.id, text: remark.text, createdAt: remark.createdAt })),
       totalStays: guestStays.length, lastStayDate: guestStays[0]?.checkoutDate,
-      stayHistory: guestStays.map((stay) => ({ ...stay, room: stay.room ?? "Unassigned", paymentType: "Credit" })),
+      stayHistory: guestStays.map((stay) => ({ ...stay, room: stay.room ?? "Unassigned", paymentType: stay.paymentType ?? "—" })),
     };
   });
 }

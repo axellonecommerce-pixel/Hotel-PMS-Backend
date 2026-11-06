@@ -1,6 +1,41 @@
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
-import { nightAuditDue, runNightAudit } from "@/server/night-audit/run-night-audit";
+import { nightAuditDue, nightAuditDueAt, runNightAudit } from "@/server/night-audit/run-night-audit";
+
+/**
+ * What every open screen needs to show the scheduled audit on time: the open
+ * business day, the exact instant the audit is due, and the latest run (so a
+ * run the database scheduler did is shown as soon as it finishes). Any role
+ * can read it; only the schedule and run summary are returned.
+ */
+export async function GET(request: Request) {
+  try {
+    const session = await requirePropertySession(request, "reports.view");
+    const [state] = await productionSql()<Array<{ businessDate: string; timezone: string; schedule: { enabled?: boolean; time?: string } | null }>>`
+      select b.business_date::text as "businessDate",p.timezone,ps.value as schedule
+      from properties p
+      join business_days b on b.property_id=p.id and b.status='open'
+      left join property_settings ps on ps.property_id=p.id and ps.key='night_audit_schedule'
+      where p.id=${session.propertyId}::uuid
+      order by b.business_date limit 1
+    `;
+    const [lastRun] = await productionSql()<Array<{ status: string; trigger: string; businessDate: string; completedAt: string | null; steps: unknown; blockers: unknown }>>`
+      select n.status,n.trigger,b.business_date::text as "businessDate",n.completed_at as "completedAt",n.summary as steps,n.blocking_issues as blockers
+      from night_audit_runs n join business_days b on b.id=n.business_day_id
+      where n.property_id=${session.propertyId}::uuid order by n.started_at desc limit 1
+    `;
+    const enabled = Boolean(state?.schedule?.enabled && state.schedule.time);
+    return Response.json({
+      businessDate: state?.businessDate ?? null,
+      enabled,
+      time: state?.schedule?.time ?? null,
+      dueAt: enabled && state ? nightAuditDueAt({ businessDate: state.businessDate, time: state.schedule!.time!, timezone: state.timezone }) : null,
+      lastRun: lastRun ?? null,
+    }, { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    return propertyAccessResponse(error);
+  }
+}
 
 /**
  * Runs the scheduled Night Audit when it is due. Every open PMS screen asks

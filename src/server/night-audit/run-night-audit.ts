@@ -150,7 +150,7 @@ export async function runNightAudit(tx: Tx, input: { propertyId: string; trigger
       -- Shifts are clerk sessions counted by time, not by business day, so the
       -- night clerk's open shift does not block the audit.
       0 as "openCashShifts",
-      (select count(*) from maintenance_orders where property_id=${input.propertyId}::uuid and status not in ('completed','cancelled') and priority='critical')::int as "operationalIssues"
+      (select count(*) from maintenance_orders where property_id=${input.propertyId}::uuid and status not in ('completed','resolved','cancelled') and priority='critical')::int as "operationalIssues"
   `;
   const blockers = nightAuditBlockers({
     unpaidDepartureCount: counts.unpaidDepartures,
@@ -237,4 +237,27 @@ export function nightAuditDue(input: { businessDate: string; time: string; timez
   next.setUTCDate(next.getUTCDate() + 1);
   const dueDate = input.time < "12:00" ? next.toISOString().slice(0, 10) : input.businessDate;
   return localDate > dueDate || (localDate === dueDate && localTime >= input.time);
+}
+
+/** Offset of `timezone` from UTC at `instant`, in milliseconds. */
+function zoneOffsetMs(timezone: string, instant: number) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).formatToParts(new Date(instant));
+  const value = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((item) => item.type === type)?.value ?? 0);
+  return Date.UTC(value("year"), value("month") - 1, value("day"), value("hour"), value("minute"), value("second")) - instant;
+}
+
+/**
+ * The exact instant (UTC ISO string) the scheduled audit for `businessDate`
+ * is due, so every open screen can show "Night Audit is running" right on
+ * time. Same rule as nightAuditDue: a morning time belongs to the next day.
+ */
+export function nightAuditDueAt(input: { businessDate: string; time: string; timezone: string }) {
+  const [hour, minute] = input.time.split(":").map(Number);
+  const date = new Date(`${input.businessDate}T12:00:00Z`);
+  if (input.time < "12:00") date.setUTCDate(date.getUTCDate() + 1);
+  const wallClock = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), hour || 0, minute || 0);
+  // Two passes settle the offset across a daylight-saving change.
+  let instant = wallClock - zoneOffsetMs(input.timezone, wallClock);
+  instant = wallClock - zoneOffsetMs(input.timezone, instant);
+  return new Date(instant).toISOString();
 }

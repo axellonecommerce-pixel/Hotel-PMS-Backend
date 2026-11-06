@@ -7,6 +7,8 @@ import { OTA_COMMISSION_CATEGORY } from "@/server/finance/ota-commission";
 
 type Row = { source: "room" | "folio" | "misc" | "tax" | "ota" | "expense" | "paidOut" | "payroll" | "promotion"; category: string; month: string; cents: number };
 
+const CARD_FEES_CATEGORY = "Commissions and Fees › Credit Card Processing Fees";
+
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 /**
@@ -35,7 +37,7 @@ export async function GET(request: Request) {
     const businessDate = await propertyBusinessDate(sql, session.propertyId);
     const end = range.data.end > businessDate ? businessDate : range.data.end;
     if (end < start) return Response.json({ start, end: range.data.end, postedThrough: businessDate, rows: [] });
-    const [ledger, expenses, paidOuts, payroll, promotions] = await Promise.all([
+    const [ledger, expenses, paidOuts, payroll, promotions, cardFees] = await Promise.all([
       sql<Row[]>`
         select case
             when account='Room Revenue' then 'room'
@@ -60,6 +62,7 @@ export async function GET(request: Request) {
       sql<Row[]>`
         select 'paidOut' as source, coalesce(nullif(trim(reason),''),'Paid out') as category, to_char(business_date,'YYYY-MM') as month, sum(amount_cents)::int as cents
         from paid_outs where property_id=${session.propertyId}::uuid and business_date between ${start}::date and ${end}::date
+          and source_type is null
         group by 2,3
       `,
       sql<Row[]>`
@@ -76,8 +79,15 @@ export async function GET(request: Request) {
           and exists (select 1 from charges c where c.reservation_room_id=nr.reservation_room_id and c.service_date=nr.stay_date and c.type='Room Rent' and c.status='posted')
         group by 3
       `,
+      // What the card processor kept when card payments were deposited
+      // (Schedule C line 10, Commissions and fees).
+      sql<Row[]>`
+        select 'expense' as source, ${CARD_FEES_CATEGORY} as category, to_char(deposit_date,'YYYY-MM') as month, sum(fee_cents)::int as cents
+        from card_settlements where property_id=${session.propertyId}::uuid and fee_cents > 0 and deposit_date between ${start}::date and ${end}::date
+        group by 3
+      `,
     ]);
-    const rows = [...ledger, ...expenses, ...paidOuts, ...payroll, ...promotions].filter((row) => row.cents !== 0);
+    const rows = [...ledger, ...expenses, ...paidOuts, ...payroll, ...promotions, ...cardFees].filter((row) => row.cents !== 0);
     return Response.json({ start, end: range.data.end, postedThrough: end, rows });
   } catch (error) { return propertyAccessResponse(error); }
 }

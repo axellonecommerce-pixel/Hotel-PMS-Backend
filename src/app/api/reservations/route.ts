@@ -430,7 +430,7 @@ async function checkRoomLine(tx: TransactionSql, session: PropertySession, paylo
           and rs.arrival_date < ${occupiedUntil}::date and greatest(rs.departure_date, rs.arrival_date + 1) > ${payload.checkInDate}::date
       ) and not exists (
         select 1 from maintenance_orders mo
-        where mo.room_id=r.id and mo.rentable=false and mo.status not in ('resolved','cancelled')
+        where mo.room_id=r.id and mo.rentable=false and mo.status not in ('completed','resolved','cancelled')
           and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockFrom')::date else null end < ${occupiedUntil}::date
           and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockTo')::date else null end >= ${payload.checkInDate}::date
       ) order by r.number for update
@@ -1033,7 +1033,7 @@ async function updateProductionReservation(
                   and other.arrival_date < ${endNight}::date and greatest(other.departure_date, other.arrival_date + 1) > ${firstNight}::date
               ) or exists (
                 select 1 from maintenance_orders mo
-                where mo.room_id=rr.room_id and mo.rentable=false and mo.status not in ('resolved','cancelled')
+                where mo.room_id=rr.room_id and mo.rentable=false and mo.status not in ('completed','resolved','cancelled')
                   and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockFrom')::date else null end < ${endNight}::date
                   and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockTo')::date else null end >= ${firstNight}::date
               )

@@ -3,21 +3,21 @@ import type { Sql, TransactionSql } from "postgres";
 import { downloadPrivateBytes, uploadPrivateBytes } from "@/server/storage/private-files";
 
 const tableOrder = [
-  "property_settings","employees","property_tasks","room_types","rooms","rate_calendar","maintenance_schedules","guests","guest_remarks","guest_identities","guest_payment_sources","guest_vehicles",
+  "property_settings","employees","bank_accounts","card_settlements","property_tasks","room_types","rooms","rate_calendar","maintenance_schedules","guests","guest_remarks","guest_identities","guest_payment_sources","guest_vehicles",
   "companies","company_contacts","company_room_rates","booking_sources","promotions","promotion_room_types","tax_definitions","charge_types",
   "registration_rule_versions","reservations","reservation_rooms","reservation_guests","dnr_overrides","registration_acceptances","nightly_rates",
-  "reservation_promotions","room_moves","reservation_activity","lost_found_items","document_sequences","folios","charges","charge_taxes",
+  "reservation_promotions","room_moves","reservation_activity","lost_found_items","document_sequences","folios","terminal_payments","charges","charge_taxes",
   "house_accounts","house_account_charges","payments","payment_allocations","refunds","folio_transfers",
   "security_deposits","deposit_transactions","invoices","invoice_lines","invoice_payment_allocations","company_credits","business_days","cash_shifts",
   "cash_drops","cash_shift_transactions","paid_outs","housekeeping_records","maintenance_orders","time_entries","pay_periods","payroll_entries","vendors","expenses",
   "recurring_expenses","night_audit_runs","report_definitions","guest_import_jobs","backup_jobs","retention_tombstones","notifications","attachments",
-  "change_events","ledger_entries",
+  "change_events","ledger_entries","cash_movements",
 ] as const;
 
 // These records define the property rather than its day-to-day activity. A
 // reset must keep them so the motel does not need to be configured again.
 const settingsTables = new Set<string>([
-  "property_settings", "employees", "room_types", "rooms", "booking_sources",
+  "property_settings", "employees", "bank_accounts", "room_types", "rooms", "booking_sources",
   "promotions", "promotion_room_types", "tax_definitions", "charge_types",
   "registration_rule_versions", "document_sequences", "rate_calendar", "maintenance_schedules",
   "companies", "company_contacts", "company_room_rates",
@@ -80,7 +80,19 @@ export async function restoreTenantBackup(tx: TransactionSql<Record<string, neve
       select column_name as "columnName" from information_schema.columns where table_schema='public' and table_name=${table}
     `;
     const allowed = new Set(validColumns.map((column) => column.columnName));
-    const sanitized = rows.map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => allowed.has(key))));
+    // Every restored row belongs to this hotel, whatever the file says: an
+    // edited backup must never write into another hotel's data.
+    const sanitized = rows
+      .filter((row) => row && typeof row === "object" && (row.property_id === undefined || row.property_id === backup.propertyId))
+      .map((row) => {
+        const clean: Record<string, unknown> = { ...Object.fromEntries(Object.entries(row).filter(([key]) => allowed.has(key))), ...(allowed.has("property_id") ? { property_id: backup.propertyId } : {}) };
+        // A file reference outside this hotel's folder is dropped.
+        for (const key of ["storage_key", "receipt_storage_key"]) if (clean[key] != null && !ownStorageKey(backup.propertyId, clean[key])) clean[key] = null;
+        // The card terminal connection (and its key) is never part of a backup.
+        if (table === "terminal_payments") clean.connection_id = null;
+        return clean;
+      });
+    if (!sanitized.length) continue;
     await tx`insert into ${tx(table)} ${tx(sanitized)}`;
   }
 }
@@ -117,8 +129,13 @@ export async function resetTenantOperationalData(tx: TransactionSql<Record<strin
   `;
 }
 
+/** A stored file path that belongs to this hotel's own folder. */
+const ownStorageKey = (propertyId: string, key: unknown) => typeof key === "string" && key.startsWith(`${propertyId}/`) && !key.includes("..") && !key.includes("\\");
+
 export async function restoreTenantFiles(backup: TenantBackup) {
   for (const file of backup.files) {
+    if (!ownStorageKey(backup.propertyId, file.storageKey)) continue;
+    if (!["image/jpeg", "image/png", "image/webp", "application/pdf", "application/octet-stream"].includes(file.mimeType)) continue;
     await uploadPrivateBytes(file.storageKey, Uint8Array.from(Buffer.from(file.base64, "base64")), file.mimeType);
   }
 }

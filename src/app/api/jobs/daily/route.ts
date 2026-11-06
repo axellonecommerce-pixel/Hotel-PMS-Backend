@@ -6,6 +6,8 @@ import { deletePrivateFiles } from "@/server/storage/private-files";
 import { createHash } from "node:crypto";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { postDueRecurringExpenses } from "@/server/expenses/recurring";
+import { autoDepositCards } from "@/server/finance/card-settlements";
+import { settleStaleTerminalPayments, syncPayouts } from "@/server/terminal/terminal-service";
 
 function authorized(request: Request) {
   const expected = process.env.CRON_SECRET; const supplied = request.headers.get("authorization")?.replace(/^Bearer /, "");
@@ -53,6 +55,21 @@ export async function POST(request: Request) {
         values (${invoice.propertyId}::uuid,'manager','INVOICE_REMINDER','Company invoice requires follow-up',${`${invoice.number} was due ${invoice.dueDate}.`},'invoice',${invoice.id}::uuid)`;
     });
     const recurringExpensesPosted = await sql.begin((tx) => postDueRecurringExpenses(tx));
+    // Automatic card deposits, one motel at a time so one motel's problem never stops another's.
+    let cardDeposits = 0;
+    const autoDepositMotels = await sql<Array<{ propertyId: string }>>`select property_id as "propertyId" from property_settings where key='card_deposits' and coalesce((value->>'enabled')::boolean,false)`;
+    for (const motel of autoDepositMotels) {
+      try { cardDeposits += await sql.begin((tx) => autoDepositCards(tx, motel.propertyId)); }
+      catch (error) { console.error("Automatic card deposit failed", motel.propertyId, error instanceof Error ? error.message : "unknown error"); }
+    }
+    // Connected card terminals: finish charges left waiting, then turn paid payouts into deposits with exact fees.
+    const terminalMotels = await sql<Array<{ propertyId: string }>>`select property_id as "propertyId" from payment_terminal_connections where status<>'disconnected'`;
+    for (const motel of terminalMotels) {
+      try {
+        await settleStaleTerminalPayments(sql, motel.propertyId, 120);
+        cardDeposits += (await syncPayouts(sql, motel.propertyId)).deposits;
+      } catch (error) { console.error("Card terminal sync failed", motel.propertyId, error instanceof Error ? error.message : "unknown error"); }
+    }
     // Pay reminders: the day before and on each employee's pay date (in the
     // motel's time zone), for pay not paid, deleted or only a custom range.
     const payDue = await sql<Array<{ id: string; propertyId: string; name: string; cents: number; start: string; end: string; payDate: string; when: "today" | "tomorrow" }>>`
@@ -79,7 +96,7 @@ export async function POST(request: Request) {
       `;
       if (inserted.length) payReminders += 1;
     }
-    return Response.json({ warned: expiring.length, deleted: expired.length, invoiceReminders: reminders.length, recurringExpensesPosted, payReminders });
+    return Response.json({ warned: expiring.length, deleted: expired.length, invoiceReminders: reminders.length, recurringExpensesPosted, cardDeposits, payReminders });
   }
   const now = new Date();
   const warningCutoff = new Date(now.getTime() + 7 * 86_400_000).toISOString();

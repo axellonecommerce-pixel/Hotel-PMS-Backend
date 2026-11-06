@@ -32,9 +32,11 @@ export async function requirePlatformAdmin(request: Request) {
     cache: "no-store",
   });
   if (!response.ok) throw new PlatformAdminAccessError(401, "The login session is invalid or expired.");
-  const user = await response.json() as { id?: string; email?: string };
+  const user = await response.json() as { id?: string; email?: string; email_confirmed_at?: string | null };
   const email = user.email?.trim().toLowerCase();
   if (!user.id || !email) throw new PlatformAdminAccessError(401, "The login session has no email address.");
+  // An address someone signed up with but never confirmed proves nothing.
+  if (!user.email_confirmed_at) throw new PlatformAdminAccessError(403, "Confirm this account's email address before using the Platform Admin.");
   if (!configuredEmails().has(email)) throw new PlatformAdminAccessError(403, "This account is not a Platform Admin.");
   return { id: user.id, email };
 }

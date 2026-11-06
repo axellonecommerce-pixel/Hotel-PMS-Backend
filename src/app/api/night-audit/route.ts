@@ -3,6 +3,12 @@ import { productionSql } from "@/server/db/production";
 import { runNightAudit } from "@/server/night-audit/run-night-audit";
 import { z } from "zod";
 
+class AlreadyAuditedError extends Error {
+  constructor(expected: string, readonly openDate: string) {
+    super(`The Night Audit for ${expected} has already run. The business day is now ${openDate}.`);
+  }
+}
+
 export async function GET(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.manage");
@@ -47,9 +53,21 @@ export async function POST(request: Request) {
         and membership_id in (select id from property_memberships where auth_user_id=${session.authUserId}::uuid and property_id=${session.propertyId}::uuid)
       limit 1
     `;
-    const result = await productionSql().begin((tx) => runNightAudit(tx, { propertyId: session.propertyId, trigger: "manual", employeeId: employee?.id }));
+    // The screen sends the business day it is closing. If the scheduled audit
+    // already closed that day, running again would close the NEXT day too.
+    const body = await request.json().catch(() => null) as { expectedBusinessDate?: unknown } | null;
+    const expected = typeof body?.expectedBusinessDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.expectedBusinessDate) ? body.expectedBusinessDate : null;
+    const result = await productionSql().begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtext(${`night-audit:${session.propertyId}`}))`;
+      if (expected) {
+        const [open] = await tx<Array<{ businessDate: string }>>`select business_date::text as "businessDate" from business_days where property_id=${session.propertyId}::uuid and status='open' order by business_date limit 1`;
+        if (open && open.businessDate !== expected) throw new AlreadyAuditedError(expected, open.businessDate);
+      }
+      return runNightAudit(tx, { propertyId: session.propertyId, trigger: "manual", employeeId: employee?.id });
+    });
     return Response.json(result, { status: result.status === "completed" ? 200 : 409 });
   } catch (error) {
+    if (error instanceof AlreadyAuditedError) return Response.json({ error: error.message, alreadyAudited: true, businessDate: error.openDate }, { status: 409 });
     if (error instanceof Error && /business day/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }

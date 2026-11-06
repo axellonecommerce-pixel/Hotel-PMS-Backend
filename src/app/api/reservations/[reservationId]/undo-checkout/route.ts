@@ -1,3 +1,4 @@
+import { reversePaymentLedger } from "@/server/finance/payment-ledger";
 import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
@@ -59,6 +60,9 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         await tx`delete from invoices where id=${invoice.id}::uuid`;
       }
       // The balance returns to the folio until the stay checks out again.
+      const transfers = await tx<Array<{ id: string }>>`select id from payments where reservation_id=${reservation.id}::uuid and method=${DIRECT_BILL_METHOD}`;
+      const undoDate = await propertyBusinessDate(tx, session.propertyId);
+      for (const transfer of transfers) await reversePaymentLedger(tx, session.propertyId, transfer.id, undoDate);
       await tx`delete from payment_allocations where payment_id in (select id from payments where reservation_id=${reservation.id}::uuid and method=${DIRECT_BILL_METHOD})`;
       await tx`delete from payments where reservation_id=${reservation.id}::uuid and method=${DIRECT_BILL_METHOD}`;
 

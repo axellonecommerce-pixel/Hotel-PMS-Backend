@@ -4,6 +4,8 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
+import { recordCashDrop } from "@/server/finance/cash-sources";
+import { cashActivityBetween } from "@/server/finance/shift-guard";
 
 // HotelKey "Start / End Shift": a clerk opens a shift by counting the cash in
 // the drawer, takes payments during the shift, and closes it by counting the
@@ -28,24 +30,6 @@ type Db = Sql | TransactionSql<Record<string, never>>;
 type OpenShift = { id: string; shiftName: string; employeeId: string; clerk: string; openedAt: string; openingCents: number; businessDate: string };
 
 class ShiftError extends Error {}
-
-/** Cash taken in and paid out between two instants. */
-async function cashActivityBetween(db: Db, propertyId: string, from: string, to: string | null) {
-  const [row] = await db<Array<{ paymentCents: number; refundCents: number; depositCents: number; paidOutCents: number }>>`
-    select
-      coalesce((select sum(p.amount_cents) from payments p where p.property_id=${propertyId}::uuid and lower(p.method) like '%cash%'
-        and p.created_at >= ${from}::timestamptz and (${to}::timestamptz is null or p.created_at < ${to}::timestamptz)),0)::int as "paymentCents",
-      coalesce((select sum(r.amount_cents) from refunds r join payments p on p.id=r.payment_id where r.property_id=${propertyId}::uuid and lower(p.method) like '%cash%'
-        and r.created_at >= ${from}::timestamptz and (${to}::timestamptz is null or r.created_at < ${to}::timestamptz)),0)::int as "refundCents",
-      -- Cash security deposits sit in the drawer until released.
-      coalesce((select sum(le.debit_cents-le.credit_cents) from ledger_entries le where le.property_id=${propertyId}::uuid and le.account='Cash'
-        and le.resource_type in ('deposit-collect','deposit-release')
-        and le.created_at >= ${from}::timestamptz and (${to}::timestamptz is null or le.created_at < ${to}::timestamptz)),0)::int as "depositCents",
-      coalesce((select sum(po.amount_cents) from paid_outs po where po.property_id=${propertyId}::uuid
-        and po.created_at >= ${from}::timestamptz and (${to}::timestamptz is null or po.created_at < ${to}::timestamptz)),0)::int as "paidOutCents"
-  `;
-  return { ...row, netCents: row.paymentCents - row.refundCents + row.depositCents - row.paidOutCents };
-}
 
 async function openShift(db: Db, propertyId: string) {
   const [shift] = await db<OpenShift[]>`
@@ -137,7 +121,9 @@ export async function POST(request: Request) {
         update cash_shifts set status=${`closed:${current.shiftName}`}, expected_cents=${expectedCents}, counted_cents=${input.countedCents}, closed_at=now()
         where id=${current.id}::uuid
       `;
-      await tx`insert into cash_drops (property_id,cash_shift_id,amount_cents,note) values (${session.propertyId}::uuid,${current.id}::uuid,${input.droppedCents},${input.note ?? null})`;
+      const [drop] = await tx<Array<{ id: string }>>`insert into cash_drops (property_id,cash_shift_id,amount_cents,note) values (${session.propertyId}::uuid,${current.id}::uuid,${input.droppedCents},${input.note ?? null}) returning id`;
+      // The dropped cash goes into the safe.
+      await recordCashDrop(tx, { propertyId: session.propertyId, cashDropId: drop.id, businessDate: current.businessDate, amountCents: input.droppedCents, clerk: current.clerk, authUserId: session.authUserId });
       return { ended: { id: current.id, clerk: current.clerk, shiftName: current.shiftName, openedAt: current.openedAt, openingCents: current.openingCents, activity, expectedCents, countedCents: input.countedCents, droppedCents: input.droppedCents, differenceCents: input.countedCents - expectedCents } };
     });
     return Response.json(result, { status: 201 });

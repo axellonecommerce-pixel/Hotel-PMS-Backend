@@ -27,6 +27,7 @@ export async function GET(request: Request) {
       rooms: string | null;
       status: string;
       balanceCents: number;
+      totalCents: number;
       isGroup: boolean;
     }>>`
       select r.id,concat(g.first_name,' ',g.last_name) as guest,
@@ -36,6 +37,8 @@ export async function GET(request: Request) {
           left join rooms room on room.id=reservation_room.room_id
           where reservation_room.reservation_id=r.id) as rooms,
         (select count(*) > 1 from reservation_rooms reservation_room where reservation_room.reservation_id=r.id) as "isGroup",
+        coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0))
+          from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)::int as "totalCents",
         (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0))
           from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)
           - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=r.id),0))::int as "balanceCents"
@@ -64,6 +67,7 @@ export async function GET(request: Request) {
           { key: "departure", label: "Departure", format: "date" },
           { key: "room", label: "Room(s)" },
           { key: "status", label: "Status", format: "status" },
+          { key: "total", label: "Total (with tax)", format: "money", align: "right" },
           { key: "balance", label: "Balance", format: "money", align: "right" },
         ],
         rows: records.map((record) => ({
@@ -73,6 +77,7 @@ export async function GET(request: Request) {
           departure: record.departure,
           room: record.rooms ?? "Unassigned",
           status: statusLabel(record.status),
+          total: record.totalCents,
           balance: record.balanceCents,
         })),
         note: "Includes reservations whose stay dates overlap the selected period, including same-day stays.",

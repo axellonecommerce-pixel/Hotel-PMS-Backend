@@ -1,3 +1,4 @@
+import { ensureDefaultBankAccount } from "@/server/finance/cash-sources";
 import { productionSql } from "@/server/db/production";
 import { purgeArchivedMotelsForOwnerEmail } from "./motel-purge";
 
@@ -271,6 +272,9 @@ export async function provisionPlatformMotel(input: PlatformMotelInput) {
         insert into business_days (property_id,business_date,status,opened_at)
         values (${propertyId}::uuid,${firstBusinessDate}::date,'open',now())
       `;
+      // Every motel starts with a default bank account, so check, debit card
+      // and transfer payments always have an account to come out of.
+      await ensureDefaultBankAccount(tx, propertyId);
       await tx`
         insert into platform_subscriptions (property_id,plan_name,billing_cycle,amount_cents,starts_on,expires_on,status,notes)
         values (${propertyId}::uuid,${input.planName},${input.billingCycle},${input.amountCents},${input.startsOn}::date,${input.expiresOn}::date,${input.status},${input.notes ?? null})

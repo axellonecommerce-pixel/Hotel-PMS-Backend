@@ -5,6 +5,9 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
+import { postPaymentLedger, postRefundLedger, reversePaymentLedger } from "@/server/finance/payment-ledger";
+import { ProcessorError } from "@/server/terminal/stripe";
+import { refundOnProcessor, TerminalError } from "@/server/terminal/terminal-service";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 
 const paymentSchema = z.object({
@@ -87,6 +90,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         returning id,created_at::text as "createdAt"
       `;
       await tx`insert into payment_allocations (property_id,payment_id,folio_id,amount_cents) values (${session.propertyId}::uuid,${created.id}::uuid,${folio.id}::uuid,${parsed.data.amountCents})`;
+      if (!isBadDebt) await postPaymentLedger(tx, session.propertyId, created.id);
       if (isBadDebt) await postProductionLedger(tx, {
         propertyId: session.propertyId,
         businessDate,
@@ -118,8 +122,9 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
     if (!parsed.success) return Response.json({ error: "Enter a valid refund amount." }, { status: 400 });
     const refund = await productionSql().begin(async (tx) => {
       await requireOpenShift(tx, session.propertyId, "refund a payment");
-      const [payment] = await tx<Array<{ id: string; method: string; amountCents: number; folioId: string; allocatedCents: number; refundedCents: number }>>`
+      const [payment] = await tx<Array<{ id: string; method: string; amountCents: number; folioId: string; allocatedCents: number; refundedCents: number; externalReference: string | null; terminalPaymentId: string | null }>>`
         select p.id,p.method,p.amount_cents as "amountCents",pa.folio_id as "folioId",pa.amount_cents as "allocatedCents",
+          p.external_reference as "externalReference",p.terminal_payment_id as "terminalPaymentId",
           coalesce((select sum(r.amount_cents) from refunds r where r.payment_id=p.id),0)::int as "refundedCents"
         from payments p join payment_allocations pa on pa.payment_id=p.id
         where p.id=${parsed.data.paymentId}::uuid and pa.folio_id=${parsed.data.folioId}::uuid
@@ -131,7 +136,12 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
       if (payment.method.toUpperCase() === "DIRECT BILL") throw new Error("Payment entries for a direct bill transfer cannot be refunded.");
       if (parsed.data.amountCents > payment.amountCents - payment.refundedCents) throw new Error("Refund cannot exceed the unrefunded payment amount.");
       if (parsed.data.amountCents > payment.allocatedCents) throw new Error("Refund cannot exceed the payment allocated to this folio.");
-      await tx`insert into refunds (property_id,payment_id,amount_cents,effective_date,reason) values (${session.propertyId}::uuid,${payment.id}::uuid,${parsed.data.amountCents},${await propertyBusinessDate(tx, session.propertyId)}::date,'Guest refund')`;
+      const refundDate = await propertyBusinessDate(tx, session.propertyId);
+      // A payment taken on the card terminal is refunded back to the card by
+      // the processor first; the idempotency key makes a retry safe.
+      const processorRefundId = await refundOnProcessor(tx, session.propertyId, payment, parsed.data.amountCents, `${payment.id}-${payment.refundedCents}-${parsed.data.amountCents}`);
+      const [createdRefund] = await tx<Array<{ id: string }>>`insert into refunds (property_id,payment_id,amount_cents,effective_date,reason,external_reference) values (${session.propertyId}::uuid,${payment.id}::uuid,${parsed.data.amountCents},${refundDate}::date,${processorRefundId ? "Guest refund · returned to card" : "Guest refund"},${processorRefundId}) returning id`;
+      await postRefundLedger(tx, session.propertyId, payment.id, createdRefund.id, parsed.data.amountCents, refundDate);
       await tx`update payment_allocations set amount_cents=${payment.allocatedCents - parsed.data.amountCents} where payment_id=${payment.id}::uuid and folio_id=${payment.folioId}::uuid`;
       await logReservationActivity(tx, session, reservationId, "Payment", `Refund ${money(parsed.data.amountCents)} of ${payment.method} payment`);
       return { paymentId: payment.id, refundedCents: payment.refundedCents + parsed.data.amountCents };
@@ -139,6 +149,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
     return Response.json({ refund });
   } catch (error) {
     if (error instanceof ShiftRequiredError) return Response.json({ error: error.message }, { status: 409 });
+    if (error instanceof ProcessorError || error instanceof TerminalError) return Response.json({ error: error.message }, { status: 409 });
     if (error instanceof Error && /Payment|Refund|Bad debt/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
@@ -151,11 +162,15 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
     const parsed = deleteSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Select a payment to delete." }, { status: 400 });
     const deleted = await productionSql().begin(async (tx) => {
-      const [payment] = await tx<Array<{ id: string; method: string; amountCents: number }>>`select id,method,amount_cents as "amountCents" from payments where id=${parsed.data.paymentId}::uuid and reservation_id=${reservationId}::uuid and property_id=${session.propertyId}::uuid for update`;
+      const [payment] = await tx<Array<{ id: string; method: string; amountCents: number; deposited: boolean; onTerminal: boolean }>>`select id,method,amount_cents as "amountCents",settlement_id is not null as deposited,terminal_payment_id is not null as "onTerminal" from payments where id=${parsed.data.paymentId}::uuid and reservation_id=${reservationId}::uuid and property_id=${session.propertyId}::uuid for update`;
       if (!payment) return false;
+      // The money is already in the bank: give it back with a refund instead.
+      if (payment.deposited) throw new Error("This payment was already deposited in the bank. Refund it instead of deleting it.");
+      if (payment.onTerminal) throw new Error("This payment was charged on the card terminal. Refund it instead, so the money goes back to the card.");
       if (payment.method.toUpperCase() === "BAD DEBT") throw new Error("Bad debt entries cannot be deleted.");
       if (payment.method.toUpperCase() === "OTA COMMISSION") throw new Error("Payment entries for OTA commission deductions cannot be deleted.");
       if (payment.method.toUpperCase() === "DIRECT BILL") throw new Error("Payment entries for a direct bill transfer cannot be deleted.");
+      await reversePaymentLedger(tx, session.propertyId, payment.id, await propertyBusinessDate(tx, session.propertyId));
       await tx`delete from refunds where payment_id=${payment.id}::uuid`;
       await tx`delete from payment_allocations where payment_id=${payment.id}::uuid`;
       await tx`delete from payments where id=${payment.id}::uuid`;
@@ -165,7 +180,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
     if (!deleted) return Response.json({ error: "Payment not found." }, { status: 404 });
     return NextResponse.json({ deleted: true });
   } catch (error) {
-    if (error instanceof Error && /Bad debt|OTA commission|direct bill/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (error instanceof Error && /Bad debt|OTA commission|direct bill|already deposited|card terminal/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }

@@ -42,7 +42,7 @@ export async function roomInventory(db: Db, propertyId: string, start: string, e
     select r.number, case when mo.notes like '{%' then mo.notes::jsonb->>'blockFrom' end as "blockFrom",
       case when mo.notes like '{%' then mo.notes::jsonb->>'blockTo' end as "blockTo"
     from maintenance_orders mo join rooms r on r.id=mo.room_id
-    where mo.property_id=${propertyId}::uuid and mo.rentable=false and mo.status not in ('resolved','cancelled')
+    where mo.property_id=${propertyId}::uuid and mo.rentable=false and mo.status not in ('completed','resolved','cancelled')
   `;
   const stays = await db<Array<{ number: string | null; typeName: string; arrival: string; occupiedUntil: string }>>`
     select room.number, rt.name as "typeName", rs.arrival_date::text as arrival, greatest(rs.departure_date, rs.arrival_date + 1)::text as "occupiedUntil"

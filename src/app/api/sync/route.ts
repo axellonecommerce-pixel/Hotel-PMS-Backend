@@ -3,6 +3,16 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 
 export const dynamic = "force-dynamic";
 
+// Tables added by newer migrations are only fingerprinted once they exist, so
+// deploying the API before a migration never breaks live sync on every screen.
+let cashMovementsReady = false;
+async function hasCashMovements() {
+  if (cashMovementsReady) return true;
+  const [row] = await productionSql()<Array<{ ready: boolean }>>`select to_regclass('public.cash_movements') is not null and to_regclass('public.bank_accounts') is not null and to_regclass('public.card_settlements') is not null and to_regclass('public.terminal_payments') is not null as ready`;
+  cashMovementsReady = row.ready;
+  return cashMovementsReady;
+}
+
 /**
  * A short fingerprint of the property's operational data. Every screen polls
  * it; when it changes (any user or device saved something), screens reload.
@@ -15,6 +25,10 @@ export async function GET(request: Request) {
     const session = await requirePropertySession(request, "reports.view");
     if (!hasProductionDatabase()) return Response.json({ version: "local" });
     const id = session.propertyId;
+    const sql = productionSql();
+    const cashMovements = await hasCashMovements()
+      ? sql`(select concat(max(created_at), ':', count(*)) from cash_movements where property_id=${id}::uuid) || '|' || coalesce((select concat(max(updated_at), ':', count(*)) from bank_accounts where property_id=${id}::uuid),'') || '|' || coalesce((select concat(max(created_at), ':', count(*)) from card_settlements where property_id=${id}::uuid),'') || '|' || coalesce((select concat(max(updated_at), ':', count(*)) from terminal_payments where property_id=${id}::uuid),'')`
+      : sql`''`;
     const [row] = await productionSql()<Array<{ version: string }>>`
       select md5(concat_ws('|',
         (select concat(max(updated_at), ':', count(*)) from reservations where property_id=${id}::uuid),
@@ -46,7 +60,10 @@ export async function GET(request: Request) {
         (select concat(max(updated_at), ':', count(*)) from invoices where property_id=${id}::uuid),
         (select concat(max(updated_at), ':', count(*)) from security_deposits where property_id=${id}::uuid),
         (select concat(max(updated_at), ':', count(*)) from rate_calendar where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from employees where property_id=${id}::uuid)
+        (select concat(max(updated_at), ':', count(*)) from employees where property_id=${id}::uuid),
+        (select concat(max(updated_at), ':', count(*)) from payroll_entries where property_id=${id}::uuid),
+        ${cashMovements},
+        (select concat(max(started_at), ':', count(*)) from night_audit_runs where property_id=${id}::uuid)
       )) as version
     `;
     return Response.json({ version: row.version }, { headers: { "Cache-Control": "no-store" } });

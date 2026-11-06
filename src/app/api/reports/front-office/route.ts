@@ -48,7 +48,7 @@ export async function GET(request: Request) {
 
     if (view === "arrivals" || view === "departures") {
       const arrivals = view === "arrivals";
-      const records = await sql<Array<{ id: string; date: string; confirmation: string; guest: string; rooms: string; roomType: string; nights: number; source: string; ratePlan: string; status: string; billTo: string; totalCents: number; balanceCents: number; checkInDate: string; departedTime: string; arCents: number }>>`
+      const records = await sql<Array<{ id: string; date: string; confirmation: string; guest: string; rooms: string; roomType: string; nights: number; source: string; ratePlan: string; status: string; billTo: string; totalCents: number; balanceCents: number; checkInDate: string; departedTime: string; arCents: number; roomCount: number }>>`
         select r.id, (case when ${arrivals} then r.arrival_date else r.departure_date end)::text as date, r.confirmation_number as confirmation,
           g.first_name||' '||g.last_name as guest, ${roomList} as rooms, ${roomTypes} as "roomType",
           (r.departure_date - r.arrival_date)::int as nights, coalesce(bs.name,'Direct') as source,
@@ -58,7 +58,8 @@ export async function GET(request: Request) {
           ${balance} as "balanceCents",
           r.arrival_date::text as "checkInDate",
           coalesce((select to_char(max(rrx.checked_out_at) at time zone p.timezone,'HH12:MI AM') from reservation_rooms rrx where rrx.reservation_id=r.id),'') as "departedTime",
-          coalesce((select sum(pay.amount_cents) from payments pay where pay.reservation_id=r.id and upper(pay.method)='DIRECT BILL'),0)::int as "arCents"
+          coalesce((select sum(pay.amount_cents) from payments pay where pay.reservation_id=r.id and upper(pay.method)='DIRECT BILL'),0)::int as "arCents",
+          greatest(1,(select count(*) from reservation_rooms rrc where rrc.reservation_id=r.id))::int as "roomCount"
         from reservations r join guests g on g.id=r.main_guest_id join properties p on p.id=r.property_id
         left join booking_sources bs on bs.id=r.booking_source_id left join companies c on c.id=r.company_id
         where r.property_id=${propertyId}::uuid and r.status not in ('cancelled')
@@ -71,7 +72,7 @@ export async function GET(request: Request) {
       if (!arrivals) {
         // HotelKey Departures List layout.
         return respond(
-          [{ label: "Total", value: records.length, format: "number" }, { label: "Pending Depart", value: done, format: "number" }, { label: "Departed", value: records.filter((row) => row.status === "checked_out").length, format: "number" }, { label: "Open Balance", value: sum(records, (row) => Math.max(0, row.balanceCents)), format: "money" }],
+          [{ label: "Total", value: records.length, format: "number" }, { label: "Rooms", value: sum(records, (row) => row.roomCount), format: "number" }, { label: "Pending Depart", value: done, format: "number" }, { label: "Departed", value: records.filter((row) => row.status === "checked_out").length, format: "number" }, { label: "Open Balance", value: sum(records, (row) => Math.max(0, row.balanceCents)), format: "money" }],
           [{ key: "confirmation", label: "Confirmation No" }, { key: "rooms", label: "Room Number" }, { key: "guest", label: "Guest Name" }, { key: "checkInDate", label: "Check In Date", format: "date" }, { key: "status", label: "Status", format: "status" }, money("arCents", "ARR"), money("balanceCents", "Balance"), { key: "departedTime", label: "Departed Time" }],
           rows,
           "Stays departing in the range. ARR is the amount moved to accounts receivable (direct bill) at checkout.",
@@ -79,7 +80,7 @@ export async function GET(request: Request) {
       }
       return respond(
         arrivals
-          ? [{ label: "Arrivals", value: records.length, format: "number" }, { label: "Still Due In", value: done, format: "number" }, { label: "Room Nights", value: sum(records, (row) => row.nights), format: "number" }, { label: "Balance Due", value: sum(records, (row) => Math.max(0, row.balanceCents)), format: "money" }]
+          ? [{ label: "Arrivals", value: records.length, format: "number" }, { label: "Rooms", value: sum(records, (row) => row.roomCount), format: "number" }, { label: "Still Due In", value: done, format: "number" }, { label: "Room Nights", value: sum(records, (row) => row.nights), format: "number" }, { label: "Balance Due", value: sum(records, (row) => Math.max(0, row.balanceCents)), format: "money" }]
           : [{ label: "Departures", value: records.length, format: "number" }, { label: "Still Due Out", value: done, format: "number" }, { label: "Checked Out", value: records.filter((row) => row.status === "checked_out").length, format: "number" }, { label: "Open Balance", value: sum(records, (row) => Math.max(0, row.balanceCents)), format: "money" }],
         [{ key: "date", label: arrivals ? "Arrival" : "Departure", format: "date" }, { key: "confirmation", label: "Confirmation" }, { key: "guest", label: "Guest" }, { key: "rooms", label: "Room" }, { key: "roomType", label: "Room Type" }, count("nights", "Nights"), { key: "source", label: "Source" }, { key: "ratePlan", label: "Rate Plan" }, { key: "billTo", label: "Bill To" }, { key: "status", label: "Status", format: "status" }, money("totalCents", "Folio Total"), money("balanceCents", "Balance")],
         rows,
@@ -311,9 +312,12 @@ export async function GET(request: Request) {
 
     if (view === "revenue-by-room-type") {
       const days = Math.round((Date.parse(`${endDate}T12:00:00Z`) - Date.parse(`${startDate}T12:00:00Z`)) / 86_400_000) + 1;
-      const records = await sql<Array<{ id: string; roomType: string; rooms: number; nights: number; revenueCents: number }>>`
+      // Occupancy and RevPAR use rentable rooms, like the Occupancy and
+      // Revenue Performance reports, so the three always agree.
+      const records = await sql<Array<{ id: string; roomType: string; rooms: number; rentableRooms: number; nights: number; revenueCents: number }>>`
         select rt.id, rt.name as "roomType",
           (select count(*) from rooms ro where ro.room_type_id=rt.id and ro.active)::int as rooms,
+          (select count(*) from rooms ro where ro.room_type_id=rt.id and ro.active and ro.service_status='rentable')::int as "rentableRooms",
           count(c.id)::int as nights, coalesce(sum(c.amount_cents),0)::int as "revenueCents"
         from room_types rt
         left join reservation_rooms rr on rr.room_type_id=rt.id
@@ -324,15 +328,15 @@ export async function GET(request: Request) {
       const rows = records.map((record) => ({
         ...record,
         adrCents: record.nights ? Math.round(record.revenueCents / record.nights) : 0,
-        occupancy: record.rooms ? (record.nights / (record.rooms * days)) * 100 : 0,
-        revParCents: record.rooms ? Math.round(record.revenueCents / (record.rooms * days)) : 0,
+        occupancy: record.rentableRooms ? (record.nights / (record.rentableRooms * days)) * 100 : 0,
+        revParCents: record.rentableRooms ? Math.round(record.revenueCents / (record.rentableRooms * days)) : 0,
       }));
-      const totalRooms = sum(records, (row) => row.rooms);
+      const totalRooms = sum(records, (row) => row.rentableRooms);
       const nights = sum(records, (row) => row.nights);
       const revenue = sum(records, (row) => row.revenueCents);
       return respond(
         [{ label: "Room Nights Sold", value: nights, format: "number" }, { label: "Room Revenue", value: revenue, format: "money" }, { label: "ADR", value: nights ? Math.round(revenue / nights) : 0, format: "money" }, { label: "Occupancy", value: totalRooms ? (nights / (totalRooms * days)) * 100 : 0, format: "percent" }],
-        [{ key: "roomType", label: "Room Type" }, count("rooms", "Rooms"), count("nights", "Nights Sold"), { key: "occupancy", label: "Occupancy", format: "percent", align: "right" }, money("revenueCents", "Room Revenue"), money("adrCents", "ADR"), money("revParCents", "RevPAR")],
+        [{ key: "roomType", label: "Room Type" }, count("rooms", "Rooms"), count("nights", "Nights Sold"), count("rentableRooms", "Rentable"), { key: "occupancy", label: "Occupancy (Rentable)", format: "percent", align: "right" }, money("revenueCents", "Room Revenue"), money("adrCents", "ADR"), money("revParCents", "RevPAR")],
         rows,
         "Posted room rent by stay date. Cancelled, no-show, and shortened nights are voided and excluded.",
       );
@@ -367,7 +371,7 @@ export async function GET(request: Request) {
           coalesce(stay.remark, departed.remark, '') as remarks,
           coalesce((select to_char(r2.arrival_date,'Mon DD')||' · '||g2.first_name||' '||g2.last_name from reservation_rooms rr2 join reservations r2 on r2.id=rr2.reservation_id join guests g2 on g2.id=r2.main_guest_id
             where rr2.room_id=ro.id and rr2.status='reserved' and r2.status='reserved' and r2.arrival_date >= ${day.date}::date order by r2.arrival_date limit 1),'') as "nextArrival",
-          coalesce((select string_agg(m.problem, '; ') from maintenance_orders m where m.room_id=ro.id and m.status not in ('resolved','cancelled')),'') as maintenance,
+          coalesce((select string_agg(m.problem, '; ') from maintenance_orders m where m.room_id=ro.id and m.status not in ('completed','resolved','cancelled')),'') as maintenance,
           exists (select 1 from maintenance_orders m where m.room_id=ro.id and (m.returned_to_service_at at time zone p.timezone)::date between (${day.date}::date - 1) and ${day.date}::date) as "returnedFromMaint",
           exists (select 1 from room_moves rm where rm.from_room_id=ro.id and (rm.moved_at at time zone p.timezone)::date between (${day.date}::date - 1) and ${day.date}::date) as "movedOut",
           coalesce(departed.early, false) as "earlyCheckout",

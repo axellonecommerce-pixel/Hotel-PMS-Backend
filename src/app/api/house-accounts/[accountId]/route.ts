@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+import { postPaymentLedger } from "@/server/finance/payment-ledger";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 
 const entrySchema = z.discriminatedUnion("kind", [
@@ -71,6 +72,7 @@ export async function POST(request: Request, context: { params: Promise<{ accoun
         values (${session.propertyId}::uuid, ${account.id}::uuid, ${input.method}, ${input.amountCents}, 'USD', ${businessDate}::date, ${input.reference ?? null}, ${`House account · ${account.name}`})
         returning id
       `;
+      await postPaymentLedger(tx, session.propertyId, payment.id);
       return { id: payment.id, kind: "payment" as const };
     });
     return Response.json(created, { status: 201 });

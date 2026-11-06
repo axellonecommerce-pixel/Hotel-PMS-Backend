@@ -1,3 +1,4 @@
+import { postPaymentLedger } from "@/server/finance/payment-ledger";
 import type { TransactionSql } from "postgres";
 
 type Tx = TransactionSql<Record<string, never>>;
@@ -47,6 +48,7 @@ export async function transferBalanceToCompany(tx: Tx, input: {
       ${input.businessDate}::date,${input.invoiceNumber},${`Balance transferred to ${input.companyName} invoice ${input.invoiceNumber}`})
     returning id
   `;
+  await postPaymentLedger(tx, input.propertyId, payment.id);
   for (const folio of open) {
     await tx`insert into payment_allocations (property_id,payment_id,folio_id,amount_cents) values (${input.propertyId}::uuid,${payment.id}::uuid,${folio.folioId}::uuid,${folio.balanceCents})`;
   }

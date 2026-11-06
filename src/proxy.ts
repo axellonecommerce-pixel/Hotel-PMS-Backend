@@ -15,6 +15,11 @@ function allowedOrigin(request: NextRequest) {
 export function proxy(request: NextRequest) {
   const origin = allowedOrigin(request);
   const response = request.method === "OPTIONS" ? new NextResponse(null, { status: 204 }) : NextResponse.next();
+  // Every API answer is private to the signed-in hotel: never cache it in a
+  // shared cache, and never let a browser guess a different content type.
+  response.headers.set("Cache-Control", "private, no-store");
+  response.headers.set("X-Content-Type-Options", "nosniff");
+  response.headers.set("Referrer-Policy", "no-referrer");
   if (origin) {
     response.headers.set("Access-Control-Allow-Origin", origin);
     response.headers.set("Access-Control-Allow-Credentials", "true");

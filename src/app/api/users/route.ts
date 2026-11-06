@@ -9,6 +9,9 @@ const updateSchema = z.object({ employeeId: z.string().uuid(), role: staffRole.o
 
 // The owner and managers create staff logins, reset passwords and disable users (PRD §2).
 const managesStaff = (role: string) => role === "owner" || role === "manager";
+// Only the owner creates or changes managers; a manager manages front desk
+// and accountant logins. Otherwise one manager could take over another.
+const canManageRole = (actorRole: string, targetRole: string) => actorRole === "owner" ? targetRole !== "owner" : targetRole === "front_desk" || targetRole === "accountant";
 
 function adminConfig() {
   const url = process.env.SUPABASE_URL?.replace(/\/$/, "");
@@ -37,6 +40,7 @@ export async function POST(request: Request) {
     if (!hasProductionDatabase()) return Response.json({ error: "Staff login setup requires the production database." }, { status: 503 });
     const parsed = createSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: parsed.error.issues[0]?.message ?? "Check the staff account details." }, { status: 400 });
+    if (!canManageRole(session.role, parsed.data.role)) return Response.json({ error: "Only the owner can create a manager login." }, { status: 403 });
     const { url, secret } = adminConfig();
     const authResponse = await fetch(`${url}/auth/v1/admin/users`, { method: "POST", headers: { apikey: secret, authorization: `Bearer ${secret}`, "content-type": "application/json" }, body: JSON.stringify({ email: parsed.data.email, password: parsed.data.password, email_confirm: true, user_metadata: { full_name: parsed.data.name } }) });
     if (!authResponse.ok) { const message = await authResponse.json().catch(() => ({})) as { msg?: string; message?: string }; return Response.json({ error: message.msg ?? message.message ?? "The staff login could not be created." }, { status: 409 }); }
@@ -63,6 +67,16 @@ export async function PATCH(request: Request) {
     if (!user) return Response.json({ error: "Staff account was not found." }, { status: 404 });
     // The owner's own login is changed in Platform › Manage, not here.
     if (user.role === "owner") return Response.json({ error: "The owner login cannot be changed here." }, { status: 403 });
+    if (!canManageRole(session.role, user.role) || (parsed.data.role && !canManageRole(session.role, parsed.data.role))) return Response.json({ error: "Only the owner can change a manager login or make someone a manager." }, { status: 403 });
+    if (user.authUserId === session.authUserId) return Response.json({ error: "You cannot change your own login here." }, { status: 403 });
+    if (parsed.data.password) {
+      // A password is global to the login. Never let one motel reset the
+      // password of a login that also works at another motel.
+      const [elsewhere] = await productionSql()<Array<{ count: number }>>`
+        select count(*)::int as count from property_memberships where auth_user_id=${user.authUserId}::uuid and property_id<>${session.propertyId}::uuid and active
+      `;
+      if (elsewhere.count > 0) return Response.json({ error: "This login is also used at another property. Its password can only be reset by the person, or by the Platform Admin." }, { status: 403 });
+    }
     if (parsed.data.password) { const { url, secret } = adminConfig(); const response = await fetch(`${url}/auth/v1/admin/users/${user.authUserId}`, { method: "PUT", headers: { apikey: secret, authorization: `Bearer ${secret}`, "content-type": "application/json" }, body: JSON.stringify({ password: parsed.data.password }) }); if (!response.ok) return Response.json({ error: "The password could not be reset." }, { status: 502 }); }
     await productionSql()`update property_memberships set role=coalesce(${parsed.data.role ?? null},role),active=coalesce(${parsed.data.active ?? null},active),updated_at=now() where auth_user_id=${user.authUserId}::uuid and property_id=${session.propertyId}::uuid`;
     return Response.json({ updated: true });

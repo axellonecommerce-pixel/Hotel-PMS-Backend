@@ -1,3 +1,4 @@
+import { bankAccountFor, creditAccountFor, isBankMethod, payOut } from "@/server/finance/cash-sources";
 import type { Sql, TransactionSql } from "postgres";
 
 import { otaDeductsCommission, type OtaPaymentStatus } from "@/domain/rules/commission";
@@ -141,6 +142,13 @@ export async function payReservationCommission(tx: Tx, input: {
     from reservations r join guests g on g.id=r.main_guest_id left join booking_sources bs on bs.id=r.booking_source_id
     where r.id=${input.reservationId}::uuid and r.property_id=${input.propertyId}::uuid
   `;
+  // Paid by check or transfer: it comes out of the motel's default bank account.
+  const bank = isBankMethod(input.paymentMethod) ? await bankAccountFor(tx, input.propertyId).catch(() => null) : null;
+  if (bank) await payOut(tx, {
+    propertyId: input.propertyId, source: "bank", bankAccount: bank, amountCents: outstandingCents, kind: "expense",
+    resourceType: "ota-commission", resourceId: input.reservationId, paidTo: reservation.source, reason: "OTA commission",
+    description: `Commission paid to ${reservation.source} · ${reservation.confirmationNumber}`,
+  });
   await postProductionLedger(tx, {
     propertyId: input.propertyId,
     businessDate: input.paidOn,
@@ -148,7 +156,7 @@ export async function payReservationCommission(tx: Tx, input: {
     resourceId: input.reservationId,
     description: `Commission paid to ${reservation.source} · ${input.paymentMethod}${input.reference ? ` · ${input.reference}` : ""}`,
     debitAccount: "Commission Payable",
-    creditAccount: ["Cash", "Check", "Debit Card"].includes(input.paymentMethod) ? "Cash" : "Accounts Payable",
+    creditAccount: input.paymentMethod === "Cash" ? "Cash" : creditAccountFor(input.paymentMethod, null, bank),
     amountCents: outstandingCents,
   });
   const vendor = await vendorId(tx, input.propertyId, reservation.source);

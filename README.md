@@ -66,6 +66,45 @@ required RLS policy for task records. Verify the resulting deployment with:
 bun run test:rls
 ```
 
+Apply `0019` → `0020` → `0021` → `0022` in order, before deploying the API.
+`0019_cash_sources_and_accounting.sql` adds cash sources (Cash Drop drawer,
+safe, bank) and the Cash & Bank accounting page. It records past cash drops
+into the safe and posts past paid wages to the ledger, once. After applying
+it, open **Cash & Bank → Count the Safe** once per property so the safe
+balance matches the real cash.
+
+## Rules that keep every motel correct
+
+- Times: never hard-code a time zone. The server uses `properties.timezone`;
+  the frontend uses `propertyTimeZone()` (set from Settings › Property).
+- Cash: an expense or wage paid in cash must name its source (`drawer` or
+  `safe`). Drawer cash needs an open shift and appears as a linked paid out;
+  the P&L counts the expense/wage, never the linked paid out.
+- Bank: check, debit card, transfer, ACH, wire, Zelle and direct deposit
+  payments come out of a bank account (`bank_accounts`); the screen
+  preselects the default and the server falls back to it, so a bank payment
+  is never unrecorded. Every motel gets "Main Bank Account" when it is
+  provisioned (`ensureDefaultBankAccount`). Each account's ledger account is
+  `Bank - <name>`. Apply `0020_bank_accounts.sql` after 0019.
+- Payments: every guest, house-account and company payment posts to the
+  ledger (`payment-ledger.ts`); never insert into `payments` without it.
+- Card & check deposits (`0021_card_deposits.sql`): card and check payments
+  wait in "Card & Check Receipts" until a deposit moves them into a bank
+  account; the processor's fee is Card Processing Fees (P&L line 10). A
+  deposited payment cannot be deleted, only refunded.
+- Card terminal (`0022_payment_terminals.sql`, optional per motel): Settings ›
+  Payment Terminal connects Stripe Terminal. The key is AES-256-GCM encrypted
+  (set `PMS_ENCRYPTION_KEY`, 32 random bytes base64, on the API) and kept in a
+  table no login can read. Without a terminal everything works by hand; with
+  one, folio charges go to the reader, refunds go back to the card, and the
+  daily job turns Stripe payouts into deposits with exact fees. New
+  processors go beside `server/terminal/stripe.ts` with the same steps.
+- Night Audit: the manual run sends `expectedBusinessDate` so it can never
+  close a day the scheduled audit already closed. To-do notes never block it.
+- Maintenance: `completed`, `resolved` and `cancelled` are all closed.
+- New tables with `property_id` need the RLS policy (re-run `supabase/rls.sql`)
+  and an entry in `tenant-backup.ts` and the `/api/sync` fingerprint.
+
 The Platform Admin tables are created by
 `drizzle-production/0009_platform_subscriptions.sql`. Card charging is
 deliberately not implemented: subscription payments can be recorded manually

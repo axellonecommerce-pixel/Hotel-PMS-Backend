@@ -23,8 +23,8 @@ export async function GET(request: Request) {
     const session = await requirePropertySession(request, "cash.manage");
     const parsed = rangeSchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
     if (!parsed.success || parsed.data.startDate > parsed.data.endDate) return Response.json({ error: "Choose a valid date range." }, { status: 400 });
-    const paidOuts = await productionSql()<Array<{ id: string; businessDate: string; amountCents: number; paidTo: string; reason: string; note: string | null; createdAt: string }>>`
-      select id, business_date::text as "businessDate", amount_cents as "amountCents", paid_to as "paidTo", reason, note, created_at::text as "createdAt"
+    const paidOuts = await productionSql()<Array<{ id: string; businessDate: string; amountCents: number; paidTo: string; reason: string; note: string | null; createdAt: string; sourceType: string | null }>>`
+      select id, business_date::text as "businessDate", amount_cents as "amountCents", paid_to as "paidTo", reason, note, created_at::text as "createdAt", source_type as "sourceType"
       from paid_outs where property_id=${session.propertyId}::uuid and business_date between ${parsed.data.startDate}::date and ${parsed.data.endDate}::date
       order by created_at desc
     `;
@@ -67,11 +67,12 @@ export async function DELETE(request: Request) {
     const parsed = deleteSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Select a paid out." }, { status: 400 });
     const outcome = await productionSql().begin(async (tx) => {
-      const [paidOut] = await tx<Array<{ id: string; businessDate: string; amountCents: number; paidTo: string }>>`
-        select id, business_date::text as "businessDate", amount_cents as "amountCents", paid_to as "paidTo"
+      const [paidOut] = await tx<Array<{ id: string; businessDate: string; amountCents: number; paidTo: string; sourceType: string | null }>>`
+        select id, business_date::text as "businessDate", amount_cents as "amountCents", paid_to as "paidTo", source_type as "sourceType"
         from paid_outs where id=${parsed.data.id}::uuid and property_id=${session.propertyId}::uuid for update
       `;
       if (!paidOut) return "missing" as const;
+      if (paidOut.sourceType) return "linked" as const;
       if (paidOut.businessDate !== await propertyBusinessDate(tx, session.propertyId)) return "closed" as const;
       await tx`delete from paid_outs where id=${paidOut.id}::uuid`;
       await postProductionLedger(tx, {
@@ -81,6 +82,7 @@ export async function DELETE(request: Request) {
       return "deleted" as const;
     });
     if (outcome === "missing") return Response.json({ error: "Paid out not found." }, { status: 404 });
+    if (outcome === "linked") return Response.json({ error: "This cash was paid for an expense or payroll. Undo it there (mark the pay Pending) instead." }, { status: 409 });
     if (outcome === "closed") return Response.json({ error: "Only today's paid outs can be removed; earlier days are closed." }, { status: 409 });
     return Response.json({ deleted: true });
   } catch (error) {
