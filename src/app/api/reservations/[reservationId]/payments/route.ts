@@ -6,6 +6,7 @@ import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 import { postPaymentLedger, postRefundLedger, reversePaymentLedger } from "@/server/finance/payment-ledger";
+import { isCardMethod } from "@/server/finance/card-settlements";
 import { ProcessorError } from "@/server/terminal/stripe";
 import { refundOnProcessor, TerminalError } from "@/server/terminal/terminal-service";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
@@ -21,6 +22,8 @@ const paymentSchema = z.object({
   note: z.string().trim().max(2_000).optional(),
   last4: z.string().trim().regex(/^\d{4}$/).optional(),
   reference: z.string().trim().max(200).optional(),
+  // The card terminal (any brand) that ran this card.
+  cardTerminalId: z.string().uuid().optional(),
 }).superRefine((value, context) => {
   if (value.method.toUpperCase() === "BAD DEBT" && !value.note?.trim()) {
     context.addIssue({ code: "custom", path: ["note"], message: "A reason is required when recording bad debt." });
@@ -84,9 +87,19 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       const isBadDebt = parsed.data.method.toUpperCase() === "BAD DEBT";
       if (isBadDebt && folio.reservationStatus !== "checked_in") throw new Error("Bad debt can only be recorded for an in-house stay.");
       const businessDate = await propertyBusinessDate(tx, session.propertyId);
+      // A card payment says which terminal ran it whenever the motel has
+      // terminals set up, so every card deposit can be matched to its batch.
+      let cardTerminalId: string | null = null;
+      if (!isBadDebt && isCardMethod(parsed.data.method)) {
+        const terminals = await tx<Array<{ id: string }>>`select id from card_terminals where property_id=${session.propertyId}::uuid and active`;
+        if (terminals.length) {
+          if (!parsed.data.cardTerminalId || !terminals.some((terminal) => terminal.id === parsed.data.cardTerminalId)) throw new Error("Payment needs the card terminal that ran the card. Choose it in the payment form.");
+          cardTerminalId = parsed.data.cardTerminalId;
+        }
+      }
       const [created] = await tx<Array<{ id: string; createdAt: string }>>`
-        insert into payments (property_id,reservation_id,method,amount_cents,currency_code,effective_date,last4,external_reference,note)
-        values (${session.propertyId}::uuid,${reservationId}::uuid,${parsed.data.method},${parsed.data.amountCents},'USD',${businessDate}::date,${parsed.data.last4 ?? null},${parsed.data.reference ?? null},${parsed.data.note ?? null})
+        insert into payments (property_id,reservation_id,method,amount_cents,currency_code,effective_date,last4,external_reference,note,card_terminal_id)
+        values (${session.propertyId}::uuid,${reservationId}::uuid,${parsed.data.method},${parsed.data.amountCents},'USD',${businessDate}::date,${parsed.data.last4 ?? null},${parsed.data.reference ?? null},${parsed.data.note ?? null},${cardTerminalId}::uuid)
         returning id,created_at::text as "createdAt"
       `;
       await tx`insert into payment_allocations (property_id,payment_id,folio_id,amount_cents) values (${session.propertyId}::uuid,${created.id}::uuid,${folio.id}::uuid,${parsed.data.amountCents})`;

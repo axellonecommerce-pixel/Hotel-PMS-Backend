@@ -19,22 +19,23 @@ const SKIPPED_METHODS = ["BAD DEBT", "OTA COMMISSION", "DIRECT BILL"];
 export const isCardMethod = (method: string) => /card|credit|debit|visa|master|amex|american express|discover/i.test(method) && !/^cash$/i.test(method.trim());
 
 /** viaTerminal: taken on the connected card terminal; its processor's payouts deposit it with exact fees. */
-export type DepositItem = { kind: "payment" | "refund"; id: string; date: string; method: string; amountCents: number; payer: string; card: boolean; viaTerminal: boolean };
+export type DepositItem = { kind: "payment" | "refund"; id: string; date: string; method: string; amountCents: number; payer: string; card: boolean; viaTerminal: boolean; cardTerminalId: string | null; cardTerminalName: string | null };
 
 /** Card and check payments (and refunds of them) not yet deposited. Refunds are negative. */
 export async function pendingDepositItems(db: Db, propertyId: string): Promise<DepositItem[]> {
   const rows = await db<Array<Omit<DepositItem, "card">>>`
     select 'payment' as kind, p.id, p.effective_date::text as date, p.method, p.amount_cents as "amountCents",
-      coalesce(g.first_name||' '||g.last_name, ha.name, c.name, 'Payment') as payer, p.terminal_payment_id is not null as "viaTerminal"
-    from payments p
+      coalesce(g.first_name||' '||g.last_name, ha.name, c.name, 'Payment') as payer, p.terminal_payment_id is not null as "viaTerminal",
+      p.card_terminal_id as "cardTerminalId", ct.name as "cardTerminalName"
+    from payments p left join card_terminals ct on ct.id=p.card_terminal_id
     left join reservations r on r.id=p.reservation_id left join guests g on g.id=r.main_guest_id
     left join house_accounts ha on ha.id=p.house_account_id left join companies c on c.id=p.company_id
     where p.property_id=${propertyId}::uuid and p.settlement_id is null and lower(trim(p.method))<>'cash'
       and upper(p.method) not in ${db(SKIPPED_METHODS)} and p.amount_cents>0
     union all
     select 'refund', rf.id, rf.effective_date::text, p.method, -rf.amount_cents,
-      coalesce(g.first_name||' '||g.last_name, 'Refund'), p.terminal_payment_id is not null
-    from refunds rf join payments p on p.id=rf.payment_id
+      coalesce(g.first_name||' '||g.last_name, 'Refund'), p.terminal_payment_id is not null, p.card_terminal_id, ct.name
+    from refunds rf join payments p on p.id=rf.payment_id left join card_terminals ct on ct.id=p.card_terminal_id
     left join reservations r on r.id=p.reservation_id left join guests g on g.id=r.main_guest_id
     where rf.property_id=${propertyId}::uuid and rf.settlement_id is null and lower(trim(p.method))<>'cash'
       and upper(p.method) not in ${db(SKIPPED_METHODS)} and rf.amount_cents>0
@@ -146,23 +147,35 @@ const addDays = (date: string, days: number) => {
 export async function autoDepositCards(tx: Tx, propertyId: string) {
   const settings = await autoDepositSettings(tx, propertyId);
   if (!settings.enabled) return 0;
-  const bank = await bankAccountFor(tx, propertyId, settings.bankAccountId).catch(() => null);
-  if (!bank) return 0;
+  const fallbackBank = await bankAccountFor(tx, propertyId, settings.bankAccountId).catch(() => null);
+  // Each terminal deposits into its own account after its own delay.
+  const terminals = new Map((await tx<Array<{ id: string; bankAccountId: string | null; delayDays: number }>>`
+    select id, deposit_bank_account_id as "bankAccountId", deposit_delay_days as "delayDays" from card_terminals where property_id=${propertyId}::uuid
+  `).map((terminal) => [terminal.id, terminal]));
+  const delayOf = (item: DepositItem) => (item.cardTerminalId ? terminals.get(item.cardTerminalId)?.delayDays : undefined) ?? settings.delayDays;
   const today = await propertyBusinessDate(tx, propertyId);
-  // Terminal payments are deposited from the processor's real payouts instead.
-  const due = (await pendingDepositItems(tx, propertyId)).filter((item) => item.card && !item.viaTerminal && addDays(item.date, settings.delayDays) <= today);
+  // Integrated-terminal payments are deposited from the processor's real payouts instead.
+  const due = (await pendingDepositItems(tx, propertyId)).filter((item) => item.card && !item.viaTerminal && addDays(item.date, delayOf(item)) <= today);
   const byDay = new Map<string, DepositItem[]>();
-  for (const item of due) byDay.set(item.date, [...(byDay.get(item.date) ?? []), item]);
+  for (const item of due) {
+    const key = `${item.date}|${item.cardTerminalId ?? ""}`;
+    byDay.set(key, [...(byDay.get(key) ?? []), item]);
+  }
   let created = 0;
-  for (const [date, items] of byDay) {
+  for (const [key, items] of byDay) {
+    const date = key.split("|")[0];
+    const terminal = items[0].cardTerminalId ? terminals.get(items[0].cardTerminalId) : undefined;
+    const bank = terminal?.bankAccountId ? await bankAccountFor(tx, propertyId, terminal.bankAccountId).catch(() => fallbackBank) : fallbackBank;
+    if (!bank) continue;
+    const delay = delayOf(items[0]);
     const grossCents = items.reduce((sum, item) => sum + item.amountCents, 0);
     if (grossCents <= 0) continue;
     const feeCents = Math.max(0, Math.round(grossCents * Math.min(Math.max(settings.feePercent, 0), 20) / 100));
     await settleDeposit(tx, {
-      propertyId, bankAccount: bank, automatic: true, depositDate: addDays(date, settings.delayDays), netCents: grossCents - feeCents,
+      propertyId, bankAccount: bank, automatic: true, depositDate: addDays(date, delay), netCents: grossCents - feeCents,
       paymentIds: items.filter((item) => item.kind === "payment").map((item) => item.id),
       refundIds: items.filter((item) => item.kind === "refund").map((item) => item.id),
-      note: `Card sales of ${date}; fee estimated at ${settings.feePercent}%`,
+      note: `${items[0].cardTerminalName ? `${items[0].cardTerminalName} · ` : ""}card sales of ${date}; fee estimated at ${settings.feePercent}%`,
     });
     created += 1;
   }

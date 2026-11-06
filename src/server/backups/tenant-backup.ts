@@ -3,7 +3,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { downloadPrivateBytes, uploadPrivateBytes } from "@/server/storage/private-files";
 
 const tableOrder = [
-  "property_settings","employees","bank_accounts","card_settlements","property_tasks","room_types","rooms","rate_calendar","maintenance_schedules","guests","guest_remarks","guest_identities","guest_payment_sources","guest_vehicles",
+  "property_settings","employees","bank_accounts","card_terminals","card_settlements","property_tasks","room_types","rooms","rate_calendar","maintenance_schedules","guests","guest_remarks","guest_identities","guest_payment_sources","guest_vehicles",
   "companies","company_contacts","company_room_rates","booking_sources","promotions","promotion_room_types","tax_definitions","charge_types",
   "registration_rule_versions","reservations","reservation_rooms","reservation_guests","dnr_overrides","registration_acceptances","nightly_rates",
   "reservation_promotions","room_moves","reservation_activity","lost_found_items","document_sequences","folios","terminal_payments","charges","charge_taxes",
@@ -17,7 +17,7 @@ const tableOrder = [
 // These records define the property rather than its day-to-day activity. A
 // reset must keep them so the motel does not need to be configured again.
 const settingsTables = new Set<string>([
-  "property_settings", "employees", "bank_accounts", "room_types", "rooms", "booking_sources",
+  "property_settings", "employees", "bank_accounts", "card_terminals", "room_types", "rooms", "booking_sources",
   "promotions", "promotion_room_types", "tax_definitions", "charge_types",
   "registration_rule_versions", "document_sequences", "rate_calendar", "maintenance_schedules",
   "companies", "company_contacts", "company_room_rates",

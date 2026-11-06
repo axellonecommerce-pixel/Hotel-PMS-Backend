@@ -66,7 +66,7 @@ required RLS policy for task records. Verify the resulting deployment with:
 bun run test:rls
 ```
 
-Apply `0019` → `0020` → `0021` → `0022` in order, before deploying the API.
+Apply `0019` → `0020` → `0021` → `0022` → `0023` in order, before deploying the API.
 `0019_cash_sources_and_accounting.sql` adds cash sources (Cash Drop drawer,
 safe, bank) and the Cash & Bank accounting page. It records past cash drops
 into the safe and posts past paid wages to the ledger, once. After applying
@@ -92,6 +92,11 @@ balance matches the real cash.
   wait in "Card & Check Receipts" until a deposit moves them into a bank
   account; the processor's fee is Card Processing Fees (P&L line 10). A
   deposited payment cannot be deleted, only refunded.
+- Card terminals of any brand (`0023_card_terminals.sql`): Settings › Payment
+  Terminals lists the motel's terminals (Chase, Clover, Square, Worldpay,
+  Fiserv, …). A card payment must name its terminal once a motel has any;
+  deposits are matched per terminal, by hand or by importing the
+  processor's deposit report (CSV, column mapping remembered per terminal).
 - Card terminal (`0022_payment_terminals.sql`, optional per motel): Settings ›
   Payment Terminal connects Stripe Terminal. The key is AES-256-GCM encrypted
   (set `PMS_ENCRYPTION_KEY`, 32 random bytes base64, on the API) and kept in a

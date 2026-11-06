@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 let cashMovementsReady = false;
 async function hasCashMovements() {
   if (cashMovementsReady) return true;
-  const [row] = await productionSql()<Array<{ ready: boolean }>>`select to_regclass('public.cash_movements') is not null and to_regclass('public.bank_accounts') is not null and to_regclass('public.card_settlements') is not null and to_regclass('public.terminal_payments') is not null as ready`;
+  const [row] = await productionSql()<Array<{ ready: boolean }>>`select to_regclass('public.cash_movements') is not null and to_regclass('public.bank_accounts') is not null and to_regclass('public.card_settlements') is not null and to_regclass('public.terminal_payments') is not null and to_regclass('public.card_terminals') is not null as ready`;
   cashMovementsReady = row.ready;
   return cashMovementsReady;
 }
@@ -27,7 +27,7 @@ export async function GET(request: Request) {
     const id = session.propertyId;
     const sql = productionSql();
     const cashMovements = await hasCashMovements()
-      ? sql`(select concat(max(created_at), ':', count(*)) from cash_movements where property_id=${id}::uuid) || '|' || coalesce((select concat(max(updated_at), ':', count(*)) from bank_accounts where property_id=${id}::uuid),'') || '|' || coalesce((select concat(max(created_at), ':', count(*)) from card_settlements where property_id=${id}::uuid),'') || '|' || coalesce((select concat(max(updated_at), ':', count(*)) from terminal_payments where property_id=${id}::uuid),'')`
+      ? sql`(select concat(max(created_at), ':', count(*)) from cash_movements where property_id=${id}::uuid) || '|' || coalesce((select concat(max(updated_at), ':', count(*)) from bank_accounts where property_id=${id}::uuid),'') || '|' || coalesce((select concat(max(created_at), ':', count(*)) from card_settlements where property_id=${id}::uuid),'') || '|' || coalesce((select concat(max(updated_at), ':', count(*)) from terminal_payments where property_id=${id}::uuid),'') || '|' || coalesce((select concat(max(updated_at), ':', count(*)) from card_terminals where property_id=${id}::uuid),'')`
       : sql`''`;
     const [row] = await productionSql()<Array<{ version: string }>>`
       select md5(concat_ws('|',
