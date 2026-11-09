@@ -51,30 +51,40 @@ export async function GET(request: Request) {
         note: "Only completed clock-in/clock-out records are included. Open shifts are intentionally excluded from payroll-ready hours.",
       } });
     }
-    const byEmployee = new Map<string, { minutes: number; rooms: number; cost: number }>();
+    // One row per day per housekeeper (several clock-ins on a day are added
+    // together; rooms cleaned are counted once per day). The report's total
+    // row adds up every day.
+    const byDay = new Map<string, { date: string; employee: string; minutes: number; rooms: number; cost: number }>();
     records.forEach((record) => {
-      const current = byEmployee.get(record.employee) ?? { minutes: 0, rooms: 0, cost: 0 };
-      current.minutes += record.paidMinutes; current.rooms += record.roomsCleaned; current.cost += Math.round(record.paidMinutes * record.hourlyRateCents / 60);
-      byEmployee.set(record.employee, current);
+      const key = `${record.workDate}|${record.employee}`;
+      const current = byDay.get(key) ?? { date: record.workDate, employee: record.employee, minutes: 0, rooms: record.roomsCleaned, cost: 0 };
+      current.minutes += record.paidMinutes; current.cost += Math.round(record.paidMinutes * record.hourlyRateCents / 60);
+      byDay.set(key, current);
     });
-    const rows = [...byEmployee.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([employee, value]) => ({
-      id: employee, employee, hours: minutesToHours(value.minutes), rooms: value.rooms, cost: value.cost,
+    const rows = [...byDay.values()].sort((left, right) => left.date.localeCompare(right.date) || left.employee.localeCompare(right.employee)).map((value) => ({
+      id: `${value.date}|${value.employee}`, date: value.date, employee: value.employee, hours: minutesToHours(value.minutes), rooms: value.rooms, cost: value.cost,
+      roomsPerHour: value.minutes ? Math.round(value.rooms / (value.minutes / 60) * 10) / 10 : 0,
       costPerRoom: value.rooms ? Math.round(value.cost / value.rooms) : 0,
     }));
+    const totalRooms = rows.reduce((sum, row) => sum + row.rooms, 0);
+    const totalCost = rows.reduce((sum, row) => sum + row.cost, 0);
+    const totalMinutes = records.reduce((sum, record) => sum + record.paidMinutes, 0);
     return Response.json({ report: {
       metrics: [
-        { label: "Housekeepers", value: rows.length, format: "number" },
-        { label: "Rooms Cleaned", value: rows.reduce((sum, row) => sum + row.rooms, 0), format: "number" },
-        { label: "Labor Hours", value: minutesToHours(records.reduce((sum, record) => sum + record.paidMinutes, 0)), format: "hours" },
-        { label: "Labor Cost", value: rows.reduce((sum, row) => sum + row.cost, 0), format: "money" },
+        { label: "Housekeepers", value: new Set(rows.map((row) => row.employee)).size, format: "number" },
+        { label: "Rooms Cleaned", value: totalRooms, format: "number" },
+        { label: "Labor Hours", value: minutesToHours(totalMinutes), format: "hours" },
+        { label: "Labor Cost", value: totalCost, format: "money" },
+        { label: "Cost / Room", value: totalRooms ? Math.round(totalCost / totalRooms) : 0, format: "money" },
       ],
       columns: [
-        { key: "employee", label: "Housekeeper" }, { key: "hours", label: "Paid Hours", format: "hours", align: "right" },
-        { key: "rooms", label: "Rooms Cleaned", format: "number", align: "right" }, { key: "cost", label: "Labor Cost", format: "money", align: "right" },
+        { key: "date", label: "Date", format: "date" }, { key: "employee", label: "Housekeeper" }, { key: "hours", label: "Paid Hours", format: "hours", align: "right" },
+        { key: "rooms", label: "Rooms Cleaned", format: "number", align: "right" }, { key: "roomsPerHour", label: "Rooms / Hour", align: "right" },
+        { key: "cost", label: "Labor Cost", format: "money", align: "right" },
         { key: "costPerRoom", label: "Cost / Room", format: "money", align: "right" },
       ],
       rows,
-      note: "Productivity uses completed housekeeping assignments matched to completed employee time entries in the selected range.",
+      note: "One row per day for each housekeeper, with the total at the bottom. Productivity uses completed housekeeping assignments matched to completed time entries on the same day.",
     } });
   } catch (error) { return propertyAccessResponse(error); }
 }

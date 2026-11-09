@@ -29,9 +29,12 @@ export async function GET(request: Request) {
       completedAt: string | null;
     }>>`
       select nar.id,bd.business_date::text as "businessDate",nar.trigger,nar.status,
-        nar.blocking_issues as blockers,nar.completed_at::text as "completedAt"
+        nar.blocking_issues as blockers,
+        -- In the motel's own time zone (the server runs on UTC).
+        to_char(nar.completed_at at time zone p.timezone, 'FMMM/FMDD/YYYY, FMHH12:MI AM') as "completedAt"
       from night_audit_runs nar
       join business_days bd on bd.id=nar.business_day_id
+      join properties p on p.id=nar.property_id
       where nar.property_id=${session.propertyId}::uuid
         and bd.business_date between ${input.data.startDate}::date and ${input.data.endDate}::date
       order by bd.business_date desc,nar.completed_at desc nulls last
@@ -62,7 +65,7 @@ export async function GET(request: Request) {
           status: run.status === "completed" ? "Completed" : "Blocked",
           trigger: run.trigger === "scheduled" ? "Scheduled" : "Manual",
           blockers: blockerText(run.blockers),
-          completed: run.completedAt ? new Date(run.completedAt).toLocaleString("en-US") : "—",
+          completed: run.completedAt ?? "—",
         })),
         note: "This report is read-only. Resolve any listed blockers before the next business-day close.",
       },

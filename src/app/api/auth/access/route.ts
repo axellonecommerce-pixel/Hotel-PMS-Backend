@@ -1,3 +1,4 @@
+import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import {
   propertyAccessResponse,
   requirePropertySession,
@@ -25,10 +26,19 @@ export async function GET(request: Request) {
   }
   try {
     const session = await requirePropertySession(request, "reports.view");
+    // Who is signed in (shown at the top right): their employee name and login email.
+    const [user] = hasProductionDatabase() && /^[0-9a-f-]{36}$/i.test(session.authUserId) ? await productionSql()<Array<{ name: string | null; email: string | null }>>`
+      select
+        (select e.name from employees e join property_memberships m on m.id=e.membership_id
+          where m.auth_user_id=${session.authUserId}::uuid and m.property_id=${session.propertyId}::uuid order by e.created_at limit 1) as name,
+        (select u.email from auth.users u where u.id=${session.authUserId}::uuid) as email
+    `.catch(() => [{ name: null, email: null }]) : [{ name: null, email: null }];
     return Response.json({
       access: "property",
       propertyId: session.propertyId,
       role: session.role,
+      name: user?.name ?? null,
+      email: user?.email ?? null,
     });
   } catch (propertyError) {
     // Platform administrators do not belong to a motel. Check that separate,

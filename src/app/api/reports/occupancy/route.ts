@@ -30,7 +30,7 @@ export async function GET(request: Request) {
         count(*) filter (where cleanliness_status <> 'clean')::int as "dirtyRooms"
       from rooms where property_id=${session.propertyId}::uuid and active=true
     `;
-    const daily = await productionSql()<Array<{ date: string; occupied: number; dayUse: number; arrivals: number }>>`
+    const daily = await productionSql()<Array<{ date: string; occupied: number; dayUse: number; arrivals: number; departures: number; cleaned: number }>>`
       select day::date::text as date,
         coalesce((select count(distinct rr.room_id)
           from reservation_rooms rr
@@ -40,7 +40,8 @@ export async function GET(request: Request) {
             and rr.status in ('reserved','checked_in','checked_out')
             and r.status not in ('cancelled','no_show')
             and r.arrival_date <= day::date
-            and r.departure_date > day::date),0)::int as occupied,
+            and r.departure_date > day::date
+            and (rr.checked_out_at is null or (rr.checked_out_at at time zone coalesce((select timezone from properties where id=${session.propertyId}::uuid),'UTC'))::date > day::date)),0)::int as occupied,
         coalesce((select count(distinct rr.room_id)
           from reservation_rooms rr
           join reservations r on r.id=rr.reservation_id
@@ -52,7 +53,12 @@ export async function GET(request: Request) {
         coalesce((select count(*) from reservations r
           where r.property_id=${session.propertyId}::uuid
             and r.arrival_date=day::date
-            and r.status in ('reserved','checked_in','checked_out')),0)::int as arrivals
+            and r.status in ('reserved','checked_in','checked_out')),0)::int as arrivals,
+        -- Rooms that checked out (or are due out) that day, and rooms housekeeping finished that day.
+        coalesce((select count(distinct rr.room_id) from reservation_rooms rr join reservations r on r.id=rr.reservation_id
+          where r.property_id=${session.propertyId}::uuid and rr.room_id is not null and rr.status in ('checked_in','checked_out','reserved')
+            and r.status not in ('cancelled','no_show') and r.departure_date=day::date and r.arrival_date < day::date),0)::int as departures,
+        coalesce((select count(*) from housekeeping_records h where h.property_id=${session.propertyId}::uuid and h.service_date=day::date and h.assignment_status='completed'),0)::int as cleaned
       from generate_series(${input.data.startDate}::date,${input.data.endDate}::date,'1 day'::interval) as days(day)
       order by day
     `;
@@ -64,8 +70,9 @@ export async function GET(request: Request) {
       date: record.date,
       occupied: record.occupied,
       arrival: record.arrivals,
-      availableClean: Math.max(0, rentableRooms - dirtyRooms - record.occupied),
-      dirty: dirtyRooms,
+      departures: record.departures,
+      cleaned: record.cleaned,
+      available: Math.max(0, rentableRooms - record.occupied),
       dayUse: record.dayUse,
       occupancyRate: rentableRooms ? ((record.occupied + record.dayUse) / rentableRooms) * 100 : 0,
     })).reverse();
@@ -73,7 +80,8 @@ export async function GET(request: Request) {
     return Response.json({
       report: {
         metrics: [
-          { label: "Current Available / Clean", value: Math.max(0, rentableRooms - dirtyRooms - (daily.at(-1)?.occupied ?? 0)), format: "number" },
+          { label: "Dirty Now", value: dirtyRooms, format: "number" },
+          { label: "Rooms Cleaned", value: daily.reduce((total, record) => total + record.cleaned, 0), format: "number" },
           { label: "Average Occupancy", value: occupancyRates.length ? occupancyRates.reduce((sum, value) => sum + value, 0) / occupancyRates.length : 0, format: "percent" },
           { label: "Peak Occupied", value: daily.length ? Math.max(...daily.map((record) => record.occupied)) : 0, format: "number" },
           { label: "Total Inventory", value: totalRooms, format: "number" },
@@ -83,12 +91,13 @@ export async function GET(request: Request) {
           { key: "occupied", label: "Occupied", format: "number", align: "right" },
           { key: "dayUse", label: "Day Use Sold", format: "number", align: "right" },
           { key: "arrival", label: "Scheduled Arrivals", format: "number", align: "right" },
-          { key: "availableClean", label: "Available / Clean", format: "number", align: "right" },
-          { key: "dirty", label: "Dirty Now", format: "number", align: "right" },
+          { key: "departures", label: "Departures", format: "number", align: "right" },
+          { key: "cleaned", label: "Rooms Cleaned", format: "number", align: "right" },
+          { key: "available", label: "Available to Sell", format: "number", align: "right" },
           { key: "occupancyRate", label: "Occupancy (Rentable)", format: "percent", align: "right" },
         ],
         rows,
-        note: "Occupied room-nights come from saved room assignments. Same-day day-use stays count as rooms sold but do not reduce overnight availability. Cleanliness and service readiness reflect current inventory, not reconstructed historical housekeeping state.",
+        note: "Occupied room-nights come from saved room assignments. Same-day day-use stays count as rooms sold but do not reduce overnight availability. Each day shows its own departures, rooms housekeeping finished, and rooms left to sell (rentable minus occupied). Dirty Now is today's live count. A guest who checked out early is not counted on the nights after.",
       },
     });
   } catch (error) {

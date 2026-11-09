@@ -41,6 +41,10 @@ const requestSchema = z.object({
   newRateCents: z.number().int().nonnegative().max(10_000_000).optional(),
   // A group can move any one of its rooms; defaults to the first active room.
   reservationRoomId: z.string().uuid().optional(),
+  // correction: the room was entered wrong (for example the wrong room at
+  // check-in, or on a checked-out stay). The record is fixed without a Room
+  // Move entry and the old room is not made dirty: nobody stayed in it.
+  kind: z.enum(["move", "correction"]).default("move"),
 }).refine((value) => value.rateDecision !== "custom" || value.newRateCents !== undefined, { message: "Enter the new nightly rate." })
   .refine((value) => value.moves?.length || value.destinationRoomNumber, { message: "Choose a room." });
 
@@ -63,13 +67,18 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       `;
       if (!reservation) return { error: "Reservation not found.", status: 404 } as const;
       if (reservation.version !== input.data.expectedVersion) return { error: "Another employee changed this reservation. Review the latest version before moving the room.", status: 409, code: "EDIT_CONFLICT", currentVersion: reservation.version } as const;
-      if (reservation.status !== "reserved" && reservation.status !== "checked_in") return { error: "Only an arriving or in-house guest can be moved.", status: 409 } as const;
+      const correction = input.data.kind === "correction";
+      if (reservation.status === "checked_out" && !correction) return { error: "A checked-out stay cannot be moved. Use Correct Room to fix the room on its record.", status: 409 } as const;
+      if (reservation.status !== "reserved" && reservation.status !== "checked_in" && reservation.status !== "checked_out") return { error: "Only an arriving, in-house or checked-out stay can change rooms.", status: 409 } as const;
+      if (correction && !input.data.remark) return { error: "Enter why the room is being corrected.", status: 400 } as const;
+      // Consumed nights keep their rate; a checked-out stay's rate is corrected in Rates.
+      if (reservation.status === "checked_out" && input.data.rateDecision !== "keep") return { error: "Keep the rate when correcting a checked-out stay's room; change the amount in Rates.", status: 400 } as const;
 
       const activeRooms = await tx<Array<{ id: string; roomId: string | null; roomNumber: string | null; status: string }>>`
         select rr.id,rr.room_id as "roomId",r.number as "roomNumber",rr.status
         from reservation_rooms rr left join rooms r on r.id=rr.room_id
         where rr.reservation_id=${reservation.id}::uuid and rr.property_id=${session.propertyId}::uuid
-          and rr.status in ('reserved','checked_in')
+          and rr.status in ${tx(reservation.status === "checked_out" ? ["checked_out"] : ["reserved", "checked_in"])}
         order by rr.created_at for update of rr
       `;
       if (!activeRooms.length) return { error: "This reservation has no active room to move.", status: 409 } as const;
@@ -92,7 +101,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       if (roomMoves.length) await tx`update reservation_rooms set room_id=null where id in ${tx(roomMoves.map((move) => move.reservationRoom.id))}`;
       const moved: Array<{ reservationRoomId: string; room: string; roomTypeId: string; fromRoomDirty: boolean; destinationDirty: boolean }> = [];
       for (const { reservationRoom, destinationRoomNumber } of roomMoves) {
-        const inHouse = reservationRoom.status === "checked_in";
+        const inHouse = reservationRoom.status === "checked_in" && !correction;
 
         const [destination] = await tx<Array<{ id: string; number: string; roomTypeId: string; baseRateCents: number; cleanliness: string; service: string }>>`
           select r.id,r.number,r.room_type_id as "roomTypeId",rt.base_rate_cents as "baseRateCents",r.cleanliness_status as cleanliness,r.service_status as service
@@ -104,7 +113,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         const [occupied] = await tx<Array<{ id: string }>>`
           select rr.id from reservation_rooms rr join reservations r on r.id=rr.reservation_id
           where rr.property_id=${session.propertyId}::uuid and rr.room_id=${destination.id}::uuid and rr.id<>${reservationRoom.id}::uuid
-            and rr.status in ('reserved','checked_in') and r.status in ('reserved','checked_in')
+            and rr.status in ${tx(reservation.status === "checked_out" ? ["reserved", "checked_in", "checked_out"] : ["reserved", "checked_in"])} and r.status in ${tx(reservation.status === "checked_out" ? ["reserved", "checked_in", "checked_out"] : ["reserved", "checked_in"])}
             and r.arrival_date<greatest(${reservation.departureDate}::date, ${reservation.arrivalDate}::date + 1) and greatest(r.departure_date, r.arrival_date + 1)>${reservation.arrivalDate}::date
           limit 1 for update of rr
         `;
@@ -217,7 +226,9 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
         }
         const rateNote = input.data.rateDecision === "keep" ? "kept the existing rate" : input.data.rateDecision === "custom" ? `new rate ${money(input.data.newRateCents!)} per night` : `room type rate ${money(destination.baseRateCents)} per night`;
         const remarkNote = input.data.remark ? ` · ${input.data.remark}` : "";
-        await logReservationActivity(tx, session, reservation.id, "Room", !reservationRoom.roomNumber
+        await logReservationActivity(tx, session, reservation.id, "Room", correction && reservationRoom.roomNumber
+          ? `Room corrected ${reservationRoom.roomNumber} → ${destination.number} (entered wrong; no move)${remarkNote}`
+          : !reservationRoom.roomNumber
           ? `Room ${destination.number} assigned${remarkNote}`
           : inHouse
             ? `Room moved ${reservationRoom.roomNumber} → ${destination.number} · ${rateNote}${remarkNote}`

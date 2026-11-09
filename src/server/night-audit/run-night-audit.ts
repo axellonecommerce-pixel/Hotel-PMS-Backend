@@ -4,6 +4,7 @@ import { nightAuditBlockers } from "@/domain/rules/reservation-lifecycle";
 import { postProductionLedger, reversalBusinessDate } from "@/server/finance/production-finance";
 import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
+import { pastReservationsWithBalance } from "@/server/night-audit/open-balances";
 
 type Tx = TransactionSql<Record<string, never>>;
 
@@ -115,7 +116,7 @@ async function releaseUnarrivedReservations(tx: Tx, propertyId: string, business
 }
 
 /** One line of what a night audit did, shown on the Night Audit page. */
-export type NightAuditStep = { step: string; detail: string; status: "done" | "blocked" | "info" };
+export type NightAuditStep = { step: string; detail: string; status: "done" | "blocked" | "info" | "warning" };
 
 const usd = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 
@@ -195,6 +196,11 @@ export async function runNightAudit(tx: Tx, input: { propertyId: string; trigger
   steps.push({ step: "Posted room charges", detail: `${revenue.nights} room night${revenue.nights === 1 ? "" : "s"} for ${day.businessDate}: room rent ${usd(revenue.rentCents)} + tax ${usd(revenue.taxCents)}.`, status: "done" });
   steps.push({ step: "Posted extra charges", detail: revenue.extraCount ? `${revenue.extraCount} extra charge${revenue.extraCount === 1 ? "" : "s"} totaling ${usd(revenue.extraCents)}.` : "No extra charges today.", status: revenue.extraCount ? "done" : "info" });
   steps.push({ step: "Payments for the day", detail: `${usd(revenue.paymentCents)} collected on ${day.businessDate}.`, status: "info" });
+  // Red flag (does not stop the audit): finished stays whose folio is not settled.
+  const open = await pastReservationsWithBalance(tx, input.propertyId);
+  steps.push(open.length
+    ? { step: "Past reservations with an open balance", detail: `${open.length} need settling: ${open.slice(0, 8).map((item) => `${item.confirmationNumber} ${item.guest} ${item.balanceCents > 0 ? `owes ${usd(item.balanceCents)}` : `${usd(-item.balanceCents)} credit`}`).join("; ")}${open.length > 8 ? "; …" : ""}.`, status: "warning" }
+    : { step: "Past reservations with an open balance", detail: "Every checked-out, no-show and cancelled reservation is settled.", status: "done" });
   // Every occupied room (stay-over or due out) needs service tomorrow.
   const dirtied = await tx<Array<{ number: string }>>`
     update rooms r set cleanliness_status='dirty',updated_at=now()

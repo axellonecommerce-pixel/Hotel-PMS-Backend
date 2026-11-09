@@ -7,6 +7,8 @@ import { listOtaCommissions } from "@/server/finance/ota-commission";
 const querySchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  // Print one reservation source (Booking.com, Expedia, …) or all.
+  source: z.string().trim().max(120).optional(),
 });
 
 const statusLabel: Record<string, string> = { reserved: "Reserved", checked_in: "Checked In", checked_out: "Checked Out", cancelled: "Cancelled", no_show: "No Show" };
@@ -18,7 +20,9 @@ export async function GET(request: Request) {
     const input = querySchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
     if (!input.success || input.data.startDate > input.data.endDate) return Response.json({ error: "Choose a valid report date range." }, { status: 400 });
     if (!hasProductionDatabase()) return Response.json({ error: "The production reporting database is unavailable." }, { status: 503 });
-    const rows = await listOtaCommissions(productionSql(), session.propertyId, input.data.startDate, input.data.endDate);
+    const allRows = await listOtaCommissions(productionSql(), session.propertyId, input.data.startDate, input.data.endDate);
+    const sources = [...new Set(allRows.map((row) => row.source))].sort((left, right) => left.localeCompare(right));
+    const rows = input.data.source ? allRows.filter((row) => row.source === input.data.source) : allRows;
     const total = (pick: (row: (typeof rows)[number]) => number) => rows.reduce((sum, row) => sum + pick(row), 0);
     const bySource = new Map<string, { count: number; commission: number }>();
     rows.forEach((row) => {
@@ -26,6 +30,7 @@ export async function GET(request: Request) {
       bySource.set(row.source, { count: current.count + 1, commission: current.commission + row.commissionCents });
     });
     return Response.json({ report: {
+      filters: [{ key: "source", label: "Reservation Source", options: sources.map((source) => ({ value: source, label: source })) }],
       metrics: [
         { label: "OTA Gross Amount", value: total((row) => row.grossCents), format: "money" },
         { label: "OTA Tax Amount", value: total((row) => row.taxCents), format: "money" },
@@ -75,7 +80,7 @@ export async function GET(request: Request) {
         paidOn: row.paidOn ?? "",
         paymentMethod: row.paymentMethod ?? "—",
       })),
-      note: `By source: ${[...bySource.entries()].map(([source, value]) => `${source} ${value.count} reservation${value.count === 1 ? "" : "s"}, $${(value.commission / 100).toFixed(2)} commission`).join(" · ") || "no OTA reservations"}. Commission is calculated on room rent before tax; Paid Online and Virtual Card Pending commissions are deducted by the OTA.`,
+      note: `${input.data.source ? `Reservation source: ${input.data.source}. ` : ""}By source: ${[...bySource.entries()].map(([source, value]) => `${source} ${value.count} reservation${value.count === 1 ? "" : "s"}, $${(value.commission / 100).toFixed(2)} commission`).join(" · ") || "no OTA reservations"}. Commission is calculated on room rent before tax; Paid Online and Virtual Card Pending commissions are deducted by the OTA.`,
     } });
   } catch (error) {
     return propertyAccessResponse(error);

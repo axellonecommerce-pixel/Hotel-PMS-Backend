@@ -920,6 +920,8 @@ const updateSchema = z.object({
   }).optional(),
   // One new dated remark for a department section.
   remark: z.object({ section: z.enum(["booking", "stay", "housekeeping", "other"]), text: z.string().trim().min(1).max(2_000) }).optional(),
+  // Delete one dated remark (by its id) from a department's remarks.
+  removeRemark: z.object({ section: z.enum(["booking", "stay", "housekeeping", "other"]), id: z.string().trim().min(1).max(100) }).optional(),
   // Group check-in sends the rooms with their intended status so only the
   // selected rooms change.
   reservationRooms: z.array(z.object({ id: z.string().min(1), status: z.string() }).passthrough()).optional(),
@@ -1157,7 +1159,7 @@ async function updateProductionReservation(
       // Stay details and remarks live in the notes JSON; merge rather than
       // overwrite so lifecycle history and booking details are kept.
       let nextNotes = changes.notes !== undefined ? changes.notes ?? null : current.notes;
-      if (changes.details || changes.remark) {
+      if (changes.details || changes.remark || changes.removeRemark) {
         let stored: Record<string, unknown> = {};
         try {
           const parsed = nextNotes ? JSON.parse(nextNotes) : {};
@@ -1171,6 +1173,14 @@ async function updateProductionReservation(
           const list = Array.isArray(remarks[changes.remark.section]) ? remarks[changes.remark.section] : [];
           stored.remarks = { ...remarks, [changes.remark.section]: [...list, { id: crypto.randomUUID(), text: changes.remark.text, createdAt: new Date().toISOString() }].slice(-200) };
           await logReservationActivity(tx, session, id, "Reservation", `Remark added (${changes.remark.section}): ${changes.remark.text.slice(0, 300)}`);
+        }
+        if (changes.removeRemark) {
+          const remarks = (stored.remarks && typeof stored.remarks === "object" ? stored.remarks : {}) as Record<string, Array<{ id: string; text: string; createdAt: string }>>;
+          const list = Array.isArray(remarks[changes.removeRemark.section]) ? remarks[changes.removeRemark.section] : [];
+          const removed = list.find((entry) => entry.id === changes.removeRemark!.id);
+          if (!removed) throw new ReservationRequestError("That remark was already deleted. Reload the reservation.", 409);
+          stored.remarks = { ...remarks, [changes.removeRemark.section]: list.filter((entry) => entry.id !== removed.id) };
+          await logReservationActivity(tx, session, id, "Reservation", `Remark deleted (${changes.removeRemark.section}): ${removed.text.slice(0, 300)}`);
         }
         nextNotes = JSON.stringify(stored);
       }
