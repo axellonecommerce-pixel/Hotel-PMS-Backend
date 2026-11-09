@@ -46,7 +46,7 @@ export async function GET(request: Request) {
     const motels = await productionSql()<Array<Record<string, unknown>>>`
       select p.id,p.name,p.address_line_1 as "addressLine1",p.postal_code as "postalCode",p.city,p.region,p.country_code as "countryCode",p.timezone,p.phone,p.status as "propertyStatus",p.created_at as "createdAt",
         s.plan_name as "planName",s.billing_cycle as "billingCycle",s.amount_cents as "amountCents",s.currency_code as "currencyCode",
-        s.starts_on as "startsOn",s.expires_on as "expiresOn",s.status as "subscriptionStatus",s.notes,
+        s.starts_on::text as "startsOn",s.expires_on::text as "expiresOn",s.status as "subscriptionStatus",s.notes,
         owner.email as "ownerEmail", owner.name as "ownerName",
         coalesce(payments."paymentTotalCents",0)::int as "paymentTotalCents"
       from properties p
@@ -62,7 +62,16 @@ export async function GET(request: Request) {
       where p.status <> 'deleted'
       order by s.expires_on asc nulls last,p.name asc
     `;
-    const today = new Date().toISOString().slice(0, 10);
+    // A subscription lasts until midnight in the motel's own time zone.
+    const localDate = (timeZone: unknown, offsetDays = 0) => {
+      const when = new Date(Date.now() + offsetDays * 86_400_000);
+      try { return new Intl.DateTimeFormat("en-CA", { timeZone: typeof timeZone === "string" && timeZone ? timeZone : "America/Los_Angeles" }).format(when); }
+      catch { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(when); }
+    };
+    for (const motel of motels) {
+      motel.today = localDate(motel.timezone);
+      motel.expired = typeof motel.expiresOn === "string" && motel.expiresOn < (motel.today as string);
+    }
     const metrics = {
       total: motels.length,
       active: motels.filter(
@@ -72,9 +81,8 @@ export async function GET(request: Request) {
       expiringSoon: motels.filter(
         (m) =>
           typeof m.expiresOn === "string" &&
-          m.expiresOn >= today &&
-          m.expiresOn <=
-            new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
+          m.expiresOn >= (m.today as string) &&
+          m.expiresOn <= localDate(m.timezone, 30),
       ).length,
       pastDue: motels.filter((m) => m.subscriptionStatus === "past_due").length,
     };
