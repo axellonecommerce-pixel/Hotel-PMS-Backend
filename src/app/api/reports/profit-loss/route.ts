@@ -27,7 +27,7 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
  */
 export async function GET(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, ["profit_loss.view", "reports.view"]);
     const params = new URL(request.url).searchParams;
     const range = z.object({ start: isoDate, end: isoDate }).safeParse({ start: params.get("start"), end: params.get("end") });
     if (!range.success || range.data.end < range.data.start) return Response.json({ error: "Choose a valid date range." }, { status: 400 });

@@ -22,7 +22,7 @@ async function hasCashMovements() {
 export async function GET(request: Request) {
   try {
     // Every role can view reports, so every signed-in device can sync.
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, "property.read");
     if (!hasProductionDatabase()) return Response.json({ version: "local" });
     const id = session.propertyId;
     const sql = productionSql();

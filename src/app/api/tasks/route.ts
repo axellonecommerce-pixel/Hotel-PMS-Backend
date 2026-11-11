@@ -10,7 +10,7 @@ type TaskRow = { id: string; text: string; area: (typeof areas)[number]; complet
 
 export async function GET(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, "property.read");
     if (!hasProductionDatabase()) return Response.json({ tasks: [] });
     const tasks = await productionSql()<TaskRow[]>`
       select id,text,area,completed,created_at::text as "createdAt"
@@ -23,7 +23,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, "property.read");
     const parsed = createSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Task details are invalid." }, { status: 400 });
     if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
@@ -38,7 +38,7 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, "property.read");
     const parsed = updateSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Task update is invalid." }, { status: 400 });
     if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });

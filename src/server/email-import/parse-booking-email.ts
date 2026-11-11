@@ -15,7 +15,7 @@
 export type EmailBookingKind = "new" | "modified" | "cancelled";
 
 export type EmailBooking = {
-  provider: "SellVEL" | "Stayflexi";
+  provider: "SellVEL" | "Stayflexi" | "Expedia";
   kind: EmailBookingKind;
   /** Where the guest booked: "Website", "Booking.com", "Expedia", … */
   channel: string;
@@ -209,12 +209,92 @@ function readStayflexi(text: string, subject: string): EmailBooking | null {
   };
 }
 
+/**
+ * Expedia Partner Central's own email (booknotif@expedia.com), sent when the
+ * motel is connected to Expedia directly rather than through a channel
+ * manager: "Expedia - New Booking - Arriving on 9 Nov 2026". The stay table
+ * (Check-In, Check-Out, Adults, Kids/Ages, Room Nights) may come label by
+ * label or as a header row followed by a value row.
+ */
+const DATE_TEXT = String.raw`[A-Za-z]{3,9}\.? \d{1,2},? \d{4}`;
+
+function readExpedia(text: string, subject: string): EmailBooking | null {
+  if (!/expedia|hotels\.com|vrbo/i.test(`${subject}\n${text.slice(0, 600)}`) || !/Reservation\s+ID\s*:/i.test(text)) return null;
+  const confirmation = after(text, String.raw`Reservation\s+ID`, String.raw`(\d{6,})`);
+  if (!confirmation) return null;
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  // The stay table: label by label ("Check-In: Nov 9, 2026") or a header row then a values row.
+  const headerAt = lines.findIndex((line) => /^Check-?\s?In\b/i.test(line));
+  const table = headerAt >= 0 ? lines.slice(headerAt, headerAt + 24).join("\n") : "";
+  const dates = [...table.matchAll(new RegExp(`(${DATE_TEXT})`, "g"))].map((match) => namedDate(match[1])).filter((value): value is string => Boolean(value));
+  const checkIn = dates[0];
+  const checkout = dates[1];
+  // Numbers in the table after the check-out date: adults, kids, room nights.
+  const lastDate = [...table.matchAll(new RegExp(DATE_TEXT, "g"))][1];
+  const counts = lastDate ? [...table.slice((lastDate.index ?? 0) + lastDate[0].length).matchAll(/(?:^|[\s:])(\d{1,2})(?=\s|$)/g)].map((match) => Number(match[1])) : [];
+  const labelled = (label: string) => {
+    const value = new RegExp(`${label}\\s*:\\s*(\\d{1,2})\\b`, "i").exec(text)?.[1];
+    return value === undefined ? undefined : Number(value);
+  };
+  const adults = labelled("Adults") ?? counts[0] ?? 1;
+  const children = labelled(String.raw`Kids(?:\s*\/\s*Ages)?`) ?? counts[1] ?? 0;
+  const nights = checkIn && checkout ? nightsBetween(checkIn, checkout) : 0;
+
+  // "Standard Room, 1 King Bed - Standard Rate": the room, without the rate plan.
+  const roomTypeName = after(text, String.raw`Room\s+Type\s+Name`)?.replace(/\s+-\s+[^-]*\brate\b[^-]*$/i, "").trim();
+  // Nightly prices sit between "Daily Rate" and the extra charges and taxes.
+  const rateBlock = /Daily\s+Rate([\s\S]*?)(?:Extra\s+Person|Taxes|Extra\s+Charges|Total\s*:)/i.exec(text)?.[1] ?? "";
+  const listed = [...rateBlock.replace(/Rate\s+Code[^\n]*/gi, "").matchAll(/([\d,]+\.\d{2})/g)].map((match) => cents(match[1])!);
+  const taxCents = amountAfter(text, String.raw`(?:^|\n)[ \t]*Taxes?\s*:`);
+  const totalCents = amountAfter(text, String.raw`(?:^|\n)[ \t]*Total\s*:`);
+  const extraCents = (amountAfter(text, String.raw`Extra\s+Person\s*:`) ?? 0) + (amountAfter(text, String.raw`Extra\s+Charges\s*:`) ?? 0);
+  const listedSum = listed.reduce((sum, value) => sum + value, 0);
+  const subtotalCents = totalCents !== undefined ? totalCents - (taxCents ?? 0) : listedSum || undefined;
+  const nightlyRatesCents = nights <= 0 ? []
+    : listed.length === nights && extraCents === 0 ? listed
+    : listed.length === 1 && extraCents === 0 && (subtotalCents === undefined || subtotalCents === listed[0] * nights) ? Array<number>(nights).fill(listed[0])
+    : subtotalCents !== undefined ? spread(subtotalCents, nights) : [];
+
+  // "Hotel Collects Payment from Guest" (pays at the desk) or "Expedia Collects Payment" (prepaid; Expedia pays the motel).
+  const expediaCollects = /Expedia\s+Collects/i.test(text) && !/Hotel\s+Collects/i.test(text);
+  const heading = /(?:^|\n)\s*((?:New|Modified|Cancell?ed|Changed)\s+Reservation)/i.exec(text)?.[1] ?? "";
+  // "Guest: Spencer Lowell" with the phone on the same line or the next one.
+  const guestAt = lines.findIndex((line) => /^Guest\s*:/i.test(line));
+  const guestLine = guestAt >= 0 ? lines[guestAt].replace(/^Guest\s*:\s*/i, "") : "";
+  const phonePattern = /([+(]?\d[\d ()-]{8,}\d)/;
+  const phone = phonePattern.exec(guestLine)?.[1] ?? (guestAt >= 0 ? phonePattern.exec(/^[+(]?\d/.test(lines[guestAt + 1] ?? "") ? lines[guestAt + 1] : "")?.[1] : undefined);
+  const name = guestLine.replace(/Booked\s+on.*$/i, "").replace(phonePattern, "").trim();
+  const brand = /hotels\.com/i.test(subject) ? "Hotels.com" : /vrbo/i.test(subject) ? "Vrbo" : "Expedia";
+  return {
+    provider: "Expedia",
+    // "NO GUEST NAME CHANGES ALLOWED" in the special request is not a modification.
+    kind: kindOf(`${subject}\n${heading}`),
+    channel: channelName(brand),
+    confirmation,
+    channelConfirmation: confirmation,
+    ...splitName(name),
+    email: after(text, String.raw`Guest\s+Email`, String.raw`([^\s@]+@[^\s]+)`),
+    phone: phone?.replace(/\s+/g, " ").trim(),
+    checkIn,
+    checkout,
+    adults: Math.max(1, adults),
+    children,
+    rooms: 1,
+    roomTypeName: roomTypeName || undefined,
+    nightlyRatesCents,
+    subtotalCents,
+    taxCents,
+    totalCents,
+    paidCents: expediaCollects ? totalCents : undefined,
+  };
+}
+
 /** The booking in an email, or null when no reader knows its format. */
 export function parseBookingEmail(input: { subject: string; text: string }): EmailBooking | null {
   // Gmail's plain text adds blank lines between table rows and *stars* around bold text.
   const text = removeCardDetails(input.text.replace(/\r/g, "").replace(/\*/g, "").replace(/\n[ \t]*(?=\n)/g, "").replace(/ /g, " ").replace(/[ \t]+/g, " "));
   const subject = input.subject.replace(/\s+/g, " ").trim();
-  return readSellvel(text, subject) ?? readStayflexi(text, subject);
+  return readSellvel(text, subject) ?? readStayflexi(text, subject) ?? readExpedia(text, subject);
 }
 
 /**

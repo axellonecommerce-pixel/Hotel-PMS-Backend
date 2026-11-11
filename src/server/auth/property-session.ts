@@ -4,14 +4,20 @@ import { db } from "@/server/db/client";
 import { propertyMemberships } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { requirePlatformAdmin } from "./platform-admin";
+import { accessLayers, cleanStaffAccess, STAFF_ACCESS_KEY } from "./staff-access";
 import {
   authorizePropertyAccess,
+  effectiveAccess,
+  roleLabels,
+  inScope,
   roles,
   selectPropertyMembership,
   type Permission,
   type PropertySession,
   type Role,
 } from "./authorization";
+
+export { STAFF_ACCESS_KEY };
 
 export class PropertyAccessError extends Error {
   constructor(public status: 401 | 403, message: string) {
@@ -53,12 +59,16 @@ async function verifiedAuthUserId(request: Request) {
   return user.id;
 }
 
-export async function requirePropertySession(request: Request, permission: Permission): Promise<PropertySession> {
+/** Signs the request in to its motel and checks one permission, or any one of several. */
+export async function requirePropertySession(request: Request, permission: Permission | readonly Permission[]): Promise<PropertySession> {
   const authUserId = await verifiedAuthUserId(request);
   const requestedPropertyId = request.headers.get("x-property-id");
   const memberships = hasProductionDatabase()
-    ? await productionSql()<Array<{ propertyId: string; role: string; active: boolean }>>`
-        select property_id as "propertyId", role, active
+    ? await productionSql()<Array<{ propertyId: string; role: string; active: boolean; authUserId: string; staffAccess: unknown }>>`
+        select m.property_id as "propertyId", m.role, m.active,
+          m.auth_user_id::text as "authUserId",
+          (select ps.value from property_settings ps
+            where ps.property_id=m.property_id and ps.key=${STAFF_ACCESS_KEY}) as "staffAccess"
         from property_memberships m
         join properties p on p.id=m.property_id
         where m.auth_user_id = ${authUserId}::uuid and m.active = true and p.status <> 'deleted'
@@ -66,7 +76,7 @@ export async function requirePropertySession(request: Request, permission: Permi
     : await db.query.propertyMemberships.findMany({
         where: and(eq(propertyMemberships.authUserId, authUserId), eq(propertyMemberships.active, true)),
       });
-  let membership = selectPropertyMembership(memberships, requestedPropertyId);
+  let membership: { propertyId: string; role: string; active: boolean; staffAccess?: unknown; roleLabel?: string } | null = selectPropertyMembership<{ propertyId: string; role: string; active: boolean; staffAccess?: unknown; roleLabel?: string }>(memberships, requestedPropertyId);
   // A designated Platform Admin may inspect a selected property after
   // provisioning it. Normal users still need an active property membership.
   if (!membership && requestedPropertyId) {
@@ -80,13 +90,19 @@ export async function requirePropertySession(request: Request, permission: Permi
   if (!membership || !isRole(membership.role)) {
     throw new PropertyAccessError(403, requestedPropertyId ? "You do not have access to this hotel." : "Select an authorized hotel.");
   }
+  // The owner's choices: the role's access (built-in or a custom role) and this login's own.
+  const layers = accessLayers(cleanStaffAccess(membership.staffAccess), authUserId, membership.role);
   const session: PropertySession = {
     authUserId,
     propertyId: membership.propertyId,
     role: membership.role,
     active: membership.active,
+    access: effectiveAccess(layers.custom ? layers.custom.basedOn : membership.role, layers.override, layers.roleOverride),
+    roleLabel: layers.custom?.name ?? roleLabels[membership.role],
   };
-  const authorization = authorizePropertyAccess(session, membership.propertyId, permission);
+  const wanted = typeof permission === "string" ? [permission] : permission;
+  const results = wanted.map((item) => authorizePropertyAccess(session, membership!.propertyId, item));
+  const authorization = results.find((result) => result.allowed) ?? results[0];
   if (!authorization.allowed) throw new PropertyAccessError(authorization.status === 401 ? 401 : 403, "You do not have permission for this action.");
   return session;
 }
@@ -96,4 +112,12 @@ export function propertyAccessResponse(error: unknown) {
     return Response.json({ error: error.message }, { status: error.status });
   }
   throw error;
+}
+
+/** A change in one Settings section needs that section in the person's access. */
+export function requireSettingsSection(session: PropertySession, section: string) {
+  const scope = session.access?.settings ?? "all";
+  if (session.role !== "owner" && !inScope(scope, section)) {
+    throw new PropertyAccessError(403, `You do not have access to Settings › ${section}. Ask the owner to add it in Users & Roles.`);
+  }
 }

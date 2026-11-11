@@ -20,7 +20,7 @@ function addNightAuditNoShowMetadata(
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     const current = parsed as Record<string, unknown>;
     const events = Array.isArray(current.lifecycleEvents) ? current.lifecycleEvents : [];
-    return JSON.stringify({ ...current, lifecycleEvents: [...events, { action: "no-show", source: "night-audit", ...event }].slice(-20) });
+    return JSON.stringify({ ...current, lifecycleEvents: [...events, { action: "no-show", source: "night-audit", ...event }] });
   } catch {
     return `${notes?.trim() ?? ""}${notes?.trim() ? "\n" : ""}no-show by night audit on ${event.at}.`;
   }

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
+import { propertyAccessResponse, requirePropertySession, requireSettingsSection } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { BankAccountError, bankAccountFor } from "@/server/finance/cash-sources";
 
@@ -49,6 +49,7 @@ export async function POST(request: Request) {
     const parsed = actionSchema.safeParse(await request.clone().json().catch(() => null));
     // Remembering a report's columns is part of recording deposits; changing terminals is setup.
     const session = await requirePropertySession(request, parsed.success && parsed.data.action === "mapping" ? "expenses.manage" : "property.manage");
+    if (!(parsed.success && parsed.data.action === "mapping")) requireSettingsSection(session, "Payment Terminals");
     if (!hasProductionDatabase()) return Response.json({ error: "Card terminals need the PMS database." }, { status: 503 });
     if (!parsed.success) return Response.json({ error: parsed.error.issues[0]?.message ?? "Check the terminal details." }, { status: 400 });
     const input = parsed.data;

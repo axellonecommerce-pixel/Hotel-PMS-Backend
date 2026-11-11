@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { authorizePropertyAccess, hasEditConflict, hasPermission, selectPropertyMembership } from "./authorization";
+import { authorizePropertyAccess, cleanOverride, effectiveAccess, hasEditConflict, hasPermission, inScope, selectPropertyMembership } from "./authorization";
 import { balancedLedgerLines, formatDocumentNumber } from "@/domain/rules/accounting";
 
 describe("role authorization", () => {
@@ -55,4 +55,50 @@ test("shared document formatting and ledger postings are deterministic and balan
   expect(formatDocumentNumber("FOL", "YYYY-######", 42, new Date("2026-10-16T12:00:00Z"))).toBe("FOL-2026-000042");
   const lines = balancedLedgerLines("Cash", "Room Revenue", 12500);
   expect(lines.reduce((sum, line) => sum + line.debitCents - line.creditCents, 0)).toBe(0);
+});
+
+describe("housekeepers and access the owner customizes", () => {
+  test("a housekeeper sees housekeeping, maintenance and lost & found only", () => {
+    expect(hasPermission("housekeeping", "housekeeping.manage")).toBe(true);
+    expect(hasPermission("housekeeping", "lost_found.manage")).toBe(true);
+    expect(hasPermission("housekeeping", "property.read")).toBe(true);
+    expect(hasPermission("housekeeping", "reservations.manage")).toBe(false);
+    expect(hasPermission("housekeeping", "reports.view")).toBe(false);
+  });
+
+  test("the owner's choices replace the role defaults, but basic reading stays", () => {
+    const access = effectiveAccess("front_desk", cleanOverride({ permissions: ["reservations.manage", "reports.view", "made.up"], reports: ["arrivals"], settings: ["Rooms"] }));
+    expect(hasPermission("front_desk", "reservations.manage", access)).toBe(true);
+    expect(hasPermission("front_desk", "cash.manage", access)).toBe(false);
+    expect(hasPermission("front_desk", "property.read", access)).toBe(true);
+    expect(inScope(access.reports, "arrivals")).toBe(true);
+    expect(inScope(access.reports, "tax")).toBe(false);
+    expect(inScope(access.settings, "Rooms")).toBe(true);
+  });
+
+  test("only the owner manages logins, even when stored access says otherwise", () => {
+    expect(hasPermission("manager", "users.manage")).toBe(false);
+    const access = effectiveAccess("manager", cleanOverride({ permissions: ["users.manage", "reports.view"] }));
+    expect(hasPermission("manager", "users.manage", access)).toBe(false);
+    expect(hasPermission("owner", "users.manage")).toBe(true);
+  });
+
+  test("the owner's change to a role reaches every login of that role, unless the login has its own", () => {
+    const frontDesk = cleanOverride({ permissions: ["reservations.manage", "night_audit.run"], reports: ["arrivals"] });
+    const follows = effectiveAccess("front_desk", null, frontDesk);
+    expect(hasPermission("front_desk", "night_audit.run", follows)).toBe(true);
+    expect(hasPermission("front_desk", "cash.manage", follows)).toBe(false);
+    expect(follows.customized).toBe(false);
+    const own = effectiveAccess("front_desk", cleanOverride({ permissions: ["cash.manage"] }), frontDesk);
+    expect(hasPermission("front_desk", "cash.manage", own)).toBe(true);
+    expect(hasPermission("front_desk", "night_audit.run", own)).toBe(false);
+    expect(inScope(own.reports, "arrivals")).toBe(true);
+    expect(own.customized).toBe(true);
+  });
+
+  test("the owner can never be limited", () => {
+    const access = effectiveAccess("owner", { permissions: [] });
+    expect(hasPermission("owner", "backups.manage", access)).toBe(true);
+    expect(access.settings).toBe("all");
+  });
 });

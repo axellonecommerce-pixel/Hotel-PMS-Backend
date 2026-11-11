@@ -39,15 +39,13 @@ export async function createTenantBackup(sql: Sql, propertyId: string): Promise<
   for (const table of tableOrder) {
     const rows = await sql.unsafe<Array<Record<string, unknown>>>(`select * from "${table}" where property_id = $1`, [propertyId]);
     if (table === "guest_identities") {
-      const now = Date.now();
       tables[table] = rows.map((row) => {
-        const expired = Boolean(row.deleted_at) || new Date(String(row.delete_after)).getTime() <= now;
-        return expired ? { ...row, storage_key: null } : row;
+        // Guest ID photos are not kept: a backup holds the ID details only.
+        return { ...row, storage_key: null };
       });
     } else tables[table] = rows;
   }
   const keys = new Map<string, string>();
-  for (const row of tables.guest_identities ?? []) if (row.storage_key && !row.deleted_at) keys.set(String(row.storage_key), "image/jpeg");
   for (const row of tables.expenses ?? []) if (row.receipt_storage_key) keys.set(String(row.receipt_storage_key), "application/octet-stream");
   for (const row of tables.attachments ?? []) if (row.storage_key) keys.set(String(row.storage_key), String(row.mime_type ?? "application/octet-stream"));
   const files: TenantBackup["files"] = [];
@@ -88,10 +86,14 @@ export async function restoreTenantBackup(tx: TransactionSql<Record<string, neve
         const clean: Record<string, unknown> = { ...Object.fromEntries(Object.entries(row).filter(([key]) => allowed.has(key))), ...(allowed.has("property_id") ? { property_id: backup.propertyId } : {}) };
         // A file reference outside this hotel's folder is dropped.
         for (const key of ["storage_key", "receipt_storage_key"]) if (clean[key] != null && !ownStorageKey(backup.propertyId, clean[key])) clean[key] = null;
+        // An older backup's guest ID photos are never brought back.
+        if (table === "guest_identities") clean.storage_key = null;
+        if (table === "attachments" && typeof clean.resource_type === "string" && clean.resource_type.startsWith("guest-id")) return null;
         // The card terminal connection (and its key) is never part of a backup.
         if (table === "terminal_payments") clean.connection_id = null;
         return clean;
-      });
+      })
+      .filter((row): row is Record<string, unknown> => row !== null);
     if (!sanitized.length) continue;
     await tx`insert into ${tx(table)} ${tx(sanitized)}`;
   }

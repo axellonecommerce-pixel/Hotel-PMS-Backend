@@ -2,7 +2,8 @@ import { and, eq } from "drizzle-orm";
 import type { TransactionSql } from "postgres";
 import { z } from "zod";
 
-import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
+import { settingsKeySections } from "@/server/auth/authorization";
+import { propertyAccessResponse, requirePropertySession, requireSettingsSection } from "@/server/auth/property-session";
 import { db } from "@/server/db/client";
 import { propertySettings } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
@@ -268,7 +269,7 @@ async function synchronizePropertyIdentity(tx: Parameters<typeof synchronizeConf
 
 export async function GET(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, "property.read");
     if (hasProductionDatabase()) {
       const [record] = await productionSql()<Array<{ value: unknown }>>`
         select value from property_settings
@@ -370,6 +371,14 @@ export async function PUT(request: Request) {
         }
         // A copy stored by an older backend may carry the marker itself.
         delete saved._changedKeys;
+        // Someone allowed only some Settings sections may change only those.
+        if (session.role !== "owner" && session.access && session.access.settings !== "all") {
+          const before = (storedValue && typeof storedValue === "object" ? storedValue : {}) as Record<string, unknown>;
+          for (const key of new Set([...Object.keys(before), ...Object.keys(saved)])) {
+            const section = settingsKeySections[key];
+            if (section && JSON.stringify(before[key]) !== JSON.stringify(saved[key])) requireSettingsSection(session, section);
+          }
+        }
         parsed.data = saved;
         // Most saves (payment types, toggles, tax text) do not touch the
         // inventory, so skip the relational sync when it is unchanged.

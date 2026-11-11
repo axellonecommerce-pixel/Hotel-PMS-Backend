@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
+import { propertyAccessResponse, requirePropertySession, requireSettingsSection } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { BankAccountError, bankAccountFor } from "@/server/finance/cash-sources";
 import { isStripeKey, ProcessorError } from "@/server/terminal/stripe";
@@ -46,6 +46,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.manage");
+    requireSettingsSection(session, "Payment Terminals");
     if (!hasProductionDatabase()) return Response.json({ error: "The card terminal needs the PMS database." }, { status: 503 });
     const parsed = actionSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return Response.json({ error: "Check the terminal details." }, { status: 400 });

@@ -1,10 +1,11 @@
-import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
+import { propertyAccessResponse, requirePropertySession, requireSettingsSection } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 
 /** The motel's own InnSeva subscription and payments, read-only (set by the platform admin). */
 export async function GET(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.manage");
+    requireSettingsSection(session, "Subscription");
     if (!hasProductionDatabase()) return Response.json({ subscription: null, payments: [] });
     const sql = productionSql();
     const [subscription] = await sql<Array<Record<string, unknown>>>`

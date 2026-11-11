@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 /** Finished reservations whose folio is not settled (shown in red on the Night Audit page). */
 export async function GET(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, ["night_audit.run", "reports.view"]);
     if (!hasProductionDatabase()) return Response.json({ reservations: [] });
     return Response.json({ reservations: await pastReservationsWithBalance(productionSql(), session.propertyId) }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) { return propertyAccessResponse(error); }

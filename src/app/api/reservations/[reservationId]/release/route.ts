@@ -23,7 +23,7 @@ function addReleaseMetadata(notes: string | null, event: Record<string, unknown>
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     const current = parsed as Record<string, unknown>;
     const events = Array.isArray(current.lifecycleEvents) ? current.lifecycleEvents : [];
-    return JSON.stringify({ ...current, lifecycleEvents: [...events, event].slice(-20) });
+    return JSON.stringify({ ...current, lifecycleEvents: [...events, event] });
   } catch {
     const note = typeof event.note === "string" && event.note ? ` ${event.note}` : "";
     return `${notes?.trim() ?? ""}${notes?.trim() ? "\n" : ""}${event.action} on ${event.at}.${note}`;

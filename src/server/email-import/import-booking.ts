@@ -52,7 +52,6 @@ export type ImportEntry = {
 };
 
 const LOG_KEY = "email_booking_imports";
-const LOG_LIMIT = 300;
 type Db = Sql | TransactionSql;
 
 export async function readImportLog(db: Db, propertyId: string, lock = false): Promise<ImportEntry[]> {
@@ -63,7 +62,8 @@ export async function readImportLog(db: Db, propertyId: string, lock = false): P
 }
 
 export async function writeImportLog(db: Db, propertyId: string, entries: ImportEntry[]) {
-  const value = { entries: entries.slice(0, LOG_LIMIT) };
+  // Every booking email ever received stays in the log (no limit).
+  const value = { entries };
   await db`insert into property_settings (property_id,key,value) values (${propertyId}::uuid,${LOG_KEY},${db.json(value as never)})
     on conflict (property_id,key) do update set value=excluded.value,updated_at=now()`;
 }
@@ -211,8 +211,13 @@ export async function importBookingEmail(sql: Sql, motel: Motel, email: { messag
   return sql.begin(async (tx) => {
     // One import at a time per motel: the log row is the lock.
     await tx`insert into property_settings (property_id,key,value) values (${motel.propertyId}::uuid,${LOG_KEY},${tx.json({ entries: [] } as never)}) on conflict (property_id,key) do nothing`;
-    const log = await readImportLog(tx, motel.propertyId, true);
-    if (log.some((entry) => entry.messageId === email.messageId)) return { status: "duplicate" as const, message: "Already imported." };
+    const stored = await readImportLog(tx, motel.propertyId, true);
+    const earlier = stored.find((entry) => entry.messageId === email.messageId);
+    // An email whose format was not known yet is read again (the Gmail script
+    // resends Needs review emails); any other email is only ever imported once.
+    const unreadBefore = earlier?.status === "review" && !earlier.provider && !earlier.booking;
+    if (earlier && !(unreadBefore && booking)) return { status: earlier.status === "review" ? "review" as const : "duplicate" as const, message: earlier.status === "review" ? earlier.reason ?? "Needs review." : "Already imported." };
+    const log = unreadBefore ? stored.filter((entry) => entry !== earlier) : stored;
     const base = { messageId: email.messageId, receivedAt: email.receivedAt, processedAt: new Date().toISOString() };
     const review = async (reason: string, found?: EmailBooking, reservationId?: string): Promise<ImportResult> => {
       await writeImportLog(tx, motel.propertyId, [{ ...base, ...(found ? { ...summary(found), booking: found.kind === "new" ? found : undefined } : { guest: email.subject.slice(0, 120) }), status: "review", reason, reservationId }, ...log]);

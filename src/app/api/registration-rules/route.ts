@@ -1,6 +1,6 @@
 import { and, desc, eq } from "drizzle-orm";
 import { z } from "zod";
-import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
+import { propertyAccessResponse, requirePropertySession, requireSettingsSection } from "@/server/auth/property-session";
 import { db } from "@/server/db/client";
 import { registrationRuleVersions } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
@@ -24,6 +24,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.manage");
+    requireSettingsSection(session, "Property");
     const parsed = z.object({ content: z.string().trim().min(1) }).safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Rules content is required." }, { status: 400 });
     if (hasProductionDatabase()) {

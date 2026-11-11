@@ -18,7 +18,7 @@ function localBusinessDate(timezone: string, now = new Date()) {
 
 export async function GET(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, "property.read");
     if (!hasProductionDatabase()) return Response.json({ businessDate: null });
     const [day] = await productionSql()<Array<{ businessDate: string }>>`
       select business_date::text as "businessDate" from business_days
@@ -36,7 +36,7 @@ export async function GET(request: Request) {
  */
 export async function POST(request: Request) {
   try {
-    const session = await requirePropertySession(request, "property.manage");
+    const session = await requirePropertySession(request, "night_audit.run");
     if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
     const result = await productionSql().begin(async (tx) => {
       const [open] = await tx<Array<{ businessDate: string }>>`

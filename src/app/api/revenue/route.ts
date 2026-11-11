@@ -11,7 +11,7 @@ const querySchema = z.object({
 
 export async function GET(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, ["revenue.view", "dashboard.view", "reports.view"]);
     const parsed = querySchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
     if (!parsed.success) return Response.json({ error: "A valid revenue date range is required." }, { status: 400 });
     if (!hasProductionDatabase()) return Response.json({ records: [] });

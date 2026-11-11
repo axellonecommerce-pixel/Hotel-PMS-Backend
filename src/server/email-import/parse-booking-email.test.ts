@@ -142,6 +142,64 @@ describe("booking emails", () => {
     expect(cancelled?.channel).toBe("Booking.com");
   });
 
+  // Laid out like Expedia Partner Central's own email (booknotif@expedia.com); made-up guest.
+  const expediaSubject = "Expedia - New Booking - Arriving on 9 Nov 2026";
+  const expediaRows = `NOTICE: The following notice is for hotel partners only. All other vendors (including Activity Service Providers) please disregard.
+HOTEL RESERVATION CONFIRMATIONS: Please provide booking confirmation code.
+Enter confirmation code at www.expediapartnercentral.com
+New Reservation
+EAN logo
+Example Inn Sampletown
+Sampletown,CA,USA
+Hotel Collects Payment from Guest
+Reservation ID: 2599000001
+Guest: Casey Sample
+1 (209) 5550100
+Booked on: Nov 9, 2026 7:26 AM PST
+Guest Email: abc123@m.expediapartnercentral.com
+Room Type Code: RoomCode
+Room Type Name: Standard Room, 1 King Bed - Standard Rate
+Pricing Model: Occupancy Based Pricing
+Payment Instructions: This guest booked without a credit card and will pay upon arrival.
+Check-In Check-Out Adults Kids/Ages Room Nights Hotel Conf
+Nov 9, 2026 Nov 10, 2026 2 0 1
+Special Request
+!LAST-MINUTE BOOKING - NO GUEST NAME CHANGES ALLOWED - PLEASE CHECK ID!
+Daily Rate - 79.99 USD
+Mon, Nov 09
+Rate Code: Standalone
+Extra Person: 0.00 USD
+Taxes: 8.00 USD
+Extra Charges: 0.00 USD
+Total:87.99 USD
+Nonrefundable`;
+
+  test("Expedia Partner Central: a new booking (table as rows)", () => {
+    const booking = parseBookingEmail({ subject: expediaSubject, text: expediaRows });
+    expect(booking).toMatchObject({
+      provider: "Expedia", kind: "new", channel: "Expedia", confirmation: "2599000001",
+      firstName: "Casey", lastName: "Sample", email: "abc123@m.expediapartnercentral.com", phone: "1 (209) 5550100",
+      checkIn: "2026-11-09", checkout: "2026-11-10", adults: 2, children: 0, rooms: 1,
+      roomTypeName: "Standard Room, 1 King Bed", nightlyRatesCents: [7999], subtotalCents: 7999, taxCents: 800, totalCents: 8799,
+    });
+    expect(booking?.paidCents).toBeUndefined();
+  });
+
+  test("Expedia Partner Central: table one cell per line, two nights, Expedia collects", () => {
+    const text = expediaRows
+      .replace("Hotel Collects Payment from Guest", "Expedia Collects Payment")
+      .replace("Check-In Check-Out Adults Kids/Ages Room Nights Hotel Conf\nNov 9, 2026 Nov 10, 2026 2 0 1", "Check-In\nCheck-Out\nAdults\nKids/Ages\nRoom Nights\nHotel Conf\nNov 9, 2026\nNov 11, 2026\n3\n1\n2")
+      .replace("Daily Rate - 79.99 USD\nMon, Nov 09", "Daily Rate - 79.99 USD\nMon, Nov 09\n89.99 USD\nTue, Nov 10")
+      .replace("Taxes: 8.00 USD", "Taxes: 17.00 USD").replace("Total:87.99 USD", "Total:186.98 USD");
+    const booking = parseBookingEmail({ subject: expediaSubject, text });
+    expect(booking).toMatchObject({ checkIn: "2026-11-09", checkout: "2026-11-11", adults: 3, children: 1, nightlyRatesCents: [7999, 8999], totalCents: 18698, paidCents: 18698 });
+  });
+
+  test("Expedia Partner Central: a cancellation", () => {
+    const booking = parseBookingEmail({ subject: "Expedia - Cancelled Booking - Arriving on 9 Nov 2026", text: expediaRows.replace("New Reservation", "Cancelled Reservation") });
+    expect(booking?.kind).toBe("cancelled");
+  });
+
   test("an email no reader knows is not a booking", () => {
     expect(parseBookingEmail({ subject: "Your invoice", text: "Thanks for your payment" })).toBeNull();
   });

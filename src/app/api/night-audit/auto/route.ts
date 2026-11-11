@@ -10,7 +10,7 @@ import { nightAuditDue, nightAuditDueAt, runNightAudit } from "@/server/night-au
  */
 export async function GET(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, "property.read");
     const [state] = await productionSql()<Array<{ businessDate: string; timezone: string; schedule: { enabled?: boolean; time?: string } | null }>>`
       select b.business_date::text as "businessDate",p.timezone,ps.value as schedule
       from properties p
@@ -44,7 +44,7 @@ export async function GET(request: Request) {
  */
 export async function POST(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, "property.read");
     const [state] = await productionSql()<Array<{ businessDate: string; timezone: string; schedule: { enabled?: boolean; time?: string } | null }>>`
       select b.business_date::text as "businessDate",p.timezone,ps.value as schedule
       from properties p

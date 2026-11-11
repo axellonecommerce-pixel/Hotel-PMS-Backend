@@ -17,10 +17,16 @@ export function identityRetentionAction(image: IdentityImage, now: Date) {
   return "none" as const;
 }
 
-export function createIdentityDeleteAfter(capturedAt: Date) {
-  const result = new Date(capturedAt);
-  result.setUTCFullYear(result.getUTCFullYear() + 1);
-  return result;
+/**
+ * Guest data is kept for the life of the motel's account: InnSeva never
+ * deletes it on a schedule. (Guest ID photos are not stored at all; the ID
+ * type and number are.) The database column needs a date, so it holds this
+ * "never" date.
+ */
+export const KEEP_FOREVER = "9999-12-31T00:00:00.000Z";
+
+export function createIdentityDeleteAfter(_capturedAt?: Date) {
+  return new Date(KEEP_FOREVER);
 }
 
 export function filterBackupStorageKeys(

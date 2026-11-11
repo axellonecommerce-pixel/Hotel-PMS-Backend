@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reservations.manage");
+    const session = await requirePropertySession(request, "property.read");
     // Cursors are opaque: local SQLite events use an integer, while the
     // production Postgres table uses UUID event ids paired with timestamps.
     const startCursor = new URL(request.url).searchParams.get("cursor") ?? "";

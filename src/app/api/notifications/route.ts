@@ -5,7 +5,7 @@ import { productionSql } from "@/server/db/production";
 
 export async function GET(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, "property.read");
     const records = await productionSql()<Array<Record<string, unknown>>>`
       select id,type,title,message,"resource_type" as "resourceType","resource_id" as "resourceId",
         "read_at"::text as "readAt","resolved_at"::text as "resolvedAt","created_at"::text as "createdAt"
@@ -20,7 +20,7 @@ export async function GET(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, "property.read");
     const parsed = z.object({ id: z.string().uuid(), action: z.enum(["read", "resolve", "unread"]) }).safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Notification change is invalid." }, { status: 400 });
     const rows = parsed.data.action === "resolve"

@@ -1,3 +1,4 @@
+import { roleLabels, type Role } from "@/server/auth/authorization";
 import type { Sql, TransactionSql } from "postgres";
 import { z } from "zod";
 
@@ -62,7 +63,7 @@ async function clerkFor(db: Db, propertyId: string, authUserId: string) {
   if (!membership) return null;
   const [created] = await db<Array<{ id: string; name: string }>>`
     insert into employees (property_id, membership_id, name, email, job_role, pay_method)
-    values (${propertyId}::uuid, ${membership.id}::uuid, ${membership.name}, ${membership.email}, ${membership.role === "front_desk" ? "Front Desk" : membership.role.charAt(0).toUpperCase() + membership.role.slice(1)}, 'hourly')
+    values (${propertyId}::uuid, ${membership.id}::uuid, ${membership.name}, ${membership.email}, ${roleLabels[membership.role as Role] ?? membership.role}, 'hourly')
     returning id, name
   `;
   return created;

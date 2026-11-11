@@ -72,7 +72,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
       try {
         const current = reservation.notes ? JSON.parse(reservation.notes) as Record<string, unknown> : {};
         const events = Array.isArray(current.lifecycleEvents) ? current.lifecycleEvents : [];
-        notes = JSON.stringify({ ...current, lifecycleEvents: [...events, event].slice(-20) });
+        notes = JSON.stringify({ ...current, lifecycleEvents: [...events, event] });
       } catch {
         notes = `${reservation.notes ?? ""}\ncheckout undone: ${parsed.data.reason}`.trim();
       }

@@ -11,7 +11,7 @@ class AlreadyAuditedError extends Error {
 
 export async function GET(request: Request) {
   try {
-    const session = await requirePropertySession(request, "property.manage");
+    const session = await requirePropertySession(request, "night_audit.run");
     const [record] = await productionSql()<Array<{ value: { enabled?: boolean; time?: string } }>>`
       select value from property_settings where property_id=${session.propertyId}::uuid and key='night_audit_schedule'
     `;
@@ -29,7 +29,7 @@ export async function GET(request: Request) {
 
 export async function PUT(request: Request) {
   try {
-    const session = await requirePropertySession(request, "property.manage");
+    const session = await requirePropertySession(request, "night_audit.run");
     const parsed = z.object({ enabled: z.boolean(), time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/) }).safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Choose a valid Night Audit time." }, { status: 400 });
     await productionSql()`
@@ -47,7 +47,7 @@ export async function PUT(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const session = await requirePropertySession(request, "property.manage");
+    const session = await requirePropertySession(request, "night_audit.run");
     const [employee] = await productionSql()<Array<{ id: string }>>`
       select id from employees where property_id=${session.propertyId}::uuid
         and membership_id in (select id from property_memberships where auth_user_id=${session.authUserId}::uuid and property_id=${session.propertyId}::uuid)

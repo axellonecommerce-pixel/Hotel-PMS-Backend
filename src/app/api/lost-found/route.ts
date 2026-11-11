@@ -26,7 +26,7 @@ const closeSchema = z.object({
 
 export async function GET(request: Request) {
   try {
-    const session = await requirePropertySession(request, "housekeeping.manage");
+    const session = await requirePropertySession(request, "lost_found.manage");
     const items = await productionSql()<Array<Record<string, unknown>>>`
       select l.id, l.item, l.description, l.location, l.found_date::text as "foundDate", l.found_by as "foundBy",
         l.reservation_id as "reservationId", r.confirmation_number as "confirmationNumber", l.guest_name as "guestName",
@@ -43,7 +43,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const session = await requirePropertySession(request, "housekeeping.manage");
+    const session = await requirePropertySession(request, "lost_found.manage");
     const parsed = createSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Enter the item, where it was found, and who found it." }, { status: 400 });
     const input = parsed.data;
@@ -63,7 +63,7 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    const session = await requirePropertySession(request, "housekeeping.manage");
+    const session = await requirePropertySession(request, "lost_found.manage");
     const parsed = closeSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Choose returned or disposed and who handled it." }, { status: 400 });
     const input = parsed.data;

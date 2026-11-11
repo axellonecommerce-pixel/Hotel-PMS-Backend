@@ -34,7 +34,7 @@ function addReinstatementMetadata(notes: string | null, note?: string) {
     const parsed = notes ? JSON.parse(notes) as Record<string, unknown> : {};
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     const events = Array.isArray(parsed.lifecycleEvents) ? parsed.lifecycleEvents : [];
-    return JSON.stringify({ ...parsed, lifecycleEvents: [...events, { action: "reinstated", note, at: new Date().toISOString() }].slice(-20) });
+    return JSON.stringify({ ...parsed, lifecycleEvents: [...events, { action: "reinstated", note, at: new Date().toISOString() }] });
   } catch {
     return `${notes?.trim() ?? ""}${notes?.trim() ? "\n" : ""}reinstated${note ? `: ${note}` : ""}`;
   }

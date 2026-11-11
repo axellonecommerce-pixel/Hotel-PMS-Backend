@@ -47,7 +47,7 @@ export async function GET(request: Request) {
 
 export async function PUT(request: Request) {
   try {
-    const session = await requirePropertySession(request, "property.manage");
+    const session = await requirePropertySession(request, "rates.manage");
     const parsed = updateSchema.safeParse(await request.json());
     if (!parsed.success) return Response.json({ error: "Choose room types, dates, and a rate or restriction to set." }, { status: 400 });
     const input = parsed.data;

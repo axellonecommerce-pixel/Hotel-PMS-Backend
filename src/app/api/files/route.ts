@@ -1,4 +1,5 @@
 import { and, eq, isNull } from "drizzle-orm";
+import { hasPermission } from "@/server/auth/authorization";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { db } from "@/server/db/client";
 import { attachments } from "@/server/db/schema";
@@ -24,15 +25,17 @@ export async function POST(request: Request) {
     const file = form.get("file");
     const resourceType = String(form.get("resourceType") ?? "");
     const resourceId = String(form.get("resourceId") ?? "");
-    if (!(file instanceof File) || !resourceId || !["guest-id", "expense-receipt", "maintenance"].includes(resourceType)) return Response.json({ error: "File and resource details are required." }, { status: 400 });
-    const session = await requirePropertySession(request, resourceType === "guest-id" ? "guests.manage" : resourceType === "expense-receipt" ? "expenses.manage" : "maintenance.manage");
+    // Guest ID photos are never stored: the guest's ID type and number are kept instead.
+    if (resourceType === "guest-id") return Response.json({ error: "Guest ID photos are not stored. Enter the ID type and number instead." }, { status: 400 });
+    if (!(file instanceof File) || !resourceId || !["expense-receipt", "maintenance"].includes(resourceType)) return Response.json({ error: "File and resource details are required." }, { status: 400 });
+    const session = await requirePropertySession(request, resourceType === "expense-receipt" ? "expenses.manage" : "maintenance.manage");
     if (!allowedTypes.has(file.type) || file.size > 4_000_000) return Response.json({ error: "Use a JPG, PNG, WebP, or PDF file up to 4 MB." }, { status: 400 });
     if (!await contentMatchesType(file)) return Response.json({ error: "The file's contents do not match its type. Use a real JPG, PNG, WebP, or PDF file." }, { status: 400 });
     const id = `attachment-${crypto.randomUUID()}`;
     const storageKey = `${session.propertyId}/${resourceType}/${crypto.randomUUID()}`;
     await uploadPrivateFile(storageKey, file);
     const createdAt = new Date();
-    const deleteAfter = resourceType === "guest-id" ? new Date(createdAt.getTime() + 365 * 86_400_000).toISOString() : null;
+    const deleteAfter = null;
     if (hasProductionDatabase()) {
       try {
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(resourceId)) {
@@ -40,23 +43,7 @@ export async function POST(request: Request) {
         }
         const sql = productionSql();
         let productionAttachmentId = id;
-        if (resourceType === "guest-id") {
-          const [identity] = await sql<Array<{ id: string; previousStorageKey: string | null }>>`
-            select gi.id, gi.storage_key as "previousStorageKey"
-            from guest_identities gi
-            join guests g on g.id=gi.guest_id and g.property_id=gi.property_id
-            where gi.guest_id=${resourceId}::uuid and gi.property_id=${session.propertyId}::uuid
-            order by gi.captured_at desc limit 1
-          `;
-          if (!identity) throw new Error("Save the guest ID type and ID number before uploading its photo.");
-          productionAttachmentId = identity.id;
-          await sql`
-            update guest_identities
-            set storage_key=${storageKey}, captured_at=${createdAt.toISOString()}, delete_after=${deleteAfter}, warned_at=null, deleted_at=null
-            where id=${identity.id}::uuid and property_id=${session.propertyId}::uuid
-          `;
-          if (identity.previousStorageKey && identity.previousStorageKey !== storageKey) await deletePrivateFiles([identity.previousStorageKey]);
-        } else {
+        {
           const [resource] = resourceType === "expense-receipt"
             ? await sql<Array<{ id: string }>>`select id from expenses where id=${resourceId}::uuid and property_id=${session.propertyId}::uuid`
             : await sql<Array<{ id: string }>>`select id from maintenance_orders where id=${resourceId}::uuid and property_id=${session.propertyId}::uuid`;
@@ -85,15 +72,18 @@ export async function POST(request: Request) {
 
 export async function GET(request: Request) {
   try {
-    const session = await requirePropertySession(request, "reports.view");
+    const session = await requirePropertySession(request, ["guests.manage", "expenses.manage", "maintenance.manage"]);
     const id = new URL(request.url).searchParams.get("id");
     if (!id || (hasProductionDatabase() && !/^[0-9a-f-]{36}$/i.test(id))) return Response.json({ error: "Attachment ID is required." }, { status: 400 });
     if (hasProductionDatabase()) {
-      const [attachment] = await productionSql()<Array<{ storageKey: string; mimeType: string }>>`
-        select storage_key as "storageKey",mime_type as "mimeType" from attachments
+      const [attachment] = await productionSql()<Array<{ storageKey: string; mimeType: string; resourceType: string }>>`
+        select storage_key as "storageKey",mime_type as "mimeType",resource_type as "resourceType" from attachments
         where id=${id}::uuid and property_id=${session.propertyId}::uuid
       `;
       if (!attachment) return Response.json({ error: "Attachment not found." }, { status: 404 });
+      // A guest's ID only for those who manage guests; a receipt for expenses; a photo for maintenance.
+      const needed = attachment.resourceType.startsWith("guest-id") ? "guests.manage" : attachment.resourceType === "expense-receipt" ? "expenses.manage" : "maintenance.manage";
+      if (!hasPermission(session.role, needed, session.access)) return Response.json({ error: "You do not have permission to open this file." }, { status: 403 });
       return Response.json({ url: await signedPrivateFileUrl(attachment.storageKey), mimeType: attachment.mimeType });
     }
     const attachment = await db.query.attachments.findFirst({ where: and(eq(attachments.id, id), eq(attachments.propertyId, session.propertyId), isNull(attachments.deletedAt)) });
