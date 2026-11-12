@@ -6,8 +6,7 @@ import { readdir } from "node:fs/promises";
  * database does not have yet, in order, and records each one in
  * public.schema_migrations so every database (test, live) knows its state.
  *
- *   bun --env-file=.env.local scripts/migrate.ts            # test project
- *   bun --env-file=.env.live.local scripts/migrate.ts       # live, deliberately
+ *   bun --env-file=.env.local scripts/migrate.ts            # the database in .env.local
  *   ... scripts/migrate.ts --status                          # list, change nothing
  *   ... scripts/migrate.ts --baseline 0024                   # mark 0000–0024 as already applied
  *   ... scripts/migrate.ts --test-project                    # also stop the live night-audit
@@ -23,7 +22,7 @@ const baselineIndex = args.indexOf("--baseline");
 const baseline = baselineIndex >= 0 ? args[baselineIndex + 1] : undefined;
 
 const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) throw new Error("DATABASE_URL is required (use --env-file=.env.local or .env.live.local).");
+if (!databaseUrl) throw new Error("DATABASE_URL is required (use --env-file=.env.local).");
 const host = new URL(databaseUrl.replace(/^postgres(ql)?:/, "http:")).username.split(".")[1] ?? "database";
 const sql = postgres(databaseUrl, { prepare: false, max: 1, onnotice: () => undefined });
 

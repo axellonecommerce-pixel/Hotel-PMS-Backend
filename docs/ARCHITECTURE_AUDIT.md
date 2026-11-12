@@ -42,7 +42,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 - *Fix:* each migration that creates a table also enables RLS on it, and a test fails if any `public` table has RLS off. C1 removes most of the risk.
 - *Auto-safe:* yes.
 
-**C3. Local development uses the production database.** — *Done 2026-11-12: test project `innseva-test` created with the full schema, data API closed, sample motel; local `.env.local` files point to it; live credentials moved to `.env.live.local`.*
+**C3. Local development uses the production database.** — *Open again: a test project was created on 2026-11-12 and deleted the same day at the owner's request; local `.env.local` points to the live project again.*
 - *What:* the backend's local `.env.local` points to the production Supabase pooler. Development servers, tests that touch the database, and dry-runs all hit real motel data.
 - *Why:* one mistaken script or test can change a live motel's money or guests. Not acceptable once other motels' data is in the same database.
 - *Fix:* create a separate Supabase project for staging/development (seeded with demo data). Production credentials only in Vercel's Production environment.
@@ -101,7 +101,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 - *Fix:* add `NOT VALID` checks (they protect new rows at once), then validate after confirming old rows pass.
 - *Auto-safe:* yes with `NOT VALID`.
 
-**M6. Migrations are applied by hand with no record.** — *Done: `scripts/migrate.ts` with `schema_migrations` (test project recorded; live needs one `--baseline 0024` run).*
+**M6. Migrations are applied by hand with no record.** — *Done: `scripts/migrate.ts` with `schema_migrations` (live needs one `--baseline 0024` run).*
 - *What:* 25 SQL files in `drizzle-production/`; Drizzle's journal tracks only the first 9. There is no table saying which files a given database has.
 - *Fix:* a small `schema_migrations` table plus a `bun run migrate` script that applies pending files in order; same files for staging and production.
 - *Auto-safe:* yes.
@@ -138,7 +138,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 | Step | Items | Size |
 |---|---|---|
 | 1 | ~~**C1** turn off the data API + revoke grants; **C2** RLS-on check; **L3**~~ **Done 2026-11-11** (Netlify checked: no demo token) | Small, do first |
-| 2 | ~~**C3** staging Supabase project; **M6** migration runner; **L2**~~ **Done 2026-11-12** | Small |
+| 2 | **C3** staging Supabase project (open: test project deleted); ~~**M6** migration runner; **L2**~~ **Done** | Small |
 | 3 | ~~**H1** idempotency keys; **M3** error messages; **H4** local token check~~ **Done in code 2026-11-12** (H1 needs migration 0025 on live) | Medium |
 | 4 | **H3** double-booking constraint; **M5** CHECK constraints (`NOT VALID`) | Medium |
 | 5 | **M1** void instead of delete; **M2** audit log | Medium |
