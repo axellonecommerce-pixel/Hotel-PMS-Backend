@@ -62,7 +62,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 - *Fix:* the main list loads a date window (e.g. 60 days back, 365 ahead) with search for older stays; move remaining browser-computed reports to server report routes (18 already exist). No UI change.
 - *Auto-safe:* mostly; needs careful testing of every page that uses the list.
 
-**H3. Room double-booking is prevented only in application code.**
+**H3. Room double-booking is prevented only in application code.** — *Done in code (migration 0026): a deferred constraint trigger refuses two active stays in one room on overlapping nights; tested (overlap, adjacent, cancelled, reactivation, extension, room move). Needs applying on live.*
 - *What:* booking, room move, reinstate and extension each check for overlapping stays with row locks. That is correct today, but nothing in the database stops an overlap if a future code path forgets the check.
 - *Fix:* add a date range on `reservation_rooms` (kept in sync by the API) and an exclusion constraint (`btree_gist`) on (room, dates) for active stays, as a backstop.
 - *Auto-safe:* after a check that no current overlaps exist (the migration would report them first).
@@ -96,7 +96,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 - *Fix:* move the out-of-order dates and booking details into columns first; keep the settings blob but make the relational tables the single source for rooms, room types, sources and employees.
 - *Auto-safe:* gradual migrations; not urgent.
 
-**M5. Few CHECK constraints on core tables.**
+**M5. Few CHECK constraints on core tables.** — *Done in code (0026): valid statuses, departure ≥ arrival, non-negative amounts; each added only if no existing row breaks it (skipped with a notice otherwise).*
 - *What:* the first migration (reservations, payments, charges, folios) has no CHECK constraints; the 44 that exist are in later tables. Departure-after-arrival, non-negative amounts and allowed status values are enforced only in code.
 - *Fix:* add `NOT VALID` checks (they protect new rows at once), then validate after confirming old rows pass.
 - *Auto-safe:* yes with `NOT VALID`.
@@ -140,7 +140,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 | 1 | ~~**C1** turn off the data API + revoke grants; **C2** RLS-on check; **L3**~~ **Done 2026-11-11** (Netlify checked: no demo token) | Small, do first |
 | 2 | **C3** staging Supabase project (open: test project deleted); ~~**M6** migration runner; **L2**~~ **Done** | Small |
 | 3 | ~~**H1** idempotency keys; **M3** error messages; **H4** local token check~~ **Done in code 2026-11-12** (H1 needs migration 0025 on live) | Medium |
-| 4 | **H3** double-booking constraint; **M5** CHECK constraints (`NOT VALID`) | Medium |
+| 4 | ~~**H3** double-booking constraint; **M5** CHECK constraints~~ **Done in code 2026-11-12** (migration 0026 to apply on live) | Medium |
 | 5 | **M1** void instead of delete; **M2** audit log | Medium |
 | 6 | **H2** date-windowed lists + server reports | Larger, needs careful testing |
 | 7 | **M4**, **M7**, **L1**, **L4–L6** | As you grow |

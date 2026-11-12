@@ -118,6 +118,12 @@ export function propertyAccessResponse(error: unknown) {
   if (error instanceof PropertyAccessError) {
     return Response.json({ error: error.message }, { status: error.status });
   }
+  // The database's double-booking backstop (migration 0026) says which room
+  // and reservation clash; that message is ours and safe to show.
+  const dbError = error as { code?: unknown; message?: unknown; severity?: unknown };
+  if (dbError && dbError.severity && dbError.code === "23P01" && typeof dbError.message === "string" && dbError.message.startsWith("Room ")) {
+    return Response.json({ error: dbError.message }, { status: 409 });
+  }
   throw error;
 }
 
