@@ -1,5 +1,4 @@
 import { setRequestActor } from "@/server/db/request-context";
-import { timingSafeEqual } from "node:crypto";
 
 export class PlatformAdminAccessError extends Error {
   constructor(public status: 401 | 403, message: string) {
@@ -46,13 +45,4 @@ export async function requirePlatformAdmin(request: Request) {
 export function platformAdminAccessResponse(error: unknown) {
   if (error instanceof PlatformAdminAccessError) return Response.json({ error: error.message }, { status: error.status });
   throw error;
-}
-
-export function validProvisioningKey(request: Request) {
-  const expected = process.env.PMS_PROVISIONING_KEY;
-  const supplied = request.headers.get("x-pms-provisioning-key");
-  if (!expected || !supplied) return false;
-  const expectedBytes = Buffer.from(expected);
-  const suppliedBytes = Buffer.from(supplied);
-  return expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
 }

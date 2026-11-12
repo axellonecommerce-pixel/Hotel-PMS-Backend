@@ -39,8 +39,8 @@ export async function roomInventory(db: Db, propertyId: string, start: string, e
     where r.property_id=${propertyId}::uuid and r.active
   `;
   const blocks = await db<Array<{ number: string; blockFrom: string | null; blockTo: string | null }>>`
-    select r.number, case when mo.notes like '{%' then mo.notes::jsonb->>'blockFrom' end as "blockFrom",
-      case when mo.notes like '{%' then mo.notes::jsonb->>'blockTo' end as "blockTo"
+    select r.number, mo.block_from::text as "blockFrom",
+      mo.block_to::text as "blockTo"
     from maintenance_orders mo join rooms r on r.id=mo.room_id
     where mo.property_id=${propertyId}::uuid and mo.rentable=false and mo.status not in ('completed','resolved','cancelled')
   `;

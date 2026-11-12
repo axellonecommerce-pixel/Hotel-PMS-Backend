@@ -454,8 +454,8 @@ async function checkRoomLine(tx: TransactionSql, session: PropertySession, paylo
       ) and not exists (
         select 1 from maintenance_orders mo
         where mo.room_id=r.id and mo.rentable=false and mo.status not in ('completed','resolved','cancelled')
-          and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockFrom')::date else null end < ${occupiedUntil}::date
-          and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockTo')::date else null end >= ${payload.checkInDate}::date
+          and mo.block_from < ${occupiedUntil}::date
+          and mo.block_to >= ${payload.checkInDate}::date
       ) order by r.number for update
   `;
   const selectedRooms = line.roomNumbers.map((number) => roomsForType.find((room) => room.number === number));
@@ -1059,8 +1059,8 @@ async function updateProductionReservation(
               ) or exists (
                 select 1 from maintenance_orders mo
                 where mo.room_id=rr.room_id and mo.rentable=false and mo.status not in ('completed','resolved','cancelled')
-                  and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockFrom')::date else null end < ${endNight}::date
-                  and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockTo')::date else null end >= ${firstNight}::date
+                  and mo.block_from < ${endNight}::date
+                  and mo.block_to >= ${firstNight}::date
               )
             ) limit 1
           `;

@@ -90,7 +90,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 - *Fix:* throw typed errors (as `ReservationRequestError` already does) and return a generic message otherwise; log the real error server-side.
 - *Auto-safe:* yes.
 
-**M4. Business data stored as JSON inside text columns.**
+**M4. Business data stored as JSON inside text columns.** — *Partly done (0028): maintenance block dates are now real date columns filled by the database from the notes, used by availability, booking, room moves and inventory (indexed; bad notes leave them empty). Still JSON: reservation details in `reservations.notes` and the settings blob; move gradually.*
 - *What:* `reservations.notes` holds JSON (lifecycle events, online booking details, remarks); `maintenance_orders.notes` holds the out-of-order date range. All application settings live in one `property_settings.application_settings` JSON blob that is copied into relational tables on save (two sources of truth).
 - *Why:* hard to index, query or constrain; a bad save can corrupt it.
 - *Fix:* move the out-of-order dates and booking details into columns first; keep the settings blob but make the relational tables the single source for rooms, room types, sources and employees.
@@ -106,19 +106,19 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 - *Fix:* a small `schema_migrations` table plus a `bun run migrate` script that applies pending files in order; same files for staging and production.
 - *Auto-safe:* yes.
 
-**M7. No request rate limits on the API.**
+**M7. No request rate limits on the API.** — *Not changed in code. Recommended Vercel Firewall rule (Project › Firewall): rate-limit `/api/public/*` to ~30 requests/minute per IP; leave signed-in `/api/*` generous (each open screen polls `/api/sync` every 8 s).*
 - *What:* authenticated routes and the public booking-email endpoint have no rate limit (Supabase limits sign-in itself).
 - *Fix:* Vercel Firewall rate-limit rules per IP for `/api/*`; stricter for `/api/public/*`.
 - *Auto-safe:* dashboard configuration.
 
 ### LOW
 
-- **L1.** `POST /api/admin/properties` is a leftover demo provisioning route (key-protected, writes to the demo SQLite path). Remove it; the Platform page is the real path.
+- **L1.** *(Done: removed.)* `POST /api/admin/properties` is a leftover demo provisioning route (key-protected, writes to the demo SQLite path). Remove it; the Platform page is the real path.
 - **L2.** *(Done.)* The backend has no `.env.example`; the frontend's is current. Add one with names only.
 - **L3.** `NEXT_PUBLIC_PMS_DEMO_AUTH_TOKEN` exists in the frontend; it only works when the backend is not in production mode. Make sure it is **not** set on Netlify production.
-- **L4.** No `organizations` table. An owner with several motels works through memberships today; an organization row becomes useful for one bill covering several motels. Not needed yet.
-- **L5.** Ledger accounts are free text in `ledger_entries.account`; a `ledger_accounts` list with a unique code would stop typos creating new accounts.
-- **L6.** No uptime/error monitoring is wired (Vercel logs only). Add Vercel log drains or Sentry with guest data scrubbed.
+- **L4.** *(Left as is; not needed yet.)* No `organizations` table. An owner with several motels works through memberships today; an organization row becomes useful for one bill covering several motels. Not needed yet.
+- **L5.** *(Left as is: seeding a fixed list needs the live account names; a missing one would block postings.)* Ledger accounts are free text in `ledger_entries.account`; a `ledger_accounts` list with a unique code would stop typos creating new accounts.
+- **L6.** *(Needs an outside account: Sentry or a Vercel log drain.)* No uptime/error monitoring is wired (Vercel logs only). Add Vercel log drains or Sentry with guest data scrubbed.
 
 ### GOOD — keep as is
 
@@ -142,8 +142,8 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 | 3 | ~~**H1** idempotency keys; **M3** error messages; **H4** local token check~~ **Done in code 2026-11-12** (H1 needs migration 0025 on live) | Medium |
 | 4 | ~~**H3** double-booking constraint; **M5** CHECK constraints~~ **Done in code 2026-11-12** (migration 0026 to apply on live) | Medium |
 | 5 | ~~**M1** void instead of delete; **M2** audit log~~ **Done in code 2026-11-12** (migration 0027 to apply on live) | Medium |
-| 6 | **H2** date-windowed lists + server reports | Larger, needs careful testing |
-| 7 | **M4**, **M7**, **L1**, **L4–L6** | As you grow |
+| 6 | ~~**H2**~~ **Done 2026-11-12**: per-area sync; reservations and guests download only changes (full read at most every 6 h). Reports still compute in the browser from the already-loaded list (no extra downloads). | Larger |
+| 7 | ~~**M4** (maintenance dates)~~, ~~**L1**~~ **Done 2026-11-12**; **M7**, **L4–L6** documented for later | As you grow |
 
 ## 4. Readiness today
 
@@ -153,3 +153,13 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 | 10 | After steps 1–3 | Same plus C3 (shared dev/prod database), H1 (double posts) |
 | 100 | After steps 1–6 | H2 (full-history loading), H3, M1/M2 for financial auditing |
 | 1,000+ | After all steps, plus a larger Supabase compute size, PITR and monitoring | Database size, rate limits, observability |
+
+## 5. Status after the fixes (2026-11-12)
+
+Code done for C1–C3*, H1–H4, M1–M3, M5, M6, part of M4, L1–L3. Live database changes to apply, in order, before deploying: **0026** (double-booking backstop, value checks), **0027** (change history), **0028** (maintenance date columns) with `bun --env-file=.env.local scripts/migrate.ts`. (*C3: the test project was deleted at the owner's request; local development uses the live database again.)
+
+| Motels | Ready? | What is left |
+|---|---|---|
+| 1–10 | Yes, once 0026–0028 are applied | Supabase Pro plan with backups; a test database for development |
+| 100 | Yes, with the above | Rate limits (M7), monitoring (L6), larger compute as needed |
+| 1,000+ | With the above plus a larger Supabase compute size and point-in-time recovery | Load testing; move remaining JSON fields (M4) |

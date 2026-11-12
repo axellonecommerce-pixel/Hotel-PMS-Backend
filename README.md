@@ -31,9 +31,9 @@ that user's memberships.
 
 For local development only, set `PMS_DEMO_AUTH_ENABLED=true`, `PMS_DEMO_AUTH_TOKEN`, and `PMS_DEMO_AUTH_USER_ID`. Production never accepts the demo path.
 
-## Product-team hotel provisioning
+## Creating a motel
 
-Set a strong `PMS_PROVISIONING_KEY`, then call `POST /api/admin/properties` with `X-PMS-Provisioning-Key`. The payload contains hotel contact/timezone details plus the existing Supabase owner's user ID and name. Provisioning transactionally creates the property, owner membership, owner employee, and starting settings.
+Motels are created on the Platform page (`/platform`, Platform Admins only), which creates the property, its owner login, employee and starting settings.
 
 Set `PMS_FRONTEND_ORIGINS` to the comma-separated frontend origins allowed to call the API. Reservation clients subscribe to `GET /api/events`; writes use a required expected version and return `409 EDIT_CONFLICT` instead of overwriting a newer edit.
 

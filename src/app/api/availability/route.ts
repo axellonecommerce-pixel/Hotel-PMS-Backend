@@ -93,8 +93,8 @@ async function routeGET(request: Request) {
         and not exists (
           select 1 from maintenance_orders mo
           where mo.room_id=r.id and mo.rentable=false and mo.status not in ('completed','resolved','cancelled')
-            and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockFrom')::date else null end < ${occupiedUntil}::date
-            and case when mo.notes like '{%' then (mo.notes::jsonb->>'blockTo')::date else null end >= ${parsed.data.checkIn}::date
+            and mo.block_from < ${occupiedUntil}::date
+            and mo.block_to >= ${parsed.data.checkIn}::date
         )
       order by r.number
     `;

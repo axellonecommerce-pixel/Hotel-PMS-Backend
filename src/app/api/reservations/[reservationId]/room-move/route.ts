@@ -122,8 +122,8 @@ async function routePOST(request: Request, context: { params: Promise<{ reservat
         const [blocked] = await tx<Array<{ id: string }>>`
           select id from maintenance_orders
           where room_id=${destination.id}::uuid and rentable=false and status not in ('completed','resolved','cancelled')
-            and case when notes like '{%' then (notes::jsonb->>'blockFrom')::date end < ${reservation.departureDate}::date
-            and case when notes like '{%' then (notes::jsonb->>'blockTo')::date end >= ${reservation.arrivalDate}::date
+            and block_from < ${reservation.departureDate}::date
+            and block_to >= ${reservation.arrivalDate}::date
           limit 1
         `;
         if (blocked) throw new MoveError(`Room ${destination.number} is blocked for maintenance during this stay.`);
