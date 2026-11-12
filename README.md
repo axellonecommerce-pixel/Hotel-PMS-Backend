@@ -56,6 +56,17 @@ migration runner. Then apply `supabase/rls.sql`. The RLS script must run after
 the schema exists so every property-scoped table receives its tenant-isolation
 policy.
 
+Order on a new database: `0000`–`0012`, then `supabase/rls.sql` (later
+migrations use its `current_property_ids()` function), then the rest in order,
+then `supabase/rls.sql` once more.
+
+**Supabase's data API is closed** (`0024_close_data_api.sql`). InnSeva's
+browser app uses Supabase only for sign-in; all data goes through this API,
+which checks each person's permissions. After applying `0024`, open Supabase ›
+Project Settings › Data API and remove `public` from *Exposed schemas* (or turn
+the Data API off). Never grant table rights to the `anon` or `authenticated`
+roles again. `bun run test:rls` (read-only) fails if any table is reachable.
+
 For an already-running property, apply only the migrations it has not already
 recorded, in order. Never rerun destructive reset commands against production.
 The current sequence includes platform subscriptions, deletion cascades,

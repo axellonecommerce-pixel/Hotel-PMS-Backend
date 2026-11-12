@@ -1,5 +1,11 @@
 -- Run after the Drizzle production migrations. Every application table is
 -- denied by default and scoped to the authenticated employee's one hotel.
+--
+-- These policies are a second layer only. Since 0024_close_data_api.sql the
+-- "anon" and "authenticated" roles have no table rights at all: InnSeva's
+-- browser app never reads tables through Supabase's data API; it calls the
+-- PMS API, which checks each person's permissions. Do not grant table rights
+-- to those roles again.
 
 alter table public.property_memberships enable row level security;
 alter table public.properties enable row level security;
@@ -17,7 +23,6 @@ as $$
 $$;
 
 revoke all on function public.current_property_ids() from public;
-grant execute on function public.current_property_ids() to authenticated;
 
 drop policy if exists "employees read own membership" on public.property_memberships;
 create policy "employees read own membership"
