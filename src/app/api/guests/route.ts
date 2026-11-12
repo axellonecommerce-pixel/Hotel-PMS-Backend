@@ -111,11 +111,13 @@ function apiStatus(status: string) { return status === "do_not_rent" ? "Do Not R
 function storedStatus(status: z.infer<typeof guestStatusSchema>) { return status === "Do Not Rent" ? "do_not_rent" : status.toLowerCase(); }
 function normalizedId(value: string) { return value.replace(/\s/g, "").toUpperCase(); }
 
-async function listGuests(propertyId: string) {
+async function listGuests(propertyId: string, only: string[] | null = null) {
   const sql = productionSql();
+  // Only these guests (a "changed since" read), or all of them.
+  const onlyGuests = (column: string) => only ? sql`and ${sql.unsafe(column)} = any(${only}::uuid[])` : sql``;
   const guests = await sql<Array<{ id: string; firstName: string; lastName: string; phone: string | null; email: string | null; address: unknown; guestStatus: string; remarks: string | null; dnrReason: string | null; roomPreferences: unknown; createdAt: string; updatedAt: string }>>`
     select id,first_name as "firstName",last_name as "lastName",phone,email,address,guest_status as "guestStatus",remarks,dnr_reason as "dnrReason",room_preferences as "roomPreferences",created_at::text as "createdAt",updated_at::text as "updatedAt"
-    from guests where property_id=${propertyId}::uuid and archived_at is null
+    from guests where property_id=${propertyId}::uuid and archived_at is null ${onlyGuests("id")}
       -- A guest whose data was deleted before archiving existed.
       and not (first_name='Deleted' and last_name='Guest' and phone is null and email is null and room_preferences='{}'::jsonb)
     order by created_at desc,last_name,first_name
@@ -123,16 +125,16 @@ async function listGuests(propertyId: string) {
   if (!guests.length) return [];
   const identities = await sql<Array<{ guestId: string; idType: string; idNumber: string }>>`
     select distinct on (guest_id) guest_id as "guestId",id_type as "idType",id_number as "idNumber"
-    from guest_identities where property_id=${propertyId}::uuid and deleted_at is null order by guest_id,captured_at desc
+    from guest_identities where property_id=${propertyId}::uuid and deleted_at is null ${onlyGuests("guest_id")} order by guest_id,captured_at desc
   `;
   const vehicles = await sql<Array<{ guestId: string; plate: string; make: string | null; color: string | null; year: string | null }>>`
-    select distinct on (guest_id) guest_id as "guestId",plate,make,color,year from guest_vehicles where property_id=${propertyId}::uuid order by guest_id,updated_at desc
+    select distinct on (guest_id) guest_id as "guestId",plate,make,color,year from guest_vehicles where property_id=${propertyId}::uuid ${onlyGuests("guest_id")} order by guest_id,updated_at desc
   `;
   const paymentSources = await sql<Array<{ guestId: string; id: string; label: string | null; last4: string | null; externalReference: string | null; method: string }>>`
-    select guest_id as "guestId",id,label,last4,external_reference as "externalReference",method from guest_payment_sources where property_id=${propertyId}::uuid order by created_at desc
+    select guest_id as "guestId",id,label,last4,external_reference as "externalReference",method from guest_payment_sources where property_id=${propertyId}::uuid ${onlyGuests("guest_id")} order by created_at desc
   `;
   const remarks = await sql<Array<{ guestId: string; id: string; text: string; createdAt: string }>>`
-    select guest_id as "guestId",id,remark as text,created_at::text as "createdAt" from guest_remarks where property_id=${propertyId}::uuid order by created_at
+    select guest_id as "guestId",id,remark as text,created_at::text as "createdAt" from guest_remarks where property_id=${propertyId}::uuid ${onlyGuests("guest_id")} order by created_at
   `;
   // Stay totals are what the guest was billed: every posted charge plus its
   // taxes (room tax, occupancy tax, …). Rate is the average nightly room rate.
@@ -145,7 +147,7 @@ async function listGuests(propertyId: string) {
         + coalesce((select sum(ct.amount_cents) from charge_taxes ct join charges c on c.id=ct.charge_id join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0))::int as "totalCents",
       (select string_agg(distinct p.method, ', ') from payments p join payment_allocations pa on pa.payment_id=p.id join folios f on f.id=pa.folio_id
         where f.reservation_id=r.id and upper(p.method)<>'OTA COMMISSION') as "paymentType"
-    from reservations r where r.property_id=${propertyId}::uuid and r.status='checked_out' order by r.departure_date desc
+    from reservations r where r.property_id=${propertyId}::uuid and r.status='checked_out' ${onlyGuests("r.main_guest_id")} order by r.departure_date desc
   `;
   const identityByGuest = new Map(identities.map((identity) => [identity.guestId, identity]));
   const vehicleByGuest = new Map(vehicles.map((vehicle) => [vehicle.guestId, vehicle]));
@@ -176,7 +178,29 @@ async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "guests.manage");
     if (!hasProductionDatabase()) return Response.json({ guests: [] });
-    return Response.json({ guests: await listGuests(session.propertyId) });
+    // ?since=<time>: only guests touched since then (profile, ID, vehicle,
+    // saved payments, remarks, or one of their stays and its charges or
+    // payments), plus the ids of guests removed from the list since.
+    const sinceParam = new URL(request.url).searchParams.get("since");
+    const since = sinceParam && !Number.isNaN(Date.parse(sinceParam)) ? new Date(Date.parse(sinceParam)).toISOString() : null;
+    const sql = productionSql();
+    const [{ syncedAt }] = await sql<Array<{ syncedAt: string }>>`select now()::text as "syncedAt"`;
+    if (!since) return Response.json({ guests: await listGuests(session.propertyId), syncedAt, partial: false });
+    const touched = await sql<Array<{ id: string }>>`
+      select g.id from guests g where g.property_id=${session.propertyId}::uuid and (
+        g.updated_at > ${since}::timestamptz
+        or exists (select 1 from guest_identities x where x.guest_id=g.id and (x.captured_at > ${since}::timestamptz or x.deleted_at > ${since}::timestamptz))
+        or exists (select 1 from guest_vehicles x where x.guest_id=g.id and x.updated_at > ${since}::timestamptz)
+        or exists (select 1 from guest_payment_sources x where x.guest_id=g.id and x.created_at > ${since}::timestamptz)
+        or exists (select 1 from guest_remarks x where x.guest_id=g.id and x.created_at > ${since}::timestamptz)
+        or exists (select 1 from reservations r where r.main_guest_id=g.id and (r.updated_at > ${since}::timestamptz
+          or exists (select 1 from folios f join charges c on c.folio_id=f.id where f.reservation_id=r.id and c.updated_at > ${since}::timestamptz)
+          or exists (select 1 from payments p where p.reservation_id=r.id and p.created_at > ${since}::timestamptz)))
+      )`;
+    const ids = touched.map((row) => row.id);
+    const guests = ids.length ? await listGuests(session.propertyId, ids) : [];
+    const kept = new Set(guests.map((guest) => guest.id));
+    return Response.json({ guests, removedIds: ids.filter((id) => !kept.has(id)), syncedAt, partial: true });
   } catch (error) { return propertyAccessResponse(error); }
 }
 
