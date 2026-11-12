@@ -1,8 +1,9 @@
 import { propertyAccessResponse, requirePropertySession, requireSettingsSection } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 /** The motel's own InnSeva subscription and payments, read-only (set by the platform admin). */
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.manage");
     requireSettingsSection(session, "Subscription");
@@ -20,3 +21,6 @@ export async function GET(request: Request) {
     return Response.json({ subscription: subscription ?? null, payments });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

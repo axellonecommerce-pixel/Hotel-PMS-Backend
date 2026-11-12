@@ -1,5 +1,6 @@
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 // Closed shift history. Shifts are opened and closed through /api/shifts.
 
@@ -61,7 +62,7 @@ async function listRecords(propertyId: string) {
   return rows.map(toRecord);
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "cash.manage");
     if (!hasProductionDatabase()) return Response.json({ records: [] });
@@ -70,3 +71,6 @@ export async function GET(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

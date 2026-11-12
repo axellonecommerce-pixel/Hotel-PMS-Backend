@@ -8,6 +8,7 @@ import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { recordCashDrop } from "@/server/finance/cash-sources";
 import { cashActivityBetween } from "@/server/finance/shift-guard";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 // HotelKey "Start / End Shift": a clerk opens a shift by counting the cash in
 // the drawer, takes payments during the shift, and closes it by counting the
@@ -70,7 +71,7 @@ async function clerkFor(db: Db, propertyId: string, authUserId: string) {
   return created;
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "cash.manage");
     const sql = productionSql();
@@ -136,4 +137,7 @@ async function handlePOST(request: Request) {
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

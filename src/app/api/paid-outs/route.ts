@@ -5,6 +5,7 @@ import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 // HotelKey "Paid Outs": cash handed out of the front-desk drawer (supplies,
 // a cash refund to a walk-up, petty expenses). Each one lowers the expected
@@ -19,7 +20,7 @@ const createSchema = z.object({
 });
 const deleteSchema = z.object({ id: z.string().uuid() });
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "cash.manage");
     const parsed = rangeSchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
@@ -62,7 +63,7 @@ async function handlePOST(request: Request) {
 }
 
 /** A paid out recorded by mistake can be removed on the same business day. */
-export async function DELETE(request: Request) {
+async function routeDELETE(request: Request) {
   try {
     const session = await requirePropertySession(request, "cash.manage");
     const parsed = deleteSchema.safeParse(await request.json());
@@ -92,4 +93,8 @@ export async function DELETE(request: Request) {
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const DELETE = withRequestContext(routeDELETE);

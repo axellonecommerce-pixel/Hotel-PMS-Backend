@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 const querySchema = z.object({ q: z.string().trim().min(2).max(100) });
 
@@ -13,7 +14,7 @@ type SearchResult = {
   href: string;
 };
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const parsed = querySchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
@@ -75,3 +76,6 @@ export async function GET(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

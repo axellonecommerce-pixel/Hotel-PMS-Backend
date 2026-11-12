@@ -5,6 +5,7 @@ import { db } from "@/server/db/client";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { guests } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 type StoredAddress = {
   addressLine1?: string;
@@ -19,7 +20,7 @@ function guestStatus(status: string) {
   return status === "do_not_rent" ? "Do Not Rent" : status === "returning" ? "Returning" : status === "regular" ? "Regular" : "New";
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   let session;
   try {
     session = await requirePropertySession(request, "guests.manage");
@@ -89,3 +90,6 @@ export async function GET(request: Request) {
     },
   });
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

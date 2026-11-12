@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { readReservationCommission } from "@/server/finance/ota-commission";
+import { withRequestContext } from "@/server/db/request-context";
 
 /**
  * The booking's price breakdown, in the order an OTA extranet shows it:
@@ -10,7 +11,7 @@ import { readReservationCommission } from "@/server/finance/ota-commission";
  * the total guest payment, the source's commission (a share of the room
  * after promotions, never of the tax) and the hotel's payout. Also per night.
  */
-export async function GET(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routeGET(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const { reservationId } = await context.params;
@@ -92,3 +93,6 @@ export async function GET(request: Request, context: { params: Promise<{ reserva
     });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

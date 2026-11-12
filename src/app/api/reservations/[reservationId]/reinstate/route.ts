@@ -5,6 +5,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { setReservationCommission } from "@/server/finance/ota-commission";
 import { logReservationActivity } from "@/server/activity/reservation-activity";
+import { withRequestContext } from "@/server/db/request-context";
 
 const reinstateSchema = z.object({
   expectedVersion: z.number().int().positive(),
@@ -41,7 +42,7 @@ function addReinstatementMetadata(notes: string | null, note?: string) {
 }
 
 /** Restore a released reserved stay with its original rent/tax audit trail. */
-export async function POST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routePOST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     if (!hasProductionDatabase()) return Response.json({ error: "Reservation reinstatement requires the PMS database." }, { status: 503 });
@@ -144,3 +145,6 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const POST = withRequestContext(routePOST);

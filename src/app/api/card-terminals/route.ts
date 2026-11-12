@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession, requireSettingsSection } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { BankAccountError, bankAccountFor } from "@/server/finance/cash-sources";
+import { withRequestContext } from "@/server/db/request-context";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,7 @@ const actionSchema = z.discriminatedUnion("action", [createSchema, updateSchema,
 
 class TerminalRequestError extends Error {}
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "payments.manage");
     if (!hasProductionDatabase()) return Response.json({ terminals: [] });
@@ -44,7 +45,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const parsed = actionSchema.safeParse(await request.clone().json().catch(() => null));
     // Remembering a report's columns is part of recording deposits; changing terminals is setup.
@@ -89,3 +90,7 @@ export async function POST(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);

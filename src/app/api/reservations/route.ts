@@ -20,13 +20,14 @@ import { depositView, type DepositRecord, type DepositTransactionRecord } from "
 import { addDays, rateCalendarDays, rateCalendarRestriction } from "@/server/rates/rate-calendar";
 import { roomInventory } from "@/server/rates/inventory";
 import { describeNoteChanges, logReservationActivity, money } from "@/server/activity/reservation-activity";
+import { withRequestContext } from "@/server/db/request-context";
 
 /**
  * The operational UI needs a real property-scoped read model after refresh.
  * This intentionally returns the compact list shape used by the front desk;
  * details remain loaded by the reservation workspace as that API expands.
  */
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     if (hasProductionDatabase()) {
@@ -671,7 +672,7 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
   return { guestId, reservationId: reservation.id, groupReservation: totalRoomCount > 1, roomRateCents: payload.nightlyRatesCents[0] ?? roomType.baseRateCents, roomRentCents, taxCents, commissionCents, otaNetCents: ota.grossCents - commissionCents, otaPaymentStatus, totalCents, balanceCents: ota.commissionDeducted && commissionCents > 0 ? totalCents - commissionCents : totalCents, version: 1 };
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   let session;
   try {
     session = await requirePropertySession(request, "reservations.manage");
@@ -1247,7 +1248,7 @@ async function updateProductionReservation(
   }
 }
 
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   let session;
   try {
     session = await requirePropertySession(request, "reservations.manage");
@@ -1296,3 +1297,8 @@ export async function PATCH(request: Request) {
   });
   return Response.json({ id, version: expectedVersion + 1, ...changes });
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const PATCH = withRequestContext(routePATCH);

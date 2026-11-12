@@ -6,6 +6,7 @@ import { allocateProductionDocumentNumber } from "@/server/finance/production-fi
 import { logReservationActivity } from "@/server/activity/reservation-activity";
 import { isUserMessage } from "@/server/http/errors";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 const createSchema = z.object({ name: z.string().trim().min(1).max(120).optional() });
 const deleteSchema = z.object({ folioId: z.string().uuid() });
@@ -22,7 +23,7 @@ function routeParams(context: { params: Promise<{ reservationId: string }> }) {
   return context.params.then(({ reservationId }) => reservationId);
 }
 
-export async function GET(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routeGET(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const reservationId = await routeParams(context);
@@ -75,7 +76,7 @@ async function handlePOST(request: Request, context: { params: Promise<{ reserva
   }
 }
 
-export async function DELETE(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routeDELETE(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const reservationId = await routeParams(context);
@@ -111,7 +112,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
  * charge_taxes. Moving the rent charges therefore keeps rent and tax together
  * without rewriting their financial amounts or ledger history.
  */
-export async function PATCH(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routePATCH(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const reservationId = await routeParams(context);
@@ -177,4 +178,9 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const PATCH = withRequestContext(routePATCH);
+export const DELETE = withRequestContext(routeDELETE);

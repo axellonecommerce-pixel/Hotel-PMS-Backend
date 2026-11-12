@@ -7,6 +7,7 @@ import { DIRECT_BILL_METHOD } from "@/server/finance/direct-bill";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { logReservationActivity } from "@/server/activity/reservation-activity";
 import { recordChange } from "@/server/realtime/change-events";
+import { withRequestContext } from "@/server/db/request-context";
 
 const undoSchema = z.object({ reason: z.string().trim().min(3).max(500) });
 
@@ -18,7 +19,7 @@ class UndoCheckoutError extends Error {}
  * stay's direct bill transfer and draft invoice are removed; an invoice that
  * was already sent or paid must be handled in Companies instead.
  */
-export async function POST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routePOST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const { reservationId } = await context.params;
@@ -87,3 +88,6 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const POST = withRequestContext(routePOST);

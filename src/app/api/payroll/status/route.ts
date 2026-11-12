@@ -1,5 +1,6 @@
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 /**
  * Payroll per employee, for Settings › Employees: an employee who has been
@@ -7,7 +8,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
  * made inactive nor deleted. Read-only (unlike GET /api/payroll, which
  * creates pay periods).
  */
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "payroll.manage");
     if (!hasProductionDatabase()) return Response.json({ employees: [] });
@@ -33,3 +34,6 @@ export async function GET(request: Request) {
     return Response.json({ employees: rows });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

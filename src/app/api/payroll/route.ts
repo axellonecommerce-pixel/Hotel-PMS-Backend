@@ -8,6 +8,7 @@ import { BankAccountError, bankAccountFor, CASH_ACCOUNTS, CASH_SOURCES, creditAc
 import { ShiftRequiredError } from "@/server/finance/shift-guard";
 import { grossPayCents, payForPeriod, splitWorkedMinutes, type PayChange, type WorkDay } from "@/server/payroll/pay-calculation";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 const PAYROLL_PAYMENT_METHODS = ["Cash", "Check", "Direct deposit", "Other"] as const;
 const updateSchema = z.union([
@@ -246,7 +247,7 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
   `;
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "payroll.manage");
     if (!hasProductionDatabase()) return Response.json({ employees: [], entries: [], history: [] });
@@ -578,4 +579,7 @@ async function handlePATCH(request: Request) {
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const PATCH = withIdempotency(handlePATCH);
+export const PATCH = withRequestContext(withIdempotency(handlePATCH));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

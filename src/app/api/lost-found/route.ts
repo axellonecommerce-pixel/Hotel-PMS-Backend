@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
+import { withRequestContext } from "@/server/db/request-context";
 
 // HotelKey "Lost & Found": log a found item with where and when it was found,
 // keep it in storage, and record who it was returned to or how it was
@@ -24,7 +25,7 @@ const closeSchema = z.object({
   note: z.string().trim().max(500).optional(),
 });
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "lost_found.manage");
     const items = await productionSql()<Array<Record<string, unknown>>>`
@@ -41,7 +42,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "lost_found.manage");
     const parsed = createSchema.safeParse(await request.json());
@@ -61,7 +62,7 @@ export async function POST(request: Request) {
   }
 }
 
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "lost_found.manage");
     const parsed = closeSchema.safeParse(await request.json());
@@ -82,3 +83,8 @@ export async function PATCH(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const PATCH = withRequestContext(routePATCH);

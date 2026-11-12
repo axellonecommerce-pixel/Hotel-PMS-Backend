@@ -5,8 +5,9 @@ import { productionSql } from "@/server/db/production";
 import { createTenantBackup, resetTenantOperationalData, restoreTenantBackup, restoreTenantFiles, validateTenantBackup } from "@/server/backups/tenant-backup";
 import { deletePrivateFiles } from "@/server/storage/private-files";
 import { isUserMessage } from "@/server/http/errors";
+import { withRequestContext } from "@/server/db/request-context";
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "backups.manage");
     const backup = await createTenantBackup(productionSql(), session.propertyId);
@@ -15,7 +16,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "backups.manage");
     const body = await request.json();
@@ -35,7 +36,7 @@ export async function POST(request: Request) {
   }
 }
 
-export async function DELETE(request: Request) {
+async function routeDELETE(request: Request) {
   try {
     const session = await requirePropertySession(request, "backups.manage");
     const parsed = z.object({ confirmation: z.literal("RESET HOTEL DATA") }).safeParse(await request.json());
@@ -53,3 +54,8 @@ export async function DELETE(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const DELETE = withRequestContext(routeDELETE);

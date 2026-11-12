@@ -6,6 +6,7 @@ import {
   requirePlatformAdmin,
 } from "@/server/auth/platform-admin";
 import { provisionPlatformMotel } from "@/server/provisioning/platform-motel";
+import { withRequestContext } from "@/server/db/request-context";
 
 const motelSchema = z
   .object({
@@ -35,7 +36,7 @@ const motelSchema = z
     path: ["expiresOn"],
   });
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     await requirePlatformAdmin(request);
     if (!hasProductionDatabase())
@@ -92,7 +93,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     await requirePlatformAdmin(request);
     if (!hasProductionDatabase())
@@ -159,3 +160,7 @@ export async function POST(request: Request) {
     }
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);

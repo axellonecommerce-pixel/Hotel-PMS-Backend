@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { OTA_COMMISSION_CATEGORY } from "@/server/finance/ota-commission";
+import { withRequestContext } from "@/server/db/request-context";
 
 type Row = { source: "room" | "folio" | "misc" | "tax" | "ota" | "expense" | "paidOut" | "payroll" | "promotion"; category: string; month: string; cents: number };
 
@@ -25,7 +26,7 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
  *   show room revenue at the full rate and the promotions as a cost (the
  *   net is unchanged).
  */
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, ["profit_loss.view", "reports.view"]);
     const params = new URL(request.url).searchParams;
@@ -91,3 +92,6 @@ export async function GET(request: Request) {
     return Response.json({ start, end: range.data.end, postedThrough: end, rows });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

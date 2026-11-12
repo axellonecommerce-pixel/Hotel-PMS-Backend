@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { recordChange } from "@/server/realtime/change-events";
+import { withRequestContext } from "@/server/db/request-context";
 
 /**
  * Download guest data (Guests page): one guest's complete record — profile,
@@ -92,7 +93,7 @@ const totals = (stay: Stay) => {
   return { chargesCents, taxCents, paidCents, balanceCents: chargesCents + taxCents - paidCents };
 };
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "guests.manage");
     if (!hasProductionDatabase()) return Response.json({ error: "Guest downloads need the PMS database." }, { status: 503 });
@@ -169,3 +170,6 @@ export async function GET(request: Request) {
     return new Response(`﻿${csv(rows)}`, { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="${fileBase}.csv"` } });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

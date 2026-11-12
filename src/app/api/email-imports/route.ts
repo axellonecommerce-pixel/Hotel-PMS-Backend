@@ -3,9 +3,10 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { addReviewedBooking, announceImport, readImportLog, writeImportLog } from "@/server/email-import/import-booking";
+import { withRequestContext } from "@/server/db/request-context";
 
 /** Settings › Online Bookings: imported booking emails and those that need review. */
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     if (!hasProductionDatabase()) return Response.json({ entries: [] });
@@ -18,7 +19,7 @@ export async function GET(request: Request) {
 const resolveSchema = z.object({ messageId: z.string().min(1) });
 
 /** Staff dealt with an email in Needs review. */
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const parsed = resolveSchema.safeParse(await request.json().catch(() => null));
@@ -36,7 +37,7 @@ export async function PATCH(request: Request) {
 }
 
 /** Add a booking from review to Arrivals with every detail from its email. */
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const parsed = resolveSchema.safeParse(await request.json().catch(() => null));
@@ -49,3 +50,8 @@ export async function POST(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const PATCH = withRequestContext(routePATCH);

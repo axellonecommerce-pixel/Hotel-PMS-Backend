@@ -10,6 +10,7 @@ import { BankAccountError, bankAccountFor, CASH_SOURCES, creditAccountFor, isBan
 import { ShiftRequiredError } from "@/server/finance/shift-guard";
 import { recordChange } from "@/server/realtime/change-events";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 const expenseSchema = z.object({
   date: z.string().min(1), category: z.string().min(1), vendor: z.string().min(1),
@@ -27,7 +28,7 @@ function toClient(record: typeof expenses.$inferSelect) {
   return { id: record.id, date: record.expenseDate, category: record.category, vendor: record.vendor, description: record.description, paymentMethod: record.paymentMethod, amountCents: record.amountCents, notes: record.notes ?? undefined, receiptName: record.receiptReference ?? undefined, recurring: record.recurring, recurrence: record.recurrence ?? undefined, nextDueDate: record.nextDueDate ?? undefined, enteredBy: "Hotel Staff" };
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     if (hasProductionDatabase()) {
@@ -137,4 +138,7 @@ async function handlePOST(request: Request) {
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

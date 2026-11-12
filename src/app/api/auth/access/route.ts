@@ -8,13 +8,14 @@ import {
   platformAdminAccessResponse,
   requirePlatformAdmin,
 } from "@/server/auth/platform-admin";
+import { withRequestContext } from "@/server/db/request-context";
 
 /**
  * Verifies that a Supabase identity still belongs to an active motel. This is
  * intentionally separate from Supabase password authentication: deleting a
  * motel must revoke PMS access even when an old browser still has a session.
  */
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   const wantsPlatform =
     new URL(request.url).searchParams.get("scope") === "platform";
   if (wantsPlatform) {
@@ -59,3 +60,5 @@ export async function GET(request: Request) {
   }
 }
 
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

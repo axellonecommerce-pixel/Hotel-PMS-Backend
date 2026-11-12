@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 const entrySchema = z.object({
@@ -42,7 +43,7 @@ async function listEntries(propertyId: string) {
   `;
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "payroll.manage");
     if (!hasProductionDatabase()) return Response.json({ entries: [] });
@@ -50,7 +51,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "payroll.manage");
     const parsed = entrySchema.safeParse(await request.json());
@@ -114,7 +115,7 @@ export async function POST(request: Request) {
 }
 
 /** Delete a time entry entered by mistake. */
-export async function DELETE(request: Request) {
+async function routeDELETE(request: Request) {
   try {
     const session = await requirePropertySession(request, "payroll.manage");
     const parsed = z.object({ id: z.string().uuid() }).safeParse(await request.json());
@@ -125,3 +126,8 @@ export async function DELETE(request: Request) {
     return Response.json({ deleted: true });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const DELETE = withRequestContext(routeDELETE);

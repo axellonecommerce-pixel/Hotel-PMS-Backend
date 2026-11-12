@@ -6,6 +6,7 @@ import { postProductionLedger, propertyBusinessDate, reversalBusinessDate } from
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 import { isUserMessage } from "@/server/http/errors";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 const createSchema = z.object({
   // Older clients hold a display folio label and a configured charge-type
@@ -133,7 +134,7 @@ async function handlePOST(request: Request) {
   }
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const params = new URL(request.url).searchParams;
@@ -155,7 +156,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const parsed = editSchema.safeParse(await request.json());
@@ -226,7 +227,7 @@ export async function PATCH(request: Request) {
   }
 }
 
-export async function DELETE(request: Request) {
+async function routeDELETE(request: Request) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const parsed = deleteSchema.safeParse(await request.json());
@@ -274,4 +275,9 @@ export async function DELETE(request: Request) {
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const PATCH = withRequestContext(routePATCH);
+export const DELETE = withRequestContext(routeDELETE);

@@ -2,9 +2,10 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 /** HotelKey "Reservation Activity Log": every change to this reservation, newest first. */
-export async function GET(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routeGET(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const { reservationId } = await context.params;
@@ -21,3 +22,6 @@ export async function GET(request: Request, context: { params: Promise<{ reserva
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

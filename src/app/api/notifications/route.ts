@@ -2,8 +2,9 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.read");
     const records = await productionSql()<Array<Record<string, unknown>>>`
@@ -18,7 +19,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.read");
     const parsed = z.object({ id: z.string().uuid(), action: z.enum(["read", "resolve", "unread"]) }).safeParse(await request.json());
@@ -32,3 +33,7 @@ export async function PATCH(request: Request) {
     return Response.json({ updated: true });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const PATCH = withRequestContext(routePATCH);

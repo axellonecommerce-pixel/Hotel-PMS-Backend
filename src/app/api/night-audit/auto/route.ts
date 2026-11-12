@@ -1,6 +1,7 @@
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { nightAuditDue, nightAuditDueAt, runNightAudit } from "@/server/night-audit/run-night-audit";
+import { withRequestContext } from "@/server/db/request-context";
 
 /**
  * What every open screen needs to show the scheduled audit on time: the open
@@ -8,7 +9,7 @@ import { nightAuditDue, nightAuditDueAt, runNightAudit } from "@/server/night-au
  * run the database scheduler did is shown as soon as it finishes). Any role
  * can read it; only the schedule and run summary are returned.
  */
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.read");
     const [state] = await productionSql()<Array<{ businessDate: string; timezone: string; schedule: { enabled?: boolean; time?: string } | null }>>`
@@ -42,7 +43,7 @@ export async function GET(request: Request) {
  * once a minute; the server decides from the hotel's clock and saved time,
  * and the audit's lock plus the open-day check make it run only once.
  */
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.read");
     const [state] = await productionSql()<Array<{ businessDate: string; timezone: string; schedule: { enabled?: boolean; time?: string } | null }>>`
@@ -75,3 +76,7 @@ export async function POST(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);

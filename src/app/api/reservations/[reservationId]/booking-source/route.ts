@@ -5,6 +5,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { OtaCommissionError } from "@/server/finance/ota-commission";
 import { recordChange } from "@/server/realtime/change-events";
 import { changeBookingSource } from "@/server/reservations/booking-source";
+import { withRequestContext } from "@/server/db/request-context";
 
 const changeSchema = z.object({
   /** A reservation source configured in Settings (Booking.com, Expedia, Agoda, Website, Walk-In…). */
@@ -16,7 +17,7 @@ const changeSchema = z.object({
 });
 
 /** Change a reservation's source or OTA payment type, or confirm an online booking's room type. */
-export async function PATCH(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routePATCH(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     if (!hasProductionDatabase()) return Response.json({ error: "Changing the source requires the PMS database." }, { status: 503 });
@@ -32,3 +33,6 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const PATCH = withRequestContext(routePATCH);

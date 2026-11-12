@@ -4,6 +4,7 @@ import { cleanOverride, effectiveAccess, permissions, roleLabels, roles, type Ro
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { accessLayers, lockStaffAccess, readStaffAccess, supabaseAdmin, writeStaffAccess, type StaffAccess } from "@/server/auth/staff-access";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 /**
  * Settings › Users & Roles, for owners only: every login at the motel, what
@@ -103,7 +104,7 @@ async function listUsers(propertyId: string) {
 
 const ownerOnly = () => Response.json({ error: "Only the motel owner can manage logins and access." }, { status: 403 });
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "users.manage");
     if (session.role !== "owner") return ownerOnly();
@@ -113,7 +114,7 @@ export async function GET(request: Request) {
 }
 
 /** A new staff login: username (email), password, role and, optionally, the exact access. */
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "users.manage");
     if (session.role !== "owner") return ownerOnly();
@@ -159,7 +160,7 @@ export async function POST(request: Request) {
 }
 
 /** Change a staff login's role, password, access, or stop / allow its sign-in. */
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "users.manage");
     if (session.role !== "owner") return ownerOnly();
@@ -252,7 +253,7 @@ async function createRole(propertyId: string, body: unknown) {
  * What a whole role can open (every Front Desk login, every Night Auditor,
  * …). Logins given their own access keep it; the rest follow the role at once.
  */
-export async function PUT(request: Request) {
+async function routePUT(request: Request) {
   try {
     const session = await requirePropertySession(request, "users.manage");
     if (session.role !== "owner") return ownerOnly();
@@ -296,7 +297,7 @@ export async function PUT(request: Request) {
 }
 
 /** Delete a role the owner made. Its logins must be moved to another role first. */
-export async function DELETE(request: Request) {
+async function routeDELETE(request: Request) {
   try {
     const session = await requirePropertySession(request, "users.manage");
     if (session.role !== "owner") return ownerOnly();
@@ -316,3 +317,10 @@ export async function DELETE(request: Request) {
     return Response.json(await listUsers(session.propertyId));
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const PUT = withRequestContext(routePUT);
+export const PATCH = withRequestContext(routePATCH);
+export const DELETE = withRequestContext(routeDELETE);

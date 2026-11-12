@@ -1,3 +1,4 @@
+import { setRequestActor } from "@/server/db/request-context";
 import { timingSafeEqual } from "node:crypto";
 
 export class PlatformAdminAccessError extends Error {
@@ -38,6 +39,7 @@ export async function requirePlatformAdmin(request: Request) {
   // An address someone signed up with but never confirmed proves nothing.
   if (!user.email_confirmed_at) throw new PlatformAdminAccessError(403, "Confirm this account's email address before using the Platform Admin.");
   if (!configuredEmails().has(email)) throw new PlatformAdminAccessError(403, "This account is not a Platform Admin.");
+  setRequestActor({ authUserId: user.id, label: `Platform admin ${email}` });
   return { id: user.id, email };
 }
 

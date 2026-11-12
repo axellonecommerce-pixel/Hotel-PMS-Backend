@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 
 import { productionSql } from "@/server/db/production";
 import { nightAuditDue, runNightAudit } from "@/server/night-audit/run-night-audit";
+import { setRequestActor, withRequestContext } from "@/server/db/request-context";
 
 const sameSecret = (expected?: string | null, supplied?: string | null) =>
   Boolean(expected && supplied && expected.length === supplied.length && timingSafeEqual(Buffer.from(expected), Buffer.from(supplied)));
@@ -18,7 +19,8 @@ async function authorized(request: Request) {
   return sameSecret(row?.secret, token);
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
+  setRequestActor({ label: "Night audit (scheduled)" });
   if (!await authorized(request)) return Response.json({ error: "Unauthorized." }, { status: 401 });
   const properties = await productionSql()<Array<{ propertyId: string; timezone: string; businessDate: string; schedule: { enabled?: boolean; time?: string } | null }>>`
     select p.id as "propertyId",p.timezone,b.business_date::text as "businessDate",ps.value as schedule
@@ -51,4 +53,7 @@ export async function POST(request: Request) {
   return Response.json({ results });
 }
 
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const POST = withRequestContext(routePOST);
 export const GET = POST;

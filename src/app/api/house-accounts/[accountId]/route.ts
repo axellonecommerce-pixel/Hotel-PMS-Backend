@@ -6,6 +6,7 @@ import { postProductionLedger, propertyBusinessDate } from "@/server/finance/pro
 import { postPaymentLedger } from "@/server/finance/payment-ledger";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 const entrySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("charge"), chargeType: z.string().trim().min(1).max(80), description: z.string().trim().min(1).max(200), amountCents: z.number().int().positive().max(10_000_000) }),
@@ -15,7 +16,7 @@ const voidSchema = z.object({ chargeId: z.string().uuid() });
 
 class HouseAccountError extends Error {}
 
-export async function GET(request: Request, context: { params: Promise<{ accountId: string }> }) {
+async function routeGET(request: Request, context: { params: Promise<{ accountId: string }> }) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const { accountId } = await context.params;
@@ -85,7 +86,7 @@ async function handlePOST(request: Request, context: { params: Promise<{ account
 }
 
 /** Void a charge posted to a house account; its revenue is reversed. */
-export async function DELETE(request: Request, context: { params: Promise<{ accountId: string }> }) {
+async function routeDELETE(request: Request, context: { params: Promise<{ accountId: string }> }) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const { accountId } = await context.params;
@@ -112,4 +113,8 @@ export async function DELETE(request: Request, context: { params: Promise<{ acco
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const DELETE = withRequestContext(routeDELETE);

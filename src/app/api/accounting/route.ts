@@ -5,6 +5,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { BankAccountError, bankAccountBalances, bankAccountFor, bankLedgerAccount, CASH_ACCOUNTS, cashBalances, ensureDefaultBankAccount } from "@/server/finance/cash-sources";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
 import { cashActivityBetween } from "@/server/finance/shift-guard";
+import { withRequestContext } from "@/server/db/request-context";
 
 export const dynamic = "force-dynamic";
 
@@ -44,7 +45,7 @@ async function drawerCash(propertyId: string) {
   return { cents: last ? Math.max(0, last.countedCents - last.droppedCents) : 0, shiftOpen: false, clerk: null, detail: last ? "Left in the drawer when the last shift ended" : "No shift recorded yet" };
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     if (!hasProductionDatabase()) return Response.json({ error: "Accounting needs the PMS database." }, { status: 503 });
@@ -122,7 +123,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     if (!hasProductionDatabase()) return Response.json({ error: "Accounting needs the PMS database." }, { status: 503 });
@@ -175,3 +176,7 @@ export async function POST(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);

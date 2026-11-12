@@ -5,6 +5,7 @@ import { productionSql } from "@/server/db/production";
 import { postProductionLedger } from "@/server/finance/production-finance";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 import { isUserMessage } from "@/server/http/errors";
+import { withRequestContext } from "@/server/db/request-context";
 
 const updateSchema = z.object({
   roomRentCents: z.number().int().nonnegative().optional(),
@@ -27,7 +28,7 @@ function distributeCents(total: number, count: number) {
   return Array.from({ length: count }, (_, index) => base + (index < remainder ? 1 : 0));
 }
 
-export async function PATCH(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routePATCH(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const reservationId = await routeParams(context);
@@ -110,3 +111,6 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const PATCH = withRequestContext(routePATCH);

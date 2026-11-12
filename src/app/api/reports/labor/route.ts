@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 const querySchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -14,7 +15,7 @@ type LaborRecord = {
 };
 
 /** Read-only labor reports built from completed time and housekeeping records. */
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reports.view");
     const input = querySchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
@@ -88,3 +89,6 @@ export async function GET(request: Request) {
     } });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

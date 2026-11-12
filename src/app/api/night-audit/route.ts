@@ -3,6 +3,7 @@ import { productionSql } from "@/server/db/production";
 import { runNightAudit } from "@/server/night-audit/run-night-audit";
 import { z } from "zod";
 import { isUserMessage } from "@/server/http/errors";
+import { withRequestContext } from "@/server/db/request-context";
 
 class AlreadyAuditedError extends Error {
   constructor(expected: string, readonly openDate: string) {
@@ -10,7 +11,7 @@ class AlreadyAuditedError extends Error {
   }
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "night_audit.run");
     const [record] = await productionSql()<Array<{ value: { enabled?: boolean; time?: string } }>>`
@@ -28,7 +29,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function PUT(request: Request) {
+async function routePUT(request: Request) {
   try {
     const session = await requirePropertySession(request, "night_audit.run");
     const parsed = z.object({ enabled: z.boolean(), time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/) }).safeParse(await request.json());
@@ -46,7 +47,7 @@ export async function PUT(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "night_audit.run");
     const [employee] = await productionSql()<Array<{ id: string }>>`
@@ -73,3 +74,8 @@ export async function POST(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const PUT = withRequestContext(routePUT);

@@ -3,13 +3,14 @@ import { z } from "zod";
 import { summarizeRevenueLedger } from "@/server/finance/revenue-summary";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 const querySchema = z.object({
   start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 }).refine((value) => value.start <= value.end, { message: "Date range is invalid." });
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, ["revenue.view", "dashboard.view", "reports.view"]);
     const parsed = querySchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
@@ -81,3 +82,6 @@ export async function GET(request: Request) {
     return Response.json({ records, paymentBreakdown, reservationSources });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

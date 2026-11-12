@@ -1,9 +1,10 @@
 import { requirePropertySession, propertyAccessResponse } from "@/server/auth/property-session";
 import { changesAfter } from "@/server/realtime/change-events";
+import { withRequestContext } from "@/server/db/request-context";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.read");
     // Cursors are opaque: local SQLite events use an integer, while the
@@ -49,3 +50,6 @@ export async function GET(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

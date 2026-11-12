@@ -75,12 +75,12 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 
 ### MEDIUM
 
-**M1. Some financial rows are deleted instead of voided.**
+**M1. Some financial rows are deleted instead of voided.** — *Done another way (0027): every deleted money record keeps its full row, who deleted it and when in `audit_log`; the ledger was already reversed. Totals stay unchanged, so no report changes.*
 - *What:* deleting a payment, paid-out, an OTA settlement, an undo-checkout invoice, or unpaid payroll rows removes the rows. The ledger is reversed and an activity line written, so totals stay right, but the original row is gone.
 - *Fix:* add a `voided_at / voided_by / void_reason` to these tables and filter them out of totals instead of deleting.
 - *Auto-safe:* yes, but touches many queries; do it table by table.
 
-**M2. Audit trail covers reservations, not other money.**
+**M2. Audit trail covers reservations, not other money.** — *Done (0027): database triggers on 25 money and staff tables record every insert, change and delete with before/after and who (set per request); append-only; owners see it in Settings › Change History.*
 - *What:* `reservation_activity` records reservation changes well. Expenses, payroll, paid-outs, cash drops, invoices, house accounts and time entries have no before/after audit record (only the realtime `change_events`, which hold no details).
 - *Fix:* one `audit_log (property_id, user_id, action, entity_type, entity_id, before, after, reason, created_at)` table written by those routes; insert-only for everyone except the database owner.
 - *Auto-safe:* yes.
@@ -141,7 +141,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 | 2 | **C3** staging Supabase project (open: test project deleted); ~~**M6** migration runner; **L2**~~ **Done** | Small |
 | 3 | ~~**H1** idempotency keys; **M3** error messages; **H4** local token check~~ **Done in code 2026-11-12** (H1 needs migration 0025 on live) | Medium |
 | 4 | ~~**H3** double-booking constraint; **M5** CHECK constraints~~ **Done in code 2026-11-12** (migration 0026 to apply on live) | Medium |
-| 5 | **M1** void instead of delete; **M2** audit log | Medium |
+| 5 | ~~**M1** void instead of delete; **M2** audit log~~ **Done in code 2026-11-12** (migration 0027 to apply on live) | Medium |
 | 6 | **H2** date-windowed lists + server reports | Larger, needs careful testing |
 | 7 | **M4**, **M7**, **L1**, **L4–L6** | As you grow |
 

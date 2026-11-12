@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 
 import { provisionProperty } from "@/server/provisioning/provision-property";
+import { withRequestContext } from "@/server/db/request-context";
 
 const inputSchema = z.object({
   name: z.string().trim().min(1),
@@ -24,7 +25,7 @@ function validProvisioningKey(request: Request) {
   return expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   if (!validProvisioningKey(request)) return Response.json({ error: "Invalid provisioning credentials." }, { status: 401 });
   const parsed = inputSchema.safeParse(await request.json());
   if (!parsed.success) return Response.json({ error: "Hotel and owner details are required.", issues: parsed.error.flatten() }, { status: 400 });
@@ -37,3 +38,6 @@ export async function POST(request: Request) {
     return Response.json({ error: message }, { status: 409 });
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const POST = withRequestContext(routePOST);

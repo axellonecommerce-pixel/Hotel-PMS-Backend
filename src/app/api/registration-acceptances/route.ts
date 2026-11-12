@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { logReservationActivity } from "@/server/activity/reservation-activity";
 import { isUserMessage } from "@/server/http/errors";
+import { withRequestContext } from "@/server/db/request-context";
 
 // The guest's check-in acceptance: the exact Rules and Regulations and terms
 // they agreed to, with their name and hand signature. The registration card
@@ -28,7 +29,7 @@ function readSignature(value: string | null): StoredSignature | null {
   }
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const reservationId = new URL(request.url).searchParams.get("reservationId") ?? "";
@@ -43,7 +44,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const parsed = acceptanceSchema.safeParse(await request.json());
@@ -85,3 +86,7 @@ export async function POST(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);

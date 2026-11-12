@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { recordChange } from "@/server/realtime/change-events";
+import { withRequestContext } from "@/server/db/request-context";
 
 const querySchema = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) });
 const updateSchema = z.object({
@@ -25,7 +26,7 @@ function recordState(status: RecordRow["status"]) {
   return { cleanliness: "dirty", assignment: "unassigned" };
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "housekeeping.manage");
     const date = querySchema.safeParse({ date: new URL(request.url).searchParams.get("date") });
@@ -51,7 +52,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function PUT(request: Request) {
+async function routePUT(request: Request) {
   try {
     const session = await requirePropertySession(request, "housekeeping.manage");
     const parsed = updateSchema.safeParse(await request.json());
@@ -89,3 +90,7 @@ export async function PUT(request: Request) {
     return GET(new Request(`${new URL(request.url).origin}${new URL(request.url).pathname}?date=${parsed.data.serviceDate}`, { headers: request.headers }));
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const PUT = withRequestContext(routePUT);

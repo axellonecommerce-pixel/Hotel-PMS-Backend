@@ -5,6 +5,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { db } from "@/server/db/client";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { savedReportDefinitions } from "@/server/db/schema";
+import { withRequestContext } from "@/server/db/request-context";
 
 const schema = z.object({ name: z.string().trim().min(1), reportId: z.string().trim().min(1), columnKeys: z.array(z.string()).min(1) });
 const storedReportsSchema = z.array(z.object({
@@ -20,7 +21,7 @@ function parseStoredReports(value: unknown) {
   return storedReportsSchema.safeParse(value).data ?? [];
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reports.view");
     if (hasProductionDatabase()) {
@@ -34,7 +35,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "reports.view");
     const parsed = schema.safeParse(await request.json());
@@ -65,3 +66,7 @@ export async function POST(request: Request) {
     return Response.json({ report }, { status: 201 });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);

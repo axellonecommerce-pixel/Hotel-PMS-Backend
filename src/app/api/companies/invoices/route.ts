@@ -8,6 +8,7 @@ import { postPaymentLedger } from "@/server/finance/payment-ledger";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 import { isUserMessage } from "@/server/http/errors";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 const companyQuerySchema = z.object({ companyId: z.string().uuid() });
 const sendInvoiceSchema = z.discriminatedUnion("action", [
@@ -28,7 +29,7 @@ function invoiceStatus(status: string) {
   return status.split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "companies.manage");
     const parsed = companyQuerySchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
@@ -186,7 +187,10 @@ async function handlePOST(request: Request) {
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const PATCH = withIdempotency(handlePATCH);
+export const PATCH = withRequestContext(withIdempotency(handlePATCH));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

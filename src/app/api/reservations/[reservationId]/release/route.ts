@@ -5,6 +5,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { allocateProductionDocumentNumber, postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { readReservationCommission, setReservationCommission } from "@/server/finance/ota-commission";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
+import { withRequestContext } from "@/server/db/request-context";
 
 const releaseSchema = z.object({
   expectedVersion: z.number().int().positive(),
@@ -36,7 +37,7 @@ function addReleaseMetadata(notes: string | null, event: Record<string, unknown>
  * reversing revenue, posting an optional fee, and freeing inventory must all
  * succeed or fail together.
  */
-export async function POST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routePOST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     if (!hasProductionDatabase()) return Response.json({ error: "Reservation release requires the PMS database." }, { status: 503 });
@@ -203,3 +204,6 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const POST = withRequestContext(routePOST);

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { recordChange } from "@/server/realtime/change-events";
+import { withRequestContext } from "@/server/db/request-context";
 
 const orderSchema = z.object({
   roomNumber: z.string().trim().min(1),
@@ -58,7 +59,7 @@ function toClient(row: OrderRow) {
 
 const selecting = `select m.id,r.number as "roomNumber",m.problem as note,initcap(m.priority) as priority,m.assigned_worker as "assignedWorker",m.cost_cents as "costCents",m.rentable,m.status,m.notes,m.created_at as "createdAt",m.completed_at as "completedAt",m.returned_to_service_at as "returnedToServiceAt" from maintenance_orders m join rooms r on r.id=m.room_id`;
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "maintenance.manage");
     if (!hasProductionDatabase()) return Response.json({ workOrders: [] });
@@ -96,7 +97,7 @@ async function releaseRoomIfUnblocked(tx: Tx, propertyId: string, roomNumber: st
   `;
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "maintenance.manage");
     const parsed = orderSchema.safeParse(await request.json());
@@ -143,7 +144,7 @@ export async function POST(request: Request) {
   }
 }
 
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "maintenance.manage");
     const parsed = updateSchema.safeParse(await request.json());
@@ -223,3 +224,8 @@ export async function PATCH(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const PATCH = withRequestContext(routePATCH);

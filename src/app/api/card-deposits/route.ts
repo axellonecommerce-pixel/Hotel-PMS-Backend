@@ -6,6 +6,7 @@ import { BankAccountError, bankAccountFor } from "@/server/finance/cash-sources"
 import { autoDepositSettings, DepositError, pendingDepositItems, settleDeposit, undoDeposit } from "@/server/finance/card-settlements";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +38,7 @@ const actionSchema = z.discriminatedUnion("action", [
   }),
 ]);
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     if (!hasProductionDatabase()) return Response.json({ pending: [], deposits: [], settings: null });
@@ -85,7 +86,7 @@ async function handlePOST(request: Request) {
 }
 
 /** Undo a deposit recorded by mistake; its payments wait for deposit again. */
-export async function DELETE(request: Request) {
+async function routeDELETE(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     const parsed = z.object({ id: z.string().uuid() }).safeParse(await request.json().catch(() => null));
@@ -97,4 +98,8 @@ export async function DELETE(request: Request) {
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const DELETE = withRequestContext(routeDELETE);

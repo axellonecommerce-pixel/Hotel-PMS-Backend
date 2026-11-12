@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { bankAccountBalances, bankLedgerAccount, ensureDefaultBankAccount } from "@/server/finance/cash-sources";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
+import { withRequestContext } from "@/server/db/request-context";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,7 @@ class BankAccountRequestError extends Error {}
 const usd = (cents: number) => `${cents < 0 ? "-" : ""}$${(Math.abs(cents) / 100).toFixed(2)}`;
 const actorId = (id: string) => /^[0-9a-f-]{36}$/i.test(id) ? id : null;
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     if (!hasProductionDatabase()) return Response.json({ accounts: [] });
@@ -39,7 +40,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     if (!hasProductionDatabase()) return Response.json({ error: "Bank accounts need the PMS database." }, { status: 503 });
@@ -81,7 +82,7 @@ export async function POST(request: Request) {
   }
 }
 
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     if (!hasProductionDatabase()) return Response.json({ error: "Bank accounts need the PMS database." }, { status: 503 });
@@ -144,3 +145,8 @@ export async function PATCH(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const PATCH = withRequestContext(routePATCH);

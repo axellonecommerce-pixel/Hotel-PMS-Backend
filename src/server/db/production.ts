@@ -1,5 +1,7 @@
 import postgres, { type Sql } from "postgres";
 
+import { currentRequestActor } from "./request-context";
+
 let client: Sql | null = null;
 
 export function hasProductionDatabase() {
@@ -24,11 +26,33 @@ export function productionSql() {
     void old.end({ timeout: 60 }).catch(() => undefined);
   }
   lastUsed = now;
-  client ??= postgres(connectionString, {
-    max: 5,
-    prepare: false,
-    idle_timeout: 20,
-    connect_timeout: 10,
-  });
+  if (!client) {
+    client = postgres(connectionString, {
+      max: 5,
+      prepare: false,
+      idle_timeout: 20,
+      connect_timeout: 10,
+    });
+    attributeTransactions(client);
+  }
   return client;
+}
+
+/**
+ * Every transaction opened during a signed-in API request first records who
+ * is making it (transaction-local settings, so pooled connections never
+ * carry it over). The audit log triggers (migration 0027) read them.
+ */
+function attributeTransactions(sql: Sql) {
+  const begin = sql.begin.bind(sql) as (...args: unknown[]) => Promise<unknown>;
+  (sql as unknown as { begin: (...args: unknown[]) => Promise<unknown> }).begin = (...args: unknown[]) => {
+    const actor = currentRequestActor();
+    const work = args[args.length - 1];
+    if (!actor || (!actor.actorAuthUserId && !actor.actorLabel) || typeof work !== "function") return begin(...args);
+    const attributed = async (tx: Sql) => {
+      await tx`select set_config('innseva.actor', ${actor.actorAuthUserId ?? ""}, true), set_config('innseva.actor_label', ${actor.actorLabel ?? ""}, true)`;
+      return (work as (tx: Sql) => unknown)(tx);
+    };
+    return begin(...args.slice(0, -1), attributed);
+  };
 }

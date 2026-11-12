@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +23,7 @@ async function hasCashMovements() {
  * edits and deletes all move it. `areas` holds one fingerprint per area so
  * screens reload only what changed; `version` covers them all.
  */
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     // Every role can view reports, so every signed-in device can sync.
     const session = await requirePropertySession(request, "property.read");
@@ -85,3 +86,6 @@ export async function GET(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

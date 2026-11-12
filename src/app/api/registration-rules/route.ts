@@ -4,8 +4,9 @@ import { propertyAccessResponse, requirePropertySession, requireSettingsSection 
 import { db } from "@/server/db/client";
 import { registrationRuleVersions } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     if (hasProductionDatabase()) {
@@ -21,7 +22,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.manage");
     requireSettingsSection(session, "Property");
@@ -50,3 +51,7 @@ export async function POST(request: Request) {
     return Response.json({ rule }, { status: 201 });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);

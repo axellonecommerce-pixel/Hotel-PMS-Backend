@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { logReservationActivity } from "@/server/activity/reservation-activity";
+import { withRequestContext } from "@/server/db/request-context";
 
 // Undo Check-In: the wrong guest or reservation was checked in. The stay goes
 // back to Arrivals (Reserved) on the same business day; its charges,
@@ -14,7 +15,7 @@ const schema = z.object({ reason: z.string().trim().min(3, "Enter why the check-
 
 class UndoCheckInError extends Error {}
 
-export async function POST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routePOST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     if (!hasProductionDatabase()) return Response.json({ error: "Undo check-in needs the PMS database." }, { status: 503 });
@@ -51,3 +52,6 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const POST = withRequestContext(routePOST);

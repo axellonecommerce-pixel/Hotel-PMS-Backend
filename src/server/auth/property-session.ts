@@ -3,6 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/server/db/client";
 import { propertyMemberships } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { setRequestActor } from "@/server/db/request-context";
 import { verifySupabaseToken } from "./jwt";
 import { requirePlatformAdmin } from "./platform-admin";
 import { accessLayers, cleanStaffAccess, STAFF_ACCESS_KEY } from "./staff-access";
@@ -107,6 +108,7 @@ export async function requirePropertySession(request: Request, permission: Permi
     access: effectiveAccess(layers.custom ? layers.custom.basedOn : membership.role, layers.override, layers.roleOverride),
     roleLabel: layers.custom?.name ?? roleLabels[membership.role],
   };
+  setRequestActor({ authUserId, propertyId: membership.propertyId });
   const wanted = typeof permission === "string" ? [permission] : permission;
   const results = wanted.map((item) => authorizePropertyAccess(session, membership!.propertyId, item));
   const authorization = results.find((result) => result.allowed) ?? results[0];

@@ -5,6 +5,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { OtaCommissionError, setReservationCommission } from "@/server/finance/ota-commission";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
+import { withRequestContext } from "@/server/db/request-context";
 
 const commissionSchema = z.object({
   commissionCents: z.number().int().min(0).max(100_000_000),
@@ -12,7 +13,7 @@ const commissionSchema = z.object({
 });
 
 /** Manually correct the total OTA commission for one reservation. */
-export async function PATCH(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routePATCH(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "payments.manage");
     if (!hasProductionDatabase()) return Response.json({ error: "Commission changes require the PMS database." }, { status: 503 });
@@ -44,3 +45,6 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const PATCH = withRequestContext(routePATCH);

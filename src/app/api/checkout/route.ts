@@ -8,6 +8,7 @@ import { logReservationActivity, money } from "@/server/activity/reservation-act
 import { recordChange } from "@/server/realtime/change-events";
 import { isUserMessage } from "@/server/http/errors";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 const checkoutSchema = z.object({
   reservationId: z.string().uuid(),
@@ -209,4 +210,4 @@ async function handlePOST(request: Request) {
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));

@@ -2,13 +2,14 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 const areas = ["Front Desk", "Maintenance", "Housekeeping", "Manager"] as const;
 const createSchema = z.object({ text: z.string().trim().min(1).max(500), area: z.enum(areas) });
 const updateSchema = z.object({ id: z.string().uuid(), completed: z.boolean() });
 type TaskRow = { id: string; text: string; area: (typeof areas)[number]; completed: boolean; createdAt: string };
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.read");
     if (!hasProductionDatabase()) return Response.json({ tasks: [] });
@@ -21,7 +22,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.read");
     const parsed = createSchema.safeParse(await request.json());
@@ -36,7 +37,7 @@ export async function POST(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.read");
     const parsed = updateSchema.safeParse(await request.json());
@@ -52,3 +53,8 @@ export async function PATCH(request: Request) {
     return Response.json({ task });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const PATCH = withRequestContext(routePATCH);

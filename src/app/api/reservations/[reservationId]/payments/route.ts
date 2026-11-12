@@ -12,6 +12,7 @@ import { refundOnProcessor, TerminalError } from "@/server/terminal/terminal-ser
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 import { isUserMessage } from "@/server/http/errors";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 const paymentSchema = z.object({
   // The existing workspace uses a client folio handle. The authoritative
@@ -45,7 +46,7 @@ function routeParams(context: { params: Promise<{ reservationId: string }> }) {
   return context.params.then(({ reservationId }) => reservationId);
 }
 
-export async function GET(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routeGET(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const reservationId = await routeParams(context);
@@ -170,7 +171,7 @@ async function handlePATCH(request: Request, context: { params: Promise<{ reserv
   }
 }
 
-export async function DELETE(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routeDELETE(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const reservationId = await routeParams(context);
@@ -201,7 +202,11 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const PATCH = withIdempotency(handlePATCH);
+export const PATCH = withRequestContext(withIdempotency(handlePATCH));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const DELETE = withRequestContext(routeDELETE);

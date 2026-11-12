@@ -5,6 +5,7 @@ import { db } from "@/server/db/client";
 import { attachments } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { deletePrivateFiles, signedPrivateFileUrl, uploadPrivateFile } from "@/server/storage/private-files";
+import { withRequestContext } from "@/server/db/request-context";
 
 const allowedTypes = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf"]);
 
@@ -19,7 +20,7 @@ async function contentMatchesType(file: File) {
   return false;
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const form = await request.formData();
     const file = form.get("file");
@@ -70,7 +71,7 @@ export async function POST(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, ["guests.manage", "expenses.manage", "maintenance.manage"]);
     const id = new URL(request.url).searchParams.get("id");
@@ -91,3 +92,7 @@ export async function GET(request: Request) {
     return Response.json({ url: await signedPrivateFileUrl(attachment.storageKey), originalName: attachment.originalName });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);

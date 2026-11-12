@@ -6,6 +6,7 @@ import { db } from "@/server/db/client";
 import { companies } from "@/server/db/schema";
 import { recordChange } from "@/server/realtime/change-events";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 const companySchema = z.object({
   name: z.string().trim().min(1),
@@ -17,7 +18,7 @@ const companySchema = z.object({
   paymentTermsDays: z.number().int().nonnegative(),
 });
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "companies.manage");
     if (hasProductionDatabase()) {
@@ -46,7 +47,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "companies.manage");
     const parsed = companySchema.safeParse(await request.json());
@@ -76,7 +77,7 @@ export async function POST(request: Request) {
 
 const updateSchema = companySchema.partial().extend({ id: z.string().min(1) });
 
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "companies.manage");
     const parsed = updateSchema.safeParse(await request.json());
@@ -112,3 +113,8 @@ export async function PATCH(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const PATCH = withRequestContext(routePATCH);

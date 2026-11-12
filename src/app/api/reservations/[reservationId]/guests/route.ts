@@ -5,6 +5,7 @@ import { productionSql } from "@/server/db/production";
 import { recordChange } from "@/server/realtime/change-events";
 import { logReservationActivity } from "@/server/activity/reservation-activity";
 import { isUserMessage } from "@/server/http/errors";
+import { withRequestContext } from "@/server/db/request-context";
 
 const bodySchema = z.object({
   guestId: z.string().uuid(),
@@ -19,7 +20,7 @@ async function reservationIdFrom(context: { params: Promise<{ reservationId: str
  * through /api/guests first so identity/contact data stays reusable and the
  * reservation join table only expresses the stay relationship.
  */
-export async function POST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routePOST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const parsed = bodySchema.safeParse(await request.json());
@@ -67,7 +68,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
 
 /** Remove only the relationship to this stay; the reusable guest profile and
  * its identity history remain available for future reservations. */
-export async function DELETE(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routeDELETE(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const parsed = bodySchema.safeParse(await request.json());
@@ -100,3 +101,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const POST = withRequestContext(routePOST);
+export const DELETE = withRequestContext(routeDELETE);

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 // HotelKey "House Accounts": a folio not tied to a guest stay, for things like
 // staff meals, lost keys, or walk-up laundry. Permanent accounts stay open;
@@ -19,7 +20,7 @@ const houseAccountBalance = `(
   - coalesce((select sum(p.amount_cents - coalesce((select sum(r.amount_cents) from refunds r where r.payment_id=p.id),0)) from payments p where p.house_account_id=ha.id),0)
 )::int`;
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const accounts = await productionSql()<Array<{ id: string; name: string; kind: string; status: string; notes: string | null; balanceCents: number; createdAt: string; closedAt: string | null }>>`
@@ -50,7 +51,7 @@ async function handlePOST(request: Request) {
   }
 }
 
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const parsed = updateSchema.safeParse(await request.json());
@@ -74,4 +75,8 @@ export async function PATCH(request: Request) {
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const PATCH = withRequestContext(routePATCH);

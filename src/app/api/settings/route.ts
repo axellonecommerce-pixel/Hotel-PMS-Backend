@@ -9,6 +9,7 @@ import { propertySettings } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { recordChange } from "@/server/realtime/change-events";
 import { initialApplicationSettings } from "@/server/provisioning/platform-motel";
+import { withRequestContext } from "@/server/db/request-context";
 
 type ConfiguredRoomType = { id?: string; name?: string; shortLabel?: string; maxOccupancy?: number; baseRateCents?: number; active?: boolean; sortOrder?: number };
 type ConfiguredRoom = { number?: string; roomTypeId?: string; floor?: number; buildingId?: string; housekeepingStatus?: string; serviceStatus?: string; smokingAllowed?: boolean; mapColumn?: number; mapRow?: number; mapWidth?: number; mapHeight?: number };
@@ -267,7 +268,7 @@ async function synchronizePropertyIdentity(tx: Parameters<typeof synchronizeConf
   `;
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.read");
     if (hasProductionDatabase()) {
@@ -344,7 +345,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function PUT(request: Request) {
+async function routePUT(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.manage");
     const parsed = settingsSchema.safeParse(await request.json());
@@ -415,3 +416,7 @@ export async function PUT(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const PUT = withRequestContext(routePUT);

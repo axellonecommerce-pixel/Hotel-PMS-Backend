@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
@@ -10,7 +11,7 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
  * the promotion discount, the promotions applied, and the booking's OTA
  * commission, so promotions and commission can be tracked together.
  */
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reports.view");
     const params = new URL(request.url).searchParams;
@@ -37,3 +38,6 @@ export async function GET(request: Request) {
     return Response.json({ rows });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

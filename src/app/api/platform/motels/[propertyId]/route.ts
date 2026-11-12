@@ -4,6 +4,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { platformAdminAccessResponse, requirePlatformAdmin } from "@/server/auth/platform-admin";
 import { purgeMotel } from "@/server/provisioning/motel-purge";
 import { updateOwnerAuthUser } from "@/server/provisioning/platform-motel";
+import { withRequestContext } from "@/server/db/request-context";
 
 const validTimezone = (zone: string) => { try { new Intl.DateTimeFormat("en-US", { timeZone: zone }); return true; } catch { return false; } };
 
@@ -22,7 +23,7 @@ const changeSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("payment"), amountCents: z.number().int().positive(), receivedOn: z.string().date(), paymentMethod: z.string().trim().min(1), reference: z.string().trim().max(200).optional(), note: z.string().trim().max(2000).optional() }),
 ]);
 
-export async function PATCH(request: Request, { params }: { params: Promise<{ propertyId: string }> }) {
+async function routePATCH(request: Request, { params }: { params: Promise<{ propertyId: string }> }) {
   try {
     await requirePlatformAdmin(request);
     if (!hasProductionDatabase()) return Response.json({ error: "The Platform Admin requires the production database." }, { status: 503 });
@@ -85,7 +86,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ pr
   } catch (error) { return platformAdminAccessResponse(error); }
 }
 
-export async function DELETE(request: Request, { params }: { params: Promise<{ propertyId: string }> }) {
+async function routeDELETE(request: Request, { params }: { params: Promise<{ propertyId: string }> }) {
   try {
     await requirePlatformAdmin(request);
     if (!hasProductionDatabase()) return Response.json({ error: "The Platform Admin requires the production database." }, { status: 503 });
@@ -96,3 +97,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ p
     return Response.json({ deleted: true, permanent: true });
   } catch (error) { return platformAdminAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const PATCH = withRequestContext(routePATCH);
+export const DELETE = withRequestContext(routeDELETE);

@@ -5,6 +5,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { postDueRecurringExpenses } from "@/server/expenses/recurring";
 import { autoDepositCards } from "@/server/finance/card-settlements";
 import { settleStaleTerminalPayments, syncPayouts } from "@/server/terminal/terminal-service";
+import { setRequestActor, withRequestContext } from "@/server/db/request-context";
 
 function authorized(request: Request) {
   const expected = process.env.CRON_SECRET; const supplied = request.headers.get("authorization")?.replace(/^Bearer /, "");
@@ -12,7 +13,8 @@ function authorized(request: Request) {
   return timingSafeEqual(Buffer.from(expected), Buffer.from(supplied));
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
+  setRequestActor({ label: "Daily job" });
   if (!authorized(request)) return Response.json({ error: "Unauthorized." }, { status: 401 });
   if (hasProductionDatabase()) {
     const sql = productionSql();
@@ -96,4 +98,7 @@ export async function POST(request: Request) {
   return Response.json({ idPhotosDeleted: 0 });
 }
 
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const POST = withRequestContext(routePOST);
 export const GET = POST;

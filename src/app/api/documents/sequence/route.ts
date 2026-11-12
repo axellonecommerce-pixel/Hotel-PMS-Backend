@@ -3,8 +3,9 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { allocateDocumentNumber } from "@/server/finance/documents";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { allocateProductionDocumentNumber } from "@/server/finance/production-finance";
+import { withRequestContext } from "@/server/db/request-context";
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const parsed = z.object({ date: z.string().optional() }).safeParse(await request.json().catch(() => ({})));
@@ -16,3 +17,6 @@ export async function POST(request: Request) {
     return Response.json({ documentNumber }, { status: 201 });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const POST = withRequestContext(routePOST);

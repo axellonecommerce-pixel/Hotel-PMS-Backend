@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 const querySchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -9,7 +10,7 @@ const querySchema = z.object({
   view: z.enum(["folios", "refunds", "bad-debt", "direct-billing", "outstanding-invoices"]),
 });
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reports.view");
     const input = querySchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
@@ -64,3 +65,6 @@ export async function GET(request: Request) {
     return Response.json({ report: { metrics: [{ label: input.data.view === "direct-billing" ? "Invoices" : "Open Invoices", value: records.length, format: "number" }, { label: "Billed", value: records.reduce((sum, record) => sum + record.totalCents, 0), format: "money" }, { label: "Collected", value: records.reduce((sum, record) => sum + record.paidCents, 0), format: "money" }, { label: "Amount Due", value: outstanding, format: "money" }], columns: [{ key: "invoice", label: "Invoice" }, { key: "company", label: "Company" }, { key: "due", label: "Due Date", format: "date" }, { key: "status", label: "Status", format: "status" }, { key: "total", label: "Billed", format: "money", align: "right" }, { key: "paid", label: "Collected", format: "money", align: "right" }, { key: "dueAmount", label: "Amount Due", format: "money", align: "right" }], rows: records.map((record) => ({ id: record.id, invoice: record.number, company: record.company, due: record.date, status: record.status, total: record.totalCents, paid: record.paidCents, dueAmount: record.totalCents-record.paidCents })), note: input.data.view === "direct-billing" ? "Direct-billing invoice balances are calculated from durable invoice lines and company payment allocations." : "Outstanding invoices exclude paid and void invoices and are filtered by due date." } });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

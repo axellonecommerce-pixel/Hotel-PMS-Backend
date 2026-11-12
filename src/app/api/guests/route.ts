@@ -5,6 +5,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { recordChange } from "@/server/realtime/change-events";
 import { profileDate } from "@/server/guests/profile-dates";
 import { deletePrivateFiles } from "@/server/storage/private-files";
+import { withRequestContext } from "@/server/db/request-context";
 
 type Address = { addressLine1?: string; postalCode?: string; city?: string; state?: string; country?: string; countryCode?: string };
 // These profile values live with the configurable guest preferences so they
@@ -171,7 +172,7 @@ async function listGuests(propertyId: string) {
   });
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "guests.manage");
     if (!hasProductionDatabase()) return Response.json({ guests: [] });
@@ -179,7 +180,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "guests.manage");
     const parsed = updateSchema.safeParse(await request.json());
@@ -281,7 +282,7 @@ export async function PATCH(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "guests.manage");
     const body = await request.json();
@@ -356,7 +357,7 @@ export async function POST(request: Request) {
  * detail (contact, address, ID numbers and photos, vehicles, saved cards,
  * remarks) is erased.
  */
-export async function DELETE(request: Request) {
+async function routeDELETE(request: Request) {
   try {
     const session = await requirePropertySession(request, "guests.manage");
     const guestId = new URL(request.url).searchParams.get("guestId") ?? "";
@@ -398,3 +399,9 @@ export async function DELETE(request: Request) {
     return Response.json({ mode: result.mode });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const PATCH = withRequestContext(routePATCH);
+export const DELETE = withRequestContext(routeDELETE);

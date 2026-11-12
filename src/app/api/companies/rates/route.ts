@@ -2,13 +2,14 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 // roomTypeId may be a Settings id ("room-type-…"); the name resolves the
 // relational room type (smoking variants share one rate).
 const rateSchema = z.object({ companyId: z.string().uuid(), roomTypeId: z.string().min(1), roomTypeName: z.string().trim().optional(), rateCents: z.number().int().nonnegative() });
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export async function PUT(request: Request) {
+async function routePUT(request: Request) {
   try {
     const session = await requirePropertySession(request, "companies.manage");
     const parsed = rateSchema.safeParse(await request.json());
@@ -31,7 +32,7 @@ export async function PUT(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function DELETE(request: Request) {
+async function routeDELETE(request: Request) {
   try {
     const session = await requirePropertySession(request, "companies.manage");
     const parsed = z.object({ companyId: z.string().uuid(), roomTypeId: z.string().uuid() }).safeParse(await request.json());
@@ -40,3 +41,7 @@ export async function DELETE(request: Request) {
     return Response.json({ deleted: removed.length > 0 });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const PUT = withRequestContext(routePUT);
+export const DELETE = withRequestContext(routeDELETE);

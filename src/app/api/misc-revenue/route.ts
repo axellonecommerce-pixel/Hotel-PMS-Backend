@@ -5,6 +5,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { recordChange } from "@/server/realtime/change-events";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 // Other Revenue (laundry, vending machine, ice machine, ...) is income that
 // never touches a guest folio. Each entry is a balanced ledger posting:
@@ -20,7 +21,7 @@ const entrySchema = z.object({
   amountCents: z.number().int().positive().max(100_000_000),
 });
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     const params = new URL(request.url).searchParams;
@@ -73,7 +74,7 @@ async function handlePOST(request: Request) {
   }
 }
 
-export async function DELETE(request: Request) {
+async function routeDELETE(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     const id = new URL(request.url).searchParams.get("id") ?? "";
@@ -108,4 +109,8 @@ export async function DELETE(request: Request) {
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const DELETE = withRequestContext(routeDELETE);

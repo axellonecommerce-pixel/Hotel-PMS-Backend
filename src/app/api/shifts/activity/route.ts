@@ -1,5 +1,6 @@
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 type ActivityLine = { at: string; type: string; method: string; reference: string; guest: string; room: string; amountCents: number; note: string };
 
@@ -8,7 +9,7 @@ type ActivityLine = { at: string; type: string; method: string; reference: strin
  * taken during one shift (the open shift, or `?shiftId=` for a closed one),
  * with totals by payment method.
  */
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "cash.manage");
     const sql = productionSql();
@@ -72,3 +73,6 @@ export async function GET(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { addDays } from "@/server/rates/rate-calendar";
+import { withRequestContext } from "@/server/db/request-context";
 
 // HotelKey "Managing Preventative Maintenance": recurring tasks (AC filters,
 // pest control, smoke detector tests) with a frequency and next due date.
@@ -20,7 +21,7 @@ const updateSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("deactivate"), id: z.string().uuid() }),
 ]);
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "maintenance.manage");
     const sql = productionSql();
@@ -38,7 +39,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "maintenance.manage");
     const parsed = createSchema.safeParse(await request.json());
@@ -60,7 +61,7 @@ export async function POST(request: Request) {
   }
 }
 
-export async function PATCH(request: Request) {
+async function routePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "maintenance.manage");
     const parsed = updateSchema.safeParse(await request.json());
@@ -87,3 +88,8 @@ export async function PATCH(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
+export const PATCH = withRequestContext(routePATCH);

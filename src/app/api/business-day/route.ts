@@ -1,5 +1,6 @@
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { withRequestContext } from "@/server/db/request-context";
 
 function localBusinessDate(timezone: string, now = new Date()) {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -16,7 +17,7 @@ function localBusinessDate(timezone: string, now = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.read");
     if (!hasProductionDatabase()) return Response.json({ businessDate: null });
@@ -34,7 +35,7 @@ export async function GET(request: Request) {
  * existed. The operation is intentionally owner/manager scoped and
  * idempotent: it only opens a day when this property has none.
  */
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "night_audit.run");
     if (!hasProductionDatabase()) return Response.json({ error: "Production database is unavailable." }, { status: 503 });
@@ -62,3 +63,7 @@ export async function POST(request: Request) {
     return Response.json(result, { status: result.created ? 201 : 200 });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);

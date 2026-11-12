@@ -8,6 +8,7 @@ import { postProductionLedger, propertyBusinessDate } from "@/server/finance/pro
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 import { withIdempotency } from "@/server/http/idempotency";
+import { withRequestContext } from "@/server/db/request-context";
 
 const DEPOSITS_HELD = "Security Deposits Held";
 /** Cash sits in the drawer; any other method is a card authorization. */
@@ -51,7 +52,7 @@ async function loadDepositView(propertyId: string, reservationId: string): Promi
   return depositView(deposit, transactions);
 }
 
-export async function GET(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function routeGET(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     return Response.json({ deposit: await loadDepositView(session.propertyId, await routeParams(context)) });
@@ -135,4 +136,7 @@ async function handlePOST(request: Request, context: { params: Promise<{ reserva
 }
 
 /** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
-export const POST = withIdempotency(handlePOST);
+export const POST = withRequestContext(withIdempotency(handlePOST));
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

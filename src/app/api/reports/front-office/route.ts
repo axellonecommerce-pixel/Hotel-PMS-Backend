@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { accountLabel, accountType, accountTypeOrder } from "@/server/finance/chart-of-accounts";
+import { withRequestContext } from "@/server/db/request-context";
 
 // Daily-use reports modelled on HotelKey's NextGen catalogue (Arrivals,
 // Departures List, In House Guest Balances, Do Not Rent, Payment Activity,
@@ -31,7 +32,7 @@ const count = (key: string, label: string): Column => ({ key, label, format: "nu
 const sum = <T,>(rows: T[], pick: (row: T) => number) => rows.reduce((total, row) => total + pick(row), 0);
 const statusLabel = (value: string) => value.split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
 
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reports.view");
     const input = querySchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
@@ -616,3 +617,6 @@ export async function GET(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);

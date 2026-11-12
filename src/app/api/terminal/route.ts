@@ -5,6 +5,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { BankAccountError, bankAccountFor } from "@/server/finance/cash-sources";
 import { isStripeKey, ProcessorError } from "@/server/terminal/stripe";
 import { connectStripe, disconnectTerminal, listReaders, loadConnection, registerReader, settleStaleTerminalPayments, syncPayouts, TerminalError } from "@/server/terminal/terminal-service";
+import { withRequestContext } from "@/server/db/request-context";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +26,7 @@ function errorResponse(error: unknown) {
 }
 
 /** Connection status (never the key) and readers; the front desk needs the readers to charge. */
-export async function GET(request: Request) {
+async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "payments.manage");
     if (!hasProductionDatabase()) return Response.json({ connection: null, readers: [] });
@@ -43,7 +44,7 @@ export async function GET(request: Request) {
   } catch (error) { return errorResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.manage");
     requireSettingsSection(session, "Payment Terminals");
@@ -67,3 +68,7 @@ export async function POST(request: Request) {
     return Response.json(await syncPayouts(sql, session.propertyId));
   } catch (error) { return errorResponse(error); }
 }
+
+/** Each request gets its own context (who is acting, for the audit log). */
+export const GET = withRequestContext(routeGET);
+export const POST = withRequestContext(routePOST);
