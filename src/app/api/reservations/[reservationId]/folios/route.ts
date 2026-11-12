@@ -4,6 +4,8 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { allocateProductionDocumentNumber } from "@/server/finance/production-finance";
 import { logReservationActivity } from "@/server/activity/reservation-activity";
+import { isUserMessage } from "@/server/http/errors";
+import { withIdempotency } from "@/server/http/idempotency";
 
 const createSchema = z.object({ name: z.string().trim().min(1).max(120).optional() });
 const deleteSchema = z.object({ folioId: z.string().uuid() });
@@ -37,7 +39,7 @@ export async function GET(request: Request, context: { params: Promise<{ reserva
   }
 }
 
-export async function POST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function handlePOST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const reservationId = await routeParams(context);
@@ -68,7 +70,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     });
     return Response.json({ folio }, { status: 201 });
   } catch (error) {
-    if (error instanceof Error && /Reservation|folio/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /Reservation|folio/i)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
@@ -99,7 +101,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
     });
     return Response.json({ deleted });
   } catch (error) {
-    if (error instanceof Error && /Folio|folio/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /Folio|folio/i)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
@@ -169,7 +171,10 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
     });
     return Response.json(result);
   } catch (error) {
-    if (error instanceof Error && /Reservation|folio|room|charge/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /Reservation|folio|room|charge/i)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { createTenantBackup, resetTenantOperationalData, restoreTenantBackup, restoreTenantFiles, validateTenantBackup } from "@/server/backups/tenant-backup";
 import { deletePrivateFiles } from "@/server/storage/private-files";
+import { isUserMessage } from "@/server/http/errors";
 
 export async function GET(request: Request) {
   try {
@@ -29,7 +30,7 @@ export async function POST(request: Request) {
     await productionSql()`insert into backup_jobs (property_id,type,status,schema_version,manifest,completed_at) values (${session.propertyId}::uuid,'restore','completed',${backup.schemaVersion},${productionSql().json({ restoredAt: new Date().toISOString() })},now())`;
     return Response.json({ restored: true });
   } catch (error) {
-    if (error instanceof Error && /backup|schema|hotel/i.test(error.message)) return Response.json({ error: error.message }, { status: 400 });
+    if (isUserMessage(error, /backup|schema|hotel/i)) return Response.json({ error: error.message }, { status: 400 });
     return propertyAccessResponse(error);
   }
 }

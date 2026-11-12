@@ -5,6 +5,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { BankAccountError, bankAccountFor } from "@/server/finance/cash-sources";
 import { autoDepositSettings, DepositError, pendingDepositItems, settleDeposit, undoDeposit } from "@/server/finance/card-settlements";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
+import { withIdempotency } from "@/server/http/idempotency";
 
 export const dynamic = "force-dynamic";
 
@@ -55,7 +56,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     if (!hasProductionDatabase()) return Response.json({ error: "Card deposits need the PMS database." }, { status: 503 });
@@ -94,3 +95,6 @@ export async function DELETE(request: Request) {
     return Response.json({ undone: true });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger } from "@/server/finance/production-finance";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
+import { isUserMessage } from "@/server/http/errors";
 
 const updateSchema = z.object({
   roomRentCents: z.number().int().nonnegative().optional(),
@@ -105,7 +106,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
     });
     return Response.json(result);
   } catch (error) {
-    if (error instanceof Error && /reservation|room|tax/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /reservation|room|tax/i)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }

@@ -10,6 +10,8 @@ import { isCardMethod } from "@/server/finance/card-settlements";
 import { ProcessorError } from "@/server/terminal/stripe";
 import { refundOnProcessor, TerminalError } from "@/server/terminal/terminal-service";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
+import { isUserMessage } from "@/server/http/errors";
+import { withIdempotency } from "@/server/http/idempotency";
 
 const paymentSchema = z.object({
   // The existing workspace uses a client folio handle. The authoritative
@@ -63,7 +65,7 @@ export async function GET(request: Request, context: { params: Promise<{ reserva
   }
 }
 
-export async function POST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function handlePOST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const reservationId = await routeParams(context);
@@ -122,12 +124,12 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     return Response.json({ payment }, { status: 201 });
   } catch (error) {
     if (error instanceof ShiftRequiredError) return Response.json({ error: error.message }, { status: 409 });
-    if (error instanceof Error && /Folio|Payment|Bad debt/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /Folio|Payment|Bad debt/)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
 
-export async function PATCH(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function handlePATCH(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const reservationId = await routeParams(context);
@@ -163,7 +165,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ reser
   } catch (error) {
     if (error instanceof ShiftRequiredError) return Response.json({ error: error.message }, { status: 409 });
     if (error instanceof ProcessorError || error instanceof TerminalError) return Response.json({ error: error.message }, { status: 409 });
-    if (error instanceof Error && /Payment|Refund|Bad debt/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /Payment|Refund|Bad debt/)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
@@ -193,7 +195,13 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
     if (!deleted) return Response.json({ error: "Payment not found." }, { status: 404 });
     return NextResponse.json({ deleted: true });
   } catch (error) {
-    if (error instanceof Error && /Bad debt|OTA commission|direct bill|already deposited|card terminal/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /Bad debt|OTA commission|direct bill|already deposited|card terminal/)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const PATCH = withIdempotency(handlePATCH);

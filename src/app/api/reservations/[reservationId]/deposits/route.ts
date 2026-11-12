@@ -7,6 +7,7 @@ import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
+import { withIdempotency } from "@/server/http/idempotency";
 
 const DEPOSITS_HELD = "Security Deposits Held";
 /** Cash sits in the drawer; any other method is a card authorization. */
@@ -59,7 +60,7 @@ export async function GET(request: Request, context: { params: Promise<{ reserva
   }
 }
 
-export async function POST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function handlePOST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const reservationId = await routeParams(context);
@@ -132,3 +133,6 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

@@ -7,6 +7,7 @@ import { postProductionLedger, propertyBusinessDate } from "@/server/finance/pro
 import { BankAccountError, bankAccountFor, CASH_ACCOUNTS, CASH_SOURCES, creditAccountFor, isBankMethod, payOut, reverseCashOut, type CashSource } from "@/server/finance/cash-sources";
 import { ShiftRequiredError } from "@/server/finance/shift-guard";
 import { grossPayCents, payForPeriod, splitWorkedMinutes, type PayChange, type WorkDay } from "@/server/payroll/pay-calculation";
+import { withIdempotency } from "@/server/http/idempotency";
 
 const PAYROLL_PAYMENT_METHODS = ["Cash", "Check", "Direct deposit", "Other"] as const;
 const updateSchema = z.union([
@@ -418,7 +419,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function PATCH(request: Request) {
+async function handlePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "payroll.manage");
     const parsed = updateSchema.safeParse(await request.json());
@@ -575,3 +576,6 @@ export async function PATCH(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const PATCH = withIdempotency(handlePATCH);

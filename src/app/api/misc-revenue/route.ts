@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { recordChange } from "@/server/realtime/change-events";
+import { withIdempotency } from "@/server/http/idempotency";
 
 // Other Revenue (laundry, vending machine, ice machine, ...) is income that
 // never touches a guest folio. Each entry is a balanced ledger posting:
@@ -42,7 +43,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     const parsed = entrySchema.safeParse(await request.json());
@@ -105,3 +106,6 @@ export async function DELETE(request: Request) {
     return Response.json({ deleted: true });
   } catch (error) { return propertyAccessResponse(error); }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

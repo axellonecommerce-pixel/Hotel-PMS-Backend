@@ -5,6 +5,7 @@ import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
 import { postPaymentLedger } from "@/server/finance/payment-ledger";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
+import { withIdempotency } from "@/server/http/idempotency";
 
 const entrySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("charge"), chargeType: z.string().trim().min(1).max(80), description: z.string().trim().min(1).max(200), amountCents: z.number().int().positive().max(10_000_000) }),
@@ -35,7 +36,7 @@ export async function GET(request: Request, context: { params: Promise<{ account
   }
 }
 
-export async function POST(request: Request, context: { params: Promise<{ accountId: string }> }) {
+async function handlePOST(request: Request, context: { params: Promise<{ accountId: string }> }) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const { accountId } = await context.params;
@@ -109,3 +110,6 @@ export async function DELETE(request: Request, context: { params: Promise<{ acco
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

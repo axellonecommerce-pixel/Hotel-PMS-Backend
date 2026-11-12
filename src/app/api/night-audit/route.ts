@@ -2,6 +2,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { runNightAudit } from "@/server/night-audit/run-night-audit";
 import { z } from "zod";
+import { isUserMessage } from "@/server/http/errors";
 
 class AlreadyAuditedError extends Error {
   constructor(expected: string, readonly openDate: string) {
@@ -68,7 +69,7 @@ export async function POST(request: Request) {
     return Response.json(result, { status: result.status === "completed" ? 200 : 409 });
   } catch (error) {
     if (error instanceof AlreadyAuditedError) return Response.json({ error: error.message, alreadyAudited: true, businessDate: error.openDate }, { status: 409 });
-    if (error instanceof Error && /business day/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /business day/i)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }

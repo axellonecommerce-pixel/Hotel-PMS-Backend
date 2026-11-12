@@ -4,6 +4,8 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate, reversalBusinessDate } from "@/server/finance/production-finance";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
+import { isUserMessage } from "@/server/http/errors";
+import { withIdempotency } from "@/server/http/idempotency";
 
 const createSchema = z.object({
   // Older clients hold a display folio label and a configured charge-type
@@ -61,7 +63,7 @@ function revenueAccount(context: Pick<ChargeContext, "revenueCategory" | "typeNa
     : `Revenue:${context.typeName}`;
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const parsed = createSchema.safeParse(await request.json());
@@ -126,7 +128,7 @@ export async function POST(request: Request) {
     });
     return Response.json({ charge, charges: charge.charges }, { status: 201 });
   } catch (error) {
-    if (error instanceof Error && /folio|tax|charge type/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /folio|tax|charge type/i)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
@@ -219,7 +221,7 @@ export async function PATCH(request: Request) {
     });
     return Response.json({ charge: updated });
   } catch (error) {
-    if (error instanceof Error && /charge|tax/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /charge|tax/i)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
@@ -266,7 +268,10 @@ export async function DELETE(request: Request) {
     });
     return Response.json(result);
   } catch (error) {
-    if (error instanceof Error && /charge/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /charge/i)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

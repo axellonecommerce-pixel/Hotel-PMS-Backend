@@ -9,6 +9,7 @@ import { postProductionLedger } from "@/server/finance/production-finance";
 import { BankAccountError, bankAccountFor, CASH_SOURCES, creditAccountFor, isBankMethod, payOut } from "@/server/finance/cash-sources";
 import { ShiftRequiredError } from "@/server/finance/shift-guard";
 import { recordChange } from "@/server/realtime/change-events";
+import { withIdempotency } from "@/server/http/idempotency";
 
 const expenseSchema = z.object({
   date: z.string().min(1), category: z.string().min(1), vendor: z.string().min(1),
@@ -61,7 +62,7 @@ export async function GET(request: Request) {
   } catch (error) { return propertyAccessResponse(error); }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     const parsed = expenseSchema.safeParse(await request.json());
@@ -134,3 +135,6 @@ export async function POST(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

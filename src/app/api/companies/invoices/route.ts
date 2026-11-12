@@ -6,6 +6,8 @@ import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { recordChange } from "@/server/realtime/change-events";
 import { postPaymentLedger } from "@/server/finance/payment-ledger";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
+import { isUserMessage } from "@/server/http/errors";
+import { withIdempotency } from "@/server/http/idempotency";
 
 const companyQuerySchema = z.object({ companyId: z.string().uuid() });
 const sendInvoiceSchema = z.discriminatedUnion("action", [
@@ -77,7 +79,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function PATCH(request: Request) {
+async function handlePATCH(request: Request) {
   try {
     const session = await requirePropertySession(request, "companies.manage");
     const parsed = sendInvoiceSchema.safeParse(await request.json());
@@ -127,12 +129,12 @@ export async function PATCH(request: Request) {
     await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "invoice", entityId: invoice.id, action: "updated", entityVersion: Math.floor(Date.now() / 1000), payload: { status: invoice.status, sentAt: invoice.sentAt } });
     return Response.json({ invoice: { id: invoice.id, status: invoiceStatus(invoice.status), sentAt: invoice.sentAt } });
   } catch (error) {
-    if (error instanceof Error && /credit|invoice/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /credit|invoice/i)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "companies.manage");
     const parsed = paymentSchema.safeParse(await request.json());
@@ -178,7 +180,13 @@ export async function POST(request: Request) {
     return Response.json({ payment }, { status: 201 });
   } catch (error) {
     if (error instanceof ShiftRequiredError) return Response.json({ error: error.message }, { status: 409 });
-    if (error instanceof Error && /Company|invoice|allocation/i.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /Company|invoice|allocation/i)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const PATCH = withIdempotency(handlePATCH);

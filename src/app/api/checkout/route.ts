@@ -6,13 +6,15 @@ import { allocateProductionDocumentNumber, propertyBusinessDate } from "@/server
 import { transferBalanceToCompany } from "@/server/finance/direct-bill";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 import { recordChange } from "@/server/realtime/change-events";
+import { isUserMessage } from "@/server/http/errors";
+import { withIdempotency } from "@/server/http/idempotency";
 
 const checkoutSchema = z.object({
   reservationId: z.string().uuid(),
   reservationRoomIds: z.array(z.string().uuid()).min(1),
 });
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const parsed = checkoutSchema.safeParse(await request.json());
@@ -199,9 +201,12 @@ export async function POST(request: Request) {
     });
     return Response.json(result);
   } catch (error) {
-    if (error instanceof Error && /checkout|deposit|balance|reservation/i.test(error.message)) {
+    if (isUserMessage(error, /checkout|deposit|balance|reservation/i)) {
       return Response.json({ error: error.message }, { status: 409 });
     }
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
+import { withIdempotency } from "@/server/http/idempotency";
 
 // HotelKey "Paid Outs": cash handed out of the front-desk drawer (supplies,
 // a cash refund to a walk-up, petty expenses). Each one lowers the expected
@@ -34,7 +35,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "cash.manage");
     const parsed = createSchema.safeParse(await request.json());
@@ -89,3 +90,6 @@ export async function DELETE(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

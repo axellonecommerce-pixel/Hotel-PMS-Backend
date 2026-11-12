@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { OtaCommissionError, payReservationCommission } from "@/server/finance/ota-commission";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
+import { withIdempotency } from "@/server/http/idempotency";
 
 const paySchema = z.object({
   reservationIds: z.array(z.string().uuid()).min(1).max(500),
@@ -13,7 +14,7 @@ const paySchema = z.object({
 });
 
 /** Pay Guest Pays Hotel commissions; each becomes an OTA Commission expense. */
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "expenses.manage");
     if (!hasProductionDatabase()) return Response.json({ error: "Commission payments require the PMS database." }, { status: 503 });
@@ -36,3 +37,6 @@ export async function POST(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

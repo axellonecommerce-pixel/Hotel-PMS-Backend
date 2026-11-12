@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
 import { logReservationActivity } from "@/server/activity/reservation-activity";
+import { isUserMessage } from "@/server/http/errors";
 
 // The guest's check-in acceptance: the exact Rules and Regulations and terms
 // they agreed to, with their name and hand signature. The registration card
@@ -80,7 +81,7 @@ export async function POST(request: Request) {
     });
     return Response.json({ acceptance }, { status: 201 });
   } catch (error) {
-    if (error instanceof Error && /Reservation not found/.test(error.message)) return Response.json({ error: error.message }, { status: 404 });
+    if (isUserMessage(error, /Reservation not found/)) return Response.json({ error: error.message }, { status: 404 });
     return propertyAccessResponse(error);
   }
 }

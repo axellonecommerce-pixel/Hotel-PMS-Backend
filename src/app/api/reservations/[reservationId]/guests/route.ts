@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { recordChange } from "@/server/realtime/change-events";
 import { logReservationActivity } from "@/server/activity/reservation-activity";
+import { isUserMessage } from "@/server/http/errors";
 
 const bodySchema = z.object({
   guestId: z.string().uuid(),
@@ -57,7 +58,7 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     }
     return Response.json({ guest: result }, { status: 201 });
   } catch (error) {
-    if (error instanceof Error && /Reservation|Guest|primary guest|already attached/.test(error.message)) {
+    if (isUserMessage(error, /Reservation|Guest|primary guest|already attached/)) {
       return Response.json({ error: error.message }, { status: 409 });
     }
     return propertyAccessResponse(error);
@@ -95,7 +96,7 @@ export async function DELETE(request: Request, context: { params: Promise<{ rese
     }
     return Response.json({ removed: true });
   } catch (error) {
-    if (error instanceof Error && /Reservation/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+    if (isUserMessage(error, /Reservation/)) return Response.json({ error: error.message }, { status: 409 });
     return propertyAccessResponse(error);
   }
 }

@@ -42,7 +42,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 - *Fix:* each migration that creates a table also enables RLS on it, and a test fails if any `public` table has RLS off. C1 removes most of the risk.
 - *Auto-safe:* yes.
 
-**C3. Local development uses the production database.**
+**C3. Local development uses the production database.** — *Done 2026-11-12: test project `innseva-test` created with the full schema, data API closed, sample motel; local `.env.local` files point to it; live credentials moved to `.env.live.local`.*
 - *What:* the backend's local `.env.local` points to the production Supabase pooler. Development servers, tests that touch the database, and dry-runs all hit real motel data.
 - *Why:* one mistaken script or test can change a live motel's money or guests. Not acceptable once other motels' data is in the same database.
 - *Fix:* create a separate Supabase project for staging/development (seeded with demo data). Production credentials only in Vercel's Production environment.
@@ -50,7 +50,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 
 ### HIGH
 
-**H1. No retry protection on taking a payment, refund or charge.**
+**H1. No retry protection on taking a payment, refund or charge.** — *Done in code: `Idempotency-Key` on 20 money handlers (17 routes), keys kept in `idempotency_keys` (migration 0025); tested on the test motel (double tap → 1 saved, retry → same answer replayed). Live needs migration 0025; until then the API runs exactly as before.*
 - *What:* `POST /api/reservations/:id/payments` (and charges, refunds, cash drops, paid-outs) have no idempotency key. The card-terminal path has one; cash and manual card do not.
 - *Why:* a double tap or a network retry on a phone can post the same payment twice (and its ledger lines).
 - *Fix:* the frontend sends an `Idempotency-Key` header per action; the API stores it in a small `idempotency_keys (property_id, key, response)` table, unique per motel, and returns the first result on a repeat.
@@ -67,7 +67,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 - *Fix:* add a date range on `reservation_rooms` (kept in sync by the API) and an exclusion constraint (`btree_gist`) on (room, dates) for active stays, as a backstop.
 - *Auto-safe:* after a check that no current overlaps exist (the migration would report them first).
 
-**H4. The sign-in check calls Supabase on every API request.**
+**H4. The sign-in check calls Supabase on every API request.** — *Done: tokens checked locally with the project's ES256 keys (0.4 ms vs ~164 ms); falls back to Supabase for tokens it cannot check.*
 - *What:* `verifiedAuthUserId` fetches `/auth/v1/user` for each request (~50–150 ms, and Supabase rate limits).
 - *Why:* slows every click and becomes a bottleneck with many motels.
 - *Fix:* verify the token locally with Supabase's JWT signing keys (JWKS), cached; keep the network check only for platform-admin actions.
@@ -85,7 +85,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 - *Fix:* one `audit_log (property_id, user_id, action, entity_type, entity_id, before, after, reason, created_at)` table written by those routes; insert-only for everyone except the database owner.
 - *Auto-safe:* yes.
 
-**M3. Error messages can leak database text.**
+**M3. Error messages can leak database text.** — *Done: `isUserMessage()` never passes a database error; 19 call sites in 11 routes.*
 - *What:* about 12 routes return `error.message` whenever it contains a word such as "charge", "room" or "tax" (`folios/charges`, `reservations/:id/rates`, …). A Postgres error such as `… violates foreign key constraint "charges_…"` matches and is shown to staff.
 - *Fix:* throw typed errors (as `ReservationRequestError` already does) and return a generic message otherwise; log the real error server-side.
 - *Auto-safe:* yes.
@@ -101,7 +101,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 - *Fix:* add `NOT VALID` checks (they protect new rows at once), then validate after confirming old rows pass.
 - *Auto-safe:* yes with `NOT VALID`.
 
-**M6. Migrations are applied by hand with no record.**
+**M6. Migrations are applied by hand with no record.** — *Done: `scripts/migrate.ts` with `schema_migrations` (test project recorded; live needs one `--baseline 0024` run).*
 - *What:* 25 SQL files in `drizzle-production/`; Drizzle's journal tracks only the first 9. There is no table saying which files a given database has.
 - *Fix:* a small `schema_migrations` table plus a `bun run migrate` script that applies pending files in order; same files for staging and production.
 - *Auto-safe:* yes.
@@ -114,7 +114,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 ### LOW
 
 - **L1.** `POST /api/admin/properties` is a leftover demo provisioning route (key-protected, writes to the demo SQLite path). Remove it; the Platform page is the real path.
-- **L2.** The backend has no `.env.example`; the frontend's is current. Add one with names only.
+- **L2.** *(Done.)* The backend has no `.env.example`; the frontend's is current. Add one with names only.
 - **L3.** `NEXT_PUBLIC_PMS_DEMO_AUTH_TOKEN` exists in the frontend; it only works when the backend is not in production mode. Make sure it is **not** set on Netlify production.
 - **L4.** No `organizations` table. An owner with several motels works through memberships today; an organization row becomes useful for one bill covering several motels. Not needed yet.
 - **L5.** Ledger accounts are free text in `ledger_entries.account`; a `ledger_accounts` list with a unique code would stop typos creating new accounts.
@@ -138,8 +138,8 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 | Step | Items | Size |
 |---|---|---|
 | 1 | ~~**C1** turn off the data API + revoke grants; **C2** RLS-on check; **L3**~~ **Done 2026-11-11** (Netlify checked: no demo token) | Small, do first |
-| 2 | **C3** staging Supabase project; **M6** migration runner; **L2** | Small (you create the project) |
-| 3 | **H1** idempotency keys; **M3** error messages; **H4** local token check | Medium |
+| 2 | ~~**C3** staging Supabase project; **M6** migration runner; **L2**~~ **Done 2026-11-12** | Small |
+| 3 | ~~**H1** idempotency keys; **M3** error messages; **H4** local token check~~ **Done in code 2026-11-12** (H1 needs migration 0025 on live) | Medium |
 | 4 | **H3** double-booking constraint; **M5** CHECK constraints (`NOT VALID`) | Medium |
 | 5 | **M1** void instead of delete; **M2** audit log | Medium |
 | 6 | **H2** date-windowed lists + server reports | Larger, needs careful testing |

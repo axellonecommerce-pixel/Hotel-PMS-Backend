@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { productionSql } from "@/server/db/production";
+import { withIdempotency } from "@/server/http/idempotency";
 
 // HotelKey "House Accounts": a folio not tied to a guest stay, for things like
 // staff meals, lost keys, or walk-up laundry. Permanent accounts stay open;
@@ -33,7 +34,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const parsed = createSchema.safeParse(await request.json());
@@ -71,3 +72,6 @@ export async function PATCH(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

@@ -47,6 +47,22 @@ These addresses must already be Supabase Auth users. The console intentionally
 uses the server-only Supabase secret to create owner accounts; never place that
 secret in frontend environment variables.
 
+## Test and live databases
+
+- **Test** Supabase project `innseva-test` (`vumtwyzdzqqnhmjtocad`): local development
+  and tests. `backend/.env.local` and `frontend/.env.local` point here. It holds
+  "InnSeva Test Motel" (owner `owner@innseva-test.dev`; password in
+  `.env.test-secrets.local`) with sample rooms. Safe to change or reset.
+- **Live** project `hotel-pms-production`: only the deployed Vercel backend uses
+  it. Its credentials are kept in `.env.live.local`, which nothing loads
+  automatically; use it only on purpose (`bun --env-file=.env.live.local …`).
+
+Migrations: `bun --env-file=.env.local scripts/migrate.ts` applies pending
+files to the test project (add `--test-project` on a fresh copy) and records
+them in `schema_migrations`; `--status` lists without changing anything. Run
+the same against `.env.live.local` when releasing. Seed a fresh test project
+with `bun --env-file=.env.local scripts/seed-test.ts`.
+
 ## Production database migrations
 
 Before enabling the Platform Admin or accepting production traffic, apply the

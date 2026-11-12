@@ -23,10 +23,10 @@ export function proxy(request: NextRequest) {
   if (origin) {
     response.headers.set("Access-Control-Allow-Origin", origin);
     response.headers.set("Access-Control-Allow-Credentials", "true");
-    response.headers.set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Property-Id");
+    response.headers.set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Property-Id, Idempotency-Key");
     response.headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     // Lets the PMS name downloaded files (guest data, backups) as the server does.
-    response.headers.set("Access-Control-Expose-Headers", "Content-Disposition");
+    response.headers.set("Access-Control-Expose-Headers", "Content-Disposition, Idempotent-Replayed");
     response.headers.set("Vary", "Origin");
   }
   return response;

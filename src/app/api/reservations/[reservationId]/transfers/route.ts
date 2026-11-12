@@ -5,6 +5,7 @@ import { productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
 import { recordChange } from "@/server/realtime/change-events";
+import { withIdempotency } from "@/server/http/idempotency";
 
 // HotelKey "Transfer Charges / Transfer a Payment": move a posted charge, or
 // part of a payment, to another folio on this stay or on another open stay.
@@ -43,7 +44,7 @@ export async function GET(request: Request, context: { params: Promise<{ reserva
   }
 }
 
-export async function POST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
+async function handlePOST(request: Request, context: { params: Promise<{ reservationId: string }> }) {
   try {
     const session = await requirePropertySession(request, "folios.manage");
     const { reservationId } = await context.params;
@@ -132,3 +133,6 @@ export async function POST(request: Request, context: { params: Promise<{ reserv
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

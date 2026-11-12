@@ -7,6 +7,7 @@ import { productionSql } from "@/server/db/production";
 import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { recordCashDrop } from "@/server/finance/cash-sources";
 import { cashActivityBetween } from "@/server/finance/shift-guard";
+import { withIdempotency } from "@/server/http/idempotency";
 
 // HotelKey "Start / End Shift": a clerk opens a shift by counting the cash in
 // the drawer, takes payments during the shift, and closes it by counting the
@@ -82,7 +83,7 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "cash.manage");
     const parsed = requestSchema.safeParse(await request.json());
@@ -133,3 +134,6 @@ export async function POST(request: Request) {
     return propertyAccessResponse(error);
   }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

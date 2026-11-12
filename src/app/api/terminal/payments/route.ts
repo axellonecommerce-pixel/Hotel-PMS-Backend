@@ -5,6 +5,8 @@ import { productionSql } from "@/server/db/production";
 import { requireOpenShift, ShiftRequiredError } from "@/server/finance/shift-guard";
 import { ProcessorError } from "@/server/terminal/stripe";
 import { cancelTerminalPayment, listReaders, refreshTerminalPayment, simulateCardTap, startTerminalPayment, TerminalError } from "@/server/terminal/terminal-service";
+import { isUserMessage } from "@/server/http/errors";
+import { withIdempotency } from "@/server/http/idempotency";
 
 export const dynamic = "force-dynamic";
 
@@ -19,11 +21,11 @@ const idSchema = z.object({ id: z.string().uuid() });
 function errorResponse(error: unknown) {
   if (error instanceof ProcessorError || error instanceof TerminalError) return Response.json({ error: error.message }, { status: 409 });
   if (error instanceof ShiftRequiredError) return Response.json({ error: error.message }, { status: 409 });
-  if (error instanceof Error && /^(Folio|Payment)/.test(error.message)) return Response.json({ error: error.message }, { status: 409 });
+  if (isUserMessage(error, /^(Folio|Payment)/)) return Response.json({ error: error.message }, { status: 409 });
   return propertyAccessResponse(error);
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     const body = await request.json().catch(() => null);
@@ -83,3 +85,6 @@ export async function DELETE(request: Request) {
     return Response.json({ canceled: true });
   } catch (error) { return errorResponse(error); }
 }
+
+/** Repeated with the same Idempotency-Key (double tap, retry), it runs once. */
+export const POST = withIdempotency(handlePOST);

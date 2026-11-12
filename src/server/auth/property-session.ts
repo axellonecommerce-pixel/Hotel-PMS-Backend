@@ -3,6 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/server/db/client";
 import { propertyMemberships } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
+import { verifySupabaseToken } from "./jwt";
 import { requirePlatformAdmin } from "./platform-admin";
 import { accessLayers, cleanStaffAccess, STAFF_ACCESS_KEY } from "./staff-access";
 import {
@@ -35,7 +36,8 @@ function isRole(value: string): value is Role {
   return roles.includes(value as Role);
 }
 
-async function verifiedAuthUserId(request: Request) {
+/** The signed-in Supabase user id, checked (no motel or permission check). */
+export async function verifiedAuthUserId(request: Request) {
   const token = bearerToken(request);
   if (!token) throw new PropertyAccessError(401, "Sign in is required.");
 
@@ -49,6 +51,11 @@ async function verifiedAuthUserId(request: Request) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_PUBLISHABLE_KEY;
   if (!supabaseUrl || !supabaseKey) throw new PropertyAccessError(401, "Authentication is not configured.");
+  // Checked here with Supabase's public signing keys; only a token this
+  // server cannot check (older format, keys unreachable) goes to Supabase.
+  const local = await verifySupabaseToken(token, supabaseUrl);
+  if (local === null) throw new PropertyAccessError(401, "The login session is invalid or expired.");
+  if (local !== "unverifiable") return local;
   const response = await fetch(`${supabaseUrl.replace(/\/$/, "")}/auth/v1/user`, {
     headers: { apikey: supabaseKey, authorization: `Bearer ${token}` },
     cache: "no-store",
