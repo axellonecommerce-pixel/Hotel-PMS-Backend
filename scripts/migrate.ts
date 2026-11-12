@@ -24,7 +24,8 @@ const baseline = baselineIndex >= 0 ? args[baselineIndex + 1] : undefined;
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required (use --env-file=.env.local).");
 const host = new URL(databaseUrl.replace(/^postgres(ql)?:/, "http:")).username.split(".")[1] ?? "database";
-const sql = postgres(databaseUrl, { prepare: false, max: 1, onnotice: () => undefined });
+// Show the migrations' own notes (for example "Skipped … existing row(s) do not pass it"); hide routine ones.
+const sql = postgres(databaseUrl, { prepare: false, max: 1, onnotice: (notice) => { if (/^(Skipped|Default privileges)/.test(notice.message ?? "")) console.log(`[${host}] Note: ${notice.message}`); } });
 
 const statements = (text: string) => text.split("--> statement-breakpoint").map((part) => part.trim()).filter((part) => part.replace(/--[^\n]*/g, "").trim());
 async function runFile(path: string) {
