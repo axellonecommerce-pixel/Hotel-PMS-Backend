@@ -56,7 +56,7 @@ Severity: **CRITICAL** fix before the next motel signs up · **HIGH** fix before
 - *Fix:* the frontend sends an `Idempotency-Key` header per action; the API stores it in a small `idempotency_keys (property_id, key, response)` table, unique per motel, and returns the first result on a repeat.
 - *Auto-safe:* yes (additive table + header).
 
-**H2. Each screen loads a motel's whole history.**
+**H2. Each screen loads a motel's whole history.** — *Mostly done 2026-11-12: `/api/sync` reports 12 areas so screens reload only what changed (a payment reloads only the reservation list), and the reservation list downloads only stays changed since its last read (`?since=`), with a full read at most every 30 minutes. Tested locally: payment update 1.1 KB vs full list; nothing changed 77 bytes. Still open: browser-computed reports and the first full read.*
 - *What:* `GET /api/reservations` returns every reservation with nested sub-selects (folio totals, deposits, commission); `GET /api/guests` returns every guest. Many reports are computed in the browser from that list (`frontend/src/features/reports/report-data.ts`, 800 lines).
 - *Why:* fine at Sun Star today; after 2–3 years a motel has 20,000+ reservations and every page load gets slower and heavier on the database, multiplied by every motel.
 - *Fix:* the main list loads a date window (e.g. 60 days back, 365 ahead) with search for older stays; move remaining browser-computed reports to server report routes (18 already exist). No UI change.

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 
@@ -17,7 +19,8 @@ async function hasCashMovements() {
  * A short fingerprint of the property's operational data. Every screen polls
  * it; when it changes (any user or device saved something), screens reload.
  * Each part is the latest change time and row count of a table, so inserts,
- * edits and deletes all move it.
+ * edits and deletes all move it. `areas` holds one fingerprint per area so
+ * screens reload only what changed; `version` covers them all.
  */
 export async function GET(request: Request) {
   try {
@@ -29,44 +32,55 @@ export async function GET(request: Request) {
     const cashMovements = await hasCashMovements()
       ? sql`(select concat(max(created_at), ':', count(*)) from cash_movements where property_id=${id}::uuid) || '|' || coalesce((select concat(max(updated_at), ':', count(*)) from bank_accounts where property_id=${id}::uuid),'') || '|' || coalesce((select concat(max(created_at), ':', count(*)) from card_settlements where property_id=${id}::uuid),'') || '|' || coalesce((select concat(max(updated_at), ':', count(*)) from terminal_payments where property_id=${id}::uuid),'') || '|' || coalesce((select concat(max(updated_at), ':', count(*)) from card_terminals where property_id=${id}::uuid),'')`
       : sql`''`;
-    const [row] = await productionSql()<Array<{ version: string }>>`
-      select md5(concat_ws('|',
-        (select concat(max(updated_at), ':', count(*)) from reservations where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from reservation_rooms where property_id=${id}::uuid),
-        (select concat(max(created_at), ':', count(*)) from reservation_activity where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from guests where property_id=${id}::uuid),
-        (select count(*) from guest_identities where property_id=${id}::uuid and deleted_at is null),
-        (select concat(max(updated_at), ':', count(*)) from guest_vehicles where property_id=${id}::uuid),
-        (select concat(max(created_at), ':', count(*)) from guest_payment_sources where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from rooms where property_id=${id}::uuid),
-        (select concat(max(created_at), ':', count(*)) from payments where property_id=${id}::uuid),
-        (select concat(max(created_at), ':', count(*), ':', sum(amount_cents)) from payment_allocations where property_id=${id}::uuid),
-        (select concat(max(created_at), ':', count(*)) from refunds where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from charges where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from folios where property_id=${id}::uuid),
-        (select max(updated_at)::text from property_settings where property_id=${id}::uuid),
-        (select count(*) from housekeeping_records where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from maintenance_orders where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from property_tasks where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from companies where property_id=${id}::uuid),
-        (select string_agg(concat(business_date, status), ',' order by business_date) from business_days where property_id=${id}::uuid),
-        (select string_agg(concat(id, status), ',' order by id) from cash_shifts where property_id=${id}::uuid),
-        (select concat(max(created_at), ':', count(*)) from cash_drops where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from lost_found_items where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from expenses where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from house_accounts where property_id=${id}::uuid),
-        (select concat(max(created_at), ':', count(*)) from house_account_charges where property_id=${id}::uuid),
-        (select concat(max(created_at), ':', count(*)) from paid_outs where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from invoices where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from security_deposits where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from rate_calendar where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from employees where property_id=${id}::uuid),
-        (select concat(max(updated_at), ':', count(*)) from payroll_entries where property_id=${id}::uuid),
-        ${cashMovements},
-        (select concat(max(started_at), ':', count(*)) from night_audit_runs where property_id=${id}::uuid)
-      )) as version
+    // One fingerprint per area, so a screen reloads only what changed (a
+    // payment does not reload guests, settings or housekeeping).
+    const [row] = await sql<Array<Record<string, string | null>>>`
+      select
+        md5(concat_ws('|',
+          (select concat(max(updated_at), ':', count(*)) from reservations where property_id=${id}::uuid),
+          (select concat(max(updated_at), ':', count(*)) from reservation_rooms where property_id=${id}::uuid))) as stays,
+        md5(coalesce((select concat(max(created_at), ':', count(*)) from reservation_activity where property_id=${id}::uuid), '')) as activity,
+        md5(concat_ws('|',
+          (select concat(max(created_at), ':', count(*)) from payments where property_id=${id}::uuid),
+          (select concat(max(created_at), ':', count(*), ':', sum(amount_cents)) from payment_allocations where property_id=${id}::uuid),
+          (select concat(max(created_at), ':', count(*)) from refunds where property_id=${id}::uuid),
+          (select concat(max(updated_at), ':', count(*)) from charges where property_id=${id}::uuid),
+          (select concat(max(updated_at), ':', count(*)) from folios where property_id=${id}::uuid),
+          (select concat(max(updated_at), ':', count(*)) from security_deposits where property_id=${id}::uuid))) as folios,
+        md5(concat_ws('|',
+          (select concat(max(updated_at), ':', count(*)) from guests where property_id=${id}::uuid),
+          (select count(*) from guest_identities where property_id=${id}::uuid and deleted_at is null),
+          (select concat(max(updated_at), ':', count(*)) from guest_vehicles where property_id=${id}::uuid),
+          (select concat(max(created_at), ':', count(*)) from guest_payment_sources where property_id=${id}::uuid))) as guests,
+        md5(concat_ws('|',
+          (select concat(max(updated_at), ':', count(*)) from rooms where property_id=${id}::uuid),
+          (select count(*) from housekeeping_records where property_id=${id}::uuid))) as rooms,
+        md5(coalesce((select max(updated_at)::text from property_settings where property_id=${id}::uuid), '')) as settings,
+        md5(coalesce((select concat(max(updated_at), ':', count(*)) from maintenance_orders where property_id=${id}::uuid), '')) as maintenance,
+        md5(coalesce((select concat(max(updated_at), ':', count(*)) from property_tasks where property_id=${id}::uuid), '')) as tasks,
+        md5(concat_ws('|',
+          (select concat(max(updated_at), ':', count(*)) from companies where property_id=${id}::uuid),
+          (select concat(max(updated_at), ':', count(*)) from invoices where property_id=${id}::uuid))) as companies,
+        md5(concat_ws('|',
+          (select string_agg(concat(business_date, status), ',' order by business_date) from business_days where property_id=${id}::uuid),
+          (select concat(max(started_at), ':', count(*)) from night_audit_runs where property_id=${id}::uuid))) as day,
+        md5(concat_ws('|',
+          (select string_agg(concat(id, status), ',' order by id) from cash_shifts where property_id=${id}::uuid),
+          (select concat(max(created_at), ':', count(*)) from cash_drops where property_id=${id}::uuid),
+          (select concat(max(created_at), ':', count(*)) from paid_outs where property_id=${id}::uuid),
+          ${cashMovements})) as cash,
+        md5(concat_ws('|',
+          (select concat(max(updated_at), ':', count(*)) from lost_found_items where property_id=${id}::uuid),
+          (select concat(max(updated_at), ':', count(*)) from expenses where property_id=${id}::uuid),
+          (select concat(max(updated_at), ':', count(*)) from house_accounts where property_id=${id}::uuid),
+          (select concat(max(created_at), ':', count(*)) from house_account_charges where property_id=${id}::uuid),
+          (select concat(max(updated_at), ':', count(*)) from rate_calendar where property_id=${id}::uuid),
+          (select concat(max(updated_at), ':', count(*)) from employees where property_id=${id}::uuid),
+          (select concat(max(updated_at), ':', count(*)) from payroll_entries where property_id=${id}::uuid))) as money
     `;
-    return Response.json({ version: row.version }, { headers: { "Cache-Control": "no-store" } });
+    const areas = Object.fromEntries(Object.entries(row).map(([area, hash]) => [area, hash ?? ""]));
+    const version = createHash("md5").update(Object.values(areas).join("|")).digest("hex");
+    return Response.json({ version, areas }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return propertyAccessResponse(error);
   }

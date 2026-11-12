@@ -30,7 +30,29 @@ export async function GET(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
     if (hasProductionDatabase()) {
-      const records = await productionSql()<Array<{
+      // ?since=<time>: only stays touched after that time (the screen already
+      // holds the rest), instead of the motel's whole history on every change.
+      // Reservations are never deleted, so merging by id is complete.
+      const sinceParam = new URL(request.url).searchParams.get("since");
+      const since = sinceParam && !Number.isNaN(Date.parse(sinceParam)) ? new Date(Date.parse(sinceParam)).toISOString() : null;
+      const sql = productionSql();
+      const [{ syncedAt }] = await sql<Array<{ syncedAt: string }>>`select now()::text as "syncedAt"`;
+      const touched = since ? sql`and (
+          r.updated_at > ${since}::timestamptz
+          or g.updated_at > ${since}::timestamptz
+          or exists (select 1 from reservation_rooms x where x.reservation_id=r.id and x.updated_at > ${since}::timestamptz)
+          or exists (select 1 from reservation_activity x where x.reservation_id=r.id and x.created_at > ${since}::timestamptz)
+          or exists (select 1 from folios f where f.reservation_id=r.id and (f.updated_at > ${since}::timestamptz
+                or exists (select 1 from charges c where c.folio_id=f.id and c.updated_at > ${since}::timestamptz)
+                or exists (select 1 from payment_allocations pa where pa.folio_id=f.id and pa.created_at > ${since}::timestamptz)))
+          or exists (select 1 from payments p where p.reservation_id=r.id and (p.created_at > ${since}::timestamptz
+                or exists (select 1 from refunds rf where rf.payment_id=p.id and rf.created_at > ${since}::timestamptz)))
+          or exists (select 1 from reservation_rooms x join security_deposits d on d.reservation_room_id=x.id where x.reservation_id=r.id
+                and (d.updated_at > ${since}::timestamptz or exists (select 1 from deposit_transactions dt where dt.deposit_id=d.id and dt.created_at > ${since}::timestamptz)))
+          or exists (select 1 from reservation_guests rg join guests eg on eg.id=rg.guest_id where rg.reservation_id=r.id and eg.updated_at > ${since}::timestamptz)
+          or exists (select 1 from ledger_entries le where le.property_id=r.property_id and le.resource_id=r.id and le.created_at > ${since}::timestamptz)
+        )` : sql``;
+      const records = await sql<Array<{
         id: string; version: number; confirmationNumber: string; guestId: string; firstName: string; lastName: string; phone: string | null; room: string | null; companyId: string | null; companyName: string | null;
         checkInDate: string; checkoutDate: string; source: string | null; status: string; rateCode: string | null; otaPaymentStatus: string | null;
         taxRateBasisPoints: number; taxExempt: boolean; adults: number; children: number; petCount: number; servicePetCount: number; roomRentCents: number; roomTaxCents: number | null; balanceCents: number; checkedOutDate: string | null; bookedDate: string; rawNotes: string | null; commissionBasisPoints: number; commissionCents: number; commissionPaidCents: number; collectedCents: number;
@@ -77,7 +99,7 @@ export async function GET(request: Request) {
         join guests g on g.id=r.main_guest_id
         left join booking_sources bs on bs.id=r.booking_source_id
         left join lateral (select coalesce(room.number,'Unassigned') as room_number from reservation_rooms rrx left join rooms room on room.id=rrx.room_id where rrx.reservation_id=r.id order by rrx.created_at limit 1) rr on true
-        where r.property_id=${session.propertyId}::uuid order by r.created_at desc
+        where r.property_id=${session.propertyId}::uuid ${touched} order by r.created_at desc
       `;
       // The client compares room types with Settings ids ("room-type-…"), not
       // database uuids. Map each room through its configured room (exact,
@@ -90,7 +112,7 @@ export async function GET(request: Request) {
         configured?.rooms?.find((item) => item.number === room.roomNumber)?.roomTypeId
         ?? configured?.roomTypes?.find((type) => type.name === room.roomTypeName)?.id
         ?? room.roomTypeId;
-      return Response.json({ reservations: records.map((record) => {
+      return Response.json({ syncedAt, partial: Boolean(since), reservations: records.map((record) => {
         const nights = Math.max(0, Math.round((new Date(`${record.checkoutDate}T12:00:00Z`).getTime() - new Date(`${record.checkInDate}T12:00:00Z`).getTime()) / 86_400_000));
         const taxCents = record.taxExempt ? 0 : record.roomTaxCents ?? Math.round(record.roomRentCents * record.taxRateBasisPoints / 10_000);
         const status = record.status === "reserved" ? "Reserved" : record.status === "checked_in" ? "Checked In" : record.status === "checked_out" ? "Checked Out" : record.status === "no_show" ? "No Show" : record.status === "cancelled" ? "Cancelled" : record.status;
