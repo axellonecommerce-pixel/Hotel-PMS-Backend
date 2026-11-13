@@ -55,7 +55,7 @@ async function routeGET(request: Request) {
         occupancy: inventory?.rooms ? row.roomsSold / inventory.rooms * 100 : 0,
         adr: row.roomsSold ? row.soldRoomRevenue / row.roomsSold : 0, revpar: inventory?.rooms ? row.soldRoomRevenue / inventory.rooms : 0,
       })),
-      note: "Revenue comes from posted ledger credits and operating expenses from posted expense records. Rooms sold counts only rooms in house (checked in or checked out) and no-shows charged a No-show Fee; bookings not yet arrived are left out. ADR and RevPAR use the room rent of those rooms plus No-show Fees. Day-use stays are included in rooms sold without reducing overnight inventory.",
+      note: "Industry rules (USALI / STR): Rooms Sold = paid overnight rooms in house (checked in or checked out). Day use, comp rooms, no-shows and bookings not yet arrived are not rooms sold. ADR = room revenue of stays that arrived (overnight and day use) plus No-show Fees, divided by rooms sold; RevPAR = the same revenue divided by rentable rooms. The Room Revenue column is posted ledger room revenue; expenses come from posted expense records.",
     } });
   } catch (error) { return propertyAccessResponse(error); }
 }

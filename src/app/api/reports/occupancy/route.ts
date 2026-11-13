@@ -3,7 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { withRequestContext } from "@/server/db/request-context";
-import { bookedOvernightRoomsSql, chargedNoShowRoomsSql, dayUseRoomsSoldSql, overnightRoomsSoldSql } from "@/server/reports/rooms-sold";
+import { bookedOvernightRoomsSql, chargedNoShowRoomsSql, compRoomsSql, dayUseRoomsSoldSql, overnightRoomsSoldSql } from "@/server/reports/rooms-sold";
 
 const querySchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -32,11 +32,12 @@ async function routeGET(request: Request) {
         count(*) filter (where cleanliness_status <> 'clean')::int as "dirtyRooms"
       from rooms where property_id=${session.propertyId}::uuid and active=true
     `;
-    const daily = await productionSql()<Array<{ date: string; occupied: number; dayUse: number; noShows: number; booked: number; arrivals: number; departures: number; cleaned: number }>>`
+    const daily = await productionSql()<Array<{ date: string; occupied: number; dayUse: number; noShows: number; comp: number; booked: number; arrivals: number; departures: number; cleaned: number }>>`
       select day::date::text as date,
         ${overnightRoomsSoldSql(productionSql(), session.propertyId)} as occupied,
         ${dayUseRoomsSoldSql(productionSql(), session.propertyId)} as "dayUse",
         ${chargedNoShowRoomsSql(productionSql(), session.propertyId)} as "noShows",
+        ${compRoomsSql(productionSql(), session.propertyId)} as comp,
         ${bookedOvernightRoomsSql(productionSql(), session.propertyId)} as booked,
         coalesce((select count(*) from reservations r
           where r.property_id=${session.propertyId}::uuid
@@ -63,7 +64,8 @@ async function routeGET(request: Request) {
       available: Math.max(0, rentableRooms - Math.max(record.occupied, record.booked)),
       dayUse: record.dayUse,
       noShows: record.noShows,
-      occupancyRate: rentableRooms ? ((record.occupied + record.dayUse + record.noShows) / rentableRooms) * 100 : 0,
+      comp: record.comp,
+      occupancyRate: rentableRooms ? (record.occupied / rentableRooms) * 100 : 0,
     })).reverse();
     const occupancyRates = rows.map((row) => Number(row.occupancyRate));
     return Response.json({
@@ -78,7 +80,8 @@ async function routeGET(request: Request) {
         columns: [
           { key: "date", label: "Date", format: "date" },
           { key: "occupied", label: "Occupied", format: "number", align: "right" },
-          { key: "dayUse", label: "Day Use Sold", format: "number", align: "right" },
+          { key: "dayUse", label: "Day Use", format: "number", align: "right" },
+          { key: "comp", label: "Comp Rooms", format: "number", align: "right" },
           { key: "noShows", label: "Charged No-shows", format: "number", align: "right" },
           { key: "arrival", label: "Scheduled Arrivals", format: "number", align: "right" },
           { key: "departures", label: "Departures", format: "number", align: "right" },
@@ -87,7 +90,7 @@ async function routeGET(request: Request) {
           { key: "occupancyRate", label: "Occupancy (Rentable)", format: "percent", align: "right" },
         ],
         rows,
-        note: "Occupied counts only rooms in house (checked in or checked out); bookings that have not arrived yet are not counted. Occupancy adds day-use stays and no-shows charged a No-show Fee. Same-day day-use stays count as rooms sold but do not reduce overnight availability. Each day shows its own departures, rooms housekeeping finished, and rooms left to sell (rentable minus every booked room, arrived or not). Dirty Now is today's live count. A guest who checked out early is not counted on the nights after.",
+        note: "Industry rules (USALI / STR): Occupied = paid overnight rooms in house (checked in or checked out, room rent above $0); occupancy = occupied ÷ rentable rooms. Day use, comp rooms and charged no-shows are shown on their own and are not occupied rooms. Bookings that have not arrived are not counted. Available to Sell subtracts every booked room, arrived or not. A guest who checked out early is not counted on the nights after.",
       },
     });
   } catch (error) {
