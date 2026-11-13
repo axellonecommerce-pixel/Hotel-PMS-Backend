@@ -3,7 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { withRequestContext } from "@/server/db/request-context";
-import { dayUseRoomsSoldSql, overnightRoomsSoldSql, roomsSoldSql } from "@/server/reports/rooms-sold";
+import { roomsSoldSql } from "@/server/reports/rooms-sold";
 
 const querySchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { withRequestContext } from "@/server/db/request-context";
-import { dayUseRoomsSoldSql, overnightRoomsSoldSql, roomsSoldSql } from "@/server/reports/rooms-sold";
+import { roomsSoldSql, soldRoomRevenueSql } from "@/server/reports/rooms-sold";
 
 const querySchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -19,13 +19,14 @@ async function routeGET(request: Request) {
     const [inventory] = await productionSql()<Array<{ rooms: number }>>`
       select count(*) filter (where active=true and service_status='rentable')::int as rooms from rooms where property_id=${session.propertyId}::uuid
     `;
-    const rows = await productionSql()<Array<{ date: string; roomRevenue: number; otherRevenue: number; taxes: number; expenses: number; roomsSold: number }>>`
+    const rows = await productionSql()<Array<{ date: string; roomRevenue: number; otherRevenue: number; taxes: number; expenses: number; roomsSold: number; soldRoomRevenue: number }>>`
       select day::date::text as date,
         coalesce((select sum(le.credit_cents-le.debit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account='Room Revenue'),0)::int as "roomRevenue",
         coalesce((select sum(le.credit_cents-le.debit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account like 'Revenue:%'),0)::int as "otherRevenue",
         coalesce((select sum(le.credit_cents-le.debit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account='Tax Payable'),0)::int as taxes,
         coalesce((select sum(e.amount_cents) from expenses e where e.property_id=${session.propertyId}::uuid and e.expense_date=day::date),0)::int as expenses,
-        ${roomsSoldSql(productionSql(), session.propertyId)} as "roomsSold"
+        ${roomsSoldSql(productionSql(), session.propertyId)} as "roomsSold",
+        ${soldRoomRevenueSql(productionSql(), session.propertyId)} as "soldRoomRevenue"
       from generate_series(${input.data.startDate}::date,${input.data.endDate}::date,'1 day'::interval) as days(day)
       order by day desc
     `;
@@ -52,9 +53,9 @@ async function routeGET(request: Request) {
         id: row.date, date: row.date, roomRevenue: row.roomRevenue, otherRevenue: row.otherRevenue, taxes: row.taxes, expenses: row.expenses,
         net: row.roomRevenue + row.otherRevenue - row.expenses, roomsSold: row.roomsSold,
         occupancy: inventory?.rooms ? row.roomsSold / inventory.rooms * 100 : 0,
-        adr: row.roomsSold ? row.roomRevenue / row.roomsSold : 0, revpar: inventory?.rooms ? row.roomRevenue / inventory.rooms : 0,
+        adr: row.roomsSold ? row.soldRoomRevenue / row.roomsSold : 0, revpar: inventory?.rooms ? row.soldRoomRevenue / inventory.rooms : 0,
       })),
-      note: "Revenue comes from posted ledger credits and operating expenses from posted expense records. Day-use stays are included in rooms sold without reducing overnight inventory.",
+      note: "Revenue comes from posted ledger credits and operating expenses from posted expense records. Rooms sold counts only rooms in house (checked in or checked out) and no-shows charged a No-show Fee; bookings not yet arrived are left out. ADR and RevPAR use the room rent of those rooms plus No-show Fees. Day-use stays are included in rooms sold without reducing overnight inventory.",
     } });
   } catch (error) { return propertyAccessResponse(error); }
 }
