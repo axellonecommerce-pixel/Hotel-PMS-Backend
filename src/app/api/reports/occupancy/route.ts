@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { withRequestContext } from "@/server/db/request-context";
+import { dayUseRoomsSoldSql, overnightRoomsSoldSql, roomsSoldSql } from "@/server/reports/rooms-sold";
 
 const querySchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -33,31 +34,15 @@ async function routeGET(request: Request) {
     `;
     const daily = await productionSql()<Array<{ date: string; occupied: number; dayUse: number; arrivals: number; departures: number; cleaned: number }>>`
       select day::date::text as date,
-        coalesce((select count(distinct rr.room_id)
-          from reservation_rooms rr
-          join reservations r on r.id=rr.reservation_id
-          where r.property_id=${session.propertyId}::uuid
-            and rr.room_id is not null
-            and rr.status in ('reserved','checked_in','checked_out')
-            and r.status not in ('cancelled','no_show')
-            and r.arrival_date <= day::date
-            and r.departure_date > day::date
-            and (rr.checked_out_at is null or (rr.checked_out_at at time zone coalesce((select timezone from properties where id=${session.propertyId}::uuid),'UTC'))::date > day::date)),0)::int as occupied,
-        coalesce((select count(distinct rr.room_id)
-          from reservation_rooms rr
-          join reservations r on r.id=rr.reservation_id
-          where r.property_id=${session.propertyId}::uuid
-            and rr.room_id is not null
-            and rr.status in ('reserved','checked_in','checked_out')
-            and r.status not in ('cancelled','no_show')
-            and r.arrival_date=day::date and r.departure_date=day::date),0)::int as "dayUse",
+        ${overnightRoomsSoldSql(productionSql(), session.propertyId)} as occupied,
+        ${dayUseRoomsSoldSql(productionSql(), session.propertyId)} as "dayUse",
         coalesce((select count(*) from reservations r
           where r.property_id=${session.propertyId}::uuid
             and r.arrival_date=day::date
             and r.status in ('reserved','checked_in','checked_out')),0)::int as arrivals,
         -- Rooms that checked out (or are due out) that day, and rooms housekeeping finished that day.
-        coalesce((select count(distinct rr.room_id) from reservation_rooms rr join reservations r on r.id=rr.reservation_id
-          where r.property_id=${session.propertyId}::uuid and rr.room_id is not null and rr.status in ('checked_in','checked_out','reserved')
+        coalesce((select count(*) from reservation_rooms rr join reservations r on r.id=rr.reservation_id
+          where r.property_id=${session.propertyId}::uuid and rr.status in ('checked_in','checked_out','reserved')
             and r.status not in ('cancelled','no_show') and r.departure_date=day::date and r.arrival_date < day::date),0)::int as departures,
         coalesce((select count(*) from housekeeping_records h where h.property_id=${session.propertyId}::uuid and h.service_date=day::date and h.assignment_status='completed'),0)::int as cleaned
       from generate_series(${input.data.startDate}::date,${input.data.endDate}::date,'1 day'::interval) as days(day)

@@ -38,16 +38,19 @@ async function routeGET(request: Request) {
         group by p.method order by cents desc,label
       `,
       sql<Array<{ label: string; cents: number; count: number }>>`
+        -- Room revenue earned in the range, by source: posted room rent dated
+        -- in the range from every stay (also stays that arrived earlier).
+        -- Adds up to the Room Revenue figure on the same page.
         select coalesce(nullif(bs.name,''),'Direct') as label,
-          coalesce(sum(nr.final_rate_cents),0)::int as cents,
+          coalesce(sum(c.amount_cents),0)::int as cents,
           count(distinct r.id)::int as count
-        from reservations r
+        from charges c
+        join folios f on f.id=c.folio_id
+        join reservations r on r.id=f.reservation_id
         left join booking_sources bs on bs.id=r.booking_source_id
-        left join reservation_rooms rr on rr.reservation_id=r.id
-        left join nightly_rates nr on nr.reservation_room_id=rr.id and nr.stay_date >= ${parsed.data.start}::date and nr.stay_date <= ${parsed.data.end}::date
         where r.property_id=${session.propertyId}::uuid
-          and r.arrival_date between ${parsed.data.start}::date and ${parsed.data.end}::date
-          and r.status not in ('cancelled','no_show')
+          and c.type='Room Rent' and c.status='posted'
+          and c.service_date between ${parsed.data.start}::date and ${parsed.data.end}::date
         group by coalesce(nullif(bs.name,''),'Direct') order by cents desc,label
       `,
       // Money taken each day by kind (net of refunds), for the Daily Revenue table.

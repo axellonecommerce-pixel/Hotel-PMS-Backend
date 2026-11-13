@@ -123,22 +123,34 @@ async function routeGET(request: Request) {
     }
 
     if (view === "in-house-balances") {
-      const records = await sql<Array<{ id: string; rooms: string; guest: string; arrival: string; departure: string; billTo: string; chargesCents: number; paymentsCents: number; balanceCents: number; depositCents: number }>>`
+      // Every stay that was in house at some point in the range (still in
+      // house or checked out since), with its balance at the end of the
+      // range: charges dated up to then, payments received by then. A range
+      // that includes today shows today's in-house guests as well.
+      const chargesUntil = sql`coalesce((select sum(ch.amount_cents + coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=ch.id),0))
+        from charges ch join folios f on f.id=ch.folio_id where f.reservation_id=r.id and ch.status='posted' and ch.service_date <= ${endDate}::date),0)::int`;
+      const paymentsUntil = sql`coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id join payments p on p.id=pa.payment_id
+        where f.reservation_id=r.id and p.effective_date <= ${endDate}::date),0)::int`;
+      const records = await sql<Array<{ id: string; rooms: string; guest: string; arrival: string; departure: string; status: string; billTo: string; chargesCents: number; paymentsCents: number; balanceCents: number; depositCents: number }>>`
         select r.id, ${roomList} as rooms, g.first_name||' '||g.last_name as guest, r.arrival_date::text as arrival, r.departure_date::text as departure,
+          case when r.status='checked_in' then 'In House' else 'Checked Out' end as status,
           coalesce(c.name,'Guest') as "billTo",
-          coalesce((select sum(ch.amount_cents + coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=ch.id),0)) from charges ch join folios f on f.id=ch.folio_id where f.reservation_id=r.id and ch.status='posted'),0)::int as "chargesCents",
-          coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=r.id),0)::int as "paymentsCents",
-          ${balance} as "balanceCents",
+          ${chargesUntil} as "chargesCents",
+          ${paymentsUntil} as "paymentsCents",
+          (${chargesUntil} - ${paymentsUntil}) as "balanceCents",
           coalesce((select sum(d.amount_cents) from security_deposits d join reservation_rooms rr on rr.id=d.reservation_room_id where rr.reservation_id=r.id and d.status='held'),0)::int as "depositCents"
         from reservations r join guests g on g.id=r.main_guest_id left join companies c on c.id=r.company_id
-        where r.property_id=${propertyId}::uuid and r.status='checked_in'
-        order by rooms
+        where r.property_id=${propertyId}::uuid and r.status in ('checked_in','checked_out')
+          and r.arrival_date <= ${endDate}::date
+          and (r.status='checked_in' or greatest(r.departure_date, r.arrival_date + 1) > ${startDate}::date)
+        order by (r.status='checked_in') desc, r.arrival_date desc, rooms
       `;
+      const inHouse = records.filter((row) => row.status === "In House").length;
       return respond(
-        [{ label: "In-House Stays", value: records.length, format: "number" }, { label: "Charges", value: sum(records, (row) => row.chargesCents), format: "money" }, { label: "Payments", value: sum(records, (row) => row.paymentsCents), format: "money" }, { label: "Balance", value: sum(records, (row) => row.balanceCents), format: "money" }],
-        [{ key: "rooms", label: "Room" }, { key: "guest", label: "Guest" }, { key: "arrival", label: "Arrival", format: "date" }, { key: "departure", label: "Departure", format: "date" }, { key: "billTo", label: "Bill To" }, money("chargesCents", "Charges"), money("paymentsCents", "Payments"), money("balanceCents", "Balance"), money("depositCents", "Deposit Held")],
+        [{ label: "Stays", value: records.length, format: "number" }, { label: "Still In House", value: inHouse, format: "number" }, { label: "Charges", value: sum(records, (row) => row.chargesCents), format: "money" }, { label: "Payments", value: sum(records, (row) => row.paymentsCents), format: "money" }, { label: "Balance", value: sum(records, (row) => row.balanceCents), format: "money" }],
+        [{ key: "rooms", label: "Room" }, { key: "guest", label: "Guest" }, { key: "arrival", label: "Arrival", format: "date" }, { key: "departure", label: "Departure", format: "date" }, { key: "status", label: "Status" }, { key: "billTo", label: "Bill To" }, money("chargesCents", "Charges"), money("paymentsCents", "Payments"), money("balanceCents", "Balance"), money("depositCents", "Deposit Held")],
         records,
-        "Current snapshot of every checked-in stay, whatever the date range. Guests must settle before checkout; company balances move to the company invoice.",
+        `Stays in house at any time from ${startDate} to ${endDate}, with each balance as of ${endDate}: charges dated up to then minus payments received by then. Guests must settle before checkout; company balances move to the company invoice.`,
       );
     }
 

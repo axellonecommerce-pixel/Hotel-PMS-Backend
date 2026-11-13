@@ -29,6 +29,7 @@ async function routeGET(request: Request) {
       status: string;
       balanceCents: number;
       totalCents: number;
+      periodCents: number;
       isGroup: boolean;
     }>>`
       select r.id,concat(g.first_name,' ',g.last_name) as guest,
@@ -40,6 +41,10 @@ async function routeGET(request: Request) {
         (select count(*) > 1 from reservation_rooms reservation_room where reservation_room.reservation_id=r.id) as "isGroup",
         coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0))
           from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)::int as "totalCents",
+        -- Only charges dated inside the period (the Revenue page counts these).
+        coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0))
+          from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'
+            and c.service_date between ${input.data.startDate}::date and ${input.data.endDate}::date),0)::int as "periodCents",
         (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0))
           from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)
           - coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=r.id),0))::int as "balanceCents"
@@ -47,7 +52,7 @@ async function routeGET(request: Request) {
       join guests g on g.id=r.main_guest_id
       where r.property_id=${session.propertyId}::uuid
         and r.arrival_date<=${input.data.endDate}::date
-        and r.departure_date>=${input.data.startDate}::date
+        and (r.departure_date>${input.data.startDate}::date or (r.arrival_date=r.departure_date and r.arrival_date>=${input.data.startDate}::date))
       order by r.arrival_date desc,r.created_at desc
     `;
     const statusLabel = (status: string) => status === "checked_in" ? "Checked In"
@@ -61,6 +66,8 @@ async function routeGET(request: Request) {
           { label: "In House", value: records.filter((record) => record.status === "checked_in").length, format: "number" },
           { label: "Checked Out", value: records.filter((record) => record.status === "checked_out").length, format: "number" },
           { label: "Groups", value: records.filter((record) => record.isGroup).length, format: "number" },
+          { label: "Billed in Period", value: records.reduce((sum, record) => sum + record.periodCents, 0), format: "money" },
+          { label: "Whole Stays Total", value: records.reduce((sum, record) => sum + record.totalCents, 0), format: "money" },
         ],
         columns: [
           { key: "guest", label: "Guest" },
@@ -68,7 +75,8 @@ async function routeGET(request: Request) {
           { key: "departure", label: "Departure", format: "date" },
           { key: "room", label: "Room(s)" },
           { key: "status", label: "Status", format: "status" },
-          { key: "total", label: "Total (with tax)", format: "money", align: "right" },
+          { key: "period", label: "Billed in Period", format: "money", align: "right" },
+          { key: "total", label: "Whole Stay (with tax)", format: "money", align: "right" },
           { key: "balance", label: "Balance", format: "money", align: "right" },
         ],
         rows: records.map((record) => ({
@@ -78,10 +86,11 @@ async function routeGET(request: Request) {
           departure: record.departure,
           room: record.rooms ?? "Unassigned",
           status: statusLabel(record.status),
+          period: record.periodCents,
           total: record.totalCents,
           balance: record.balanceCents,
         })),
-        note: "Includes reservations whose stay dates overlap the selected period, including same-day stays.",
+        note: "Stays with at least one night (or a same-day stay) in the period. Billed in Period counts only the room nights and charges dated inside the period, with tax; it matches the Revenue page except revenue not linked to a stay (Other Revenue). Whole Stay is the full folio, including nights before or after the period.",
       },
     });
   } catch (error) {

@@ -86,6 +86,10 @@ async function routePATCH(request: Request) {
     if (hasProductionDatabase()) {
       const result = await productionSql().begin(async (tx) => {
         const [existing] = await tx<Array<{ id: string }>>`select id from companies where id=${id}::uuid and property_id=${session.propertyId}::uuid for update`;
+        if (existing && changes.name) {
+          const [taken] = await tx<Array<{ id: string }>>`select id from companies where property_id=${session.propertyId}::uuid and lower(name)=lower(${changes.name}) and id<>${id}::uuid`;
+          if (taken) return "duplicate" as const;
+        }
         if (!existing) return null;
         await tx`
           update companies set
@@ -95,13 +99,21 @@ async function routePATCH(request: Request) {
             status=coalesce(${changes.status?.toLowerCase().replace(/ /g,"_") ?? null},status),updated_at=now()
           where id=${id}::uuid
         `;
-        if (changes.contactPerson || changes.email || changes.phone) await tx`
-          update company_contacts set name=coalesce(${changes.contactPerson ?? null},name),email=coalesce(${changes.email ?? null},email),phone=coalesce(${changes.phone ?? null},phone)
-          where company_id=${id}::uuid and "primary"=true
-        `;
+        if (changes.contactPerson || changes.email || changes.phone) {
+          const updated = await tx`
+            update company_contacts set name=coalesce(${changes.contactPerson ?? null},name),email=coalesce(${changes.email ?? null},email),phone=coalesce(${changes.phone ?? null},phone)
+            where company_id=${id}::uuid and "primary"=true returning id
+          `;
+          // A company saved without a contact gets its primary contact now.
+          if (!updated.length) await tx`
+            insert into company_contacts (property_id,company_id,name,email,phone,"primary")
+            values (${session.propertyId}::uuid,${id}::uuid,${changes.contactPerson ?? ""},${changes.email ?? null},${changes.phone ?? null},true)
+          `;
+        }
         return { id, ...changes };
       });
       if (!result) return Response.json({ error: "Company not found." }, { status: 404 });
+      if (result === "duplicate") return Response.json({ error: "Another company already has that name." }, { status: 409 });
       await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "company", entityId: id, action: "updated", entityVersion: Math.floor(Date.now() / 1000), payload: {} });
       return Response.json(result);
     }
