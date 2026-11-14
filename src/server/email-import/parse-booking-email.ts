@@ -156,7 +156,7 @@ function readSellvel(text: string, subject: string): EmailBooking | null {
     confirmation,
     ...name,
     email: after(text, String.raw`(?:^|\n)[ \t]*E-?mail`, String.raw`([^\s@]+@[^\s]+)`),
-    phone: after(text, String.raw`(?:^|\n)[ \t]*Phone`, String.raw`([+\d][\d ().-]{6,})`)?.trim(),
+    phone: tidyPhone(after(text, String.raw`(?:^|\n)[ \t]*Phone`, String.raw`([+\d][\d ().-]{6,})`)),
     address: after(text, String.raw`Addr(?:ess)?\.?`),
     checkIn,
     checkout,
@@ -285,7 +285,7 @@ function readExpedia(text: string, subject: string): EmailBooking | null {
     channelConfirmation: confirmation,
     ...splitName(name),
     email: after(text, String.raw`Guest\s+Email`, String.raw`([^\s@]+@[^\s]+)`),
-    phone: phone?.replace(/\s+/g, " ").trim(),
+    phone: tidyPhone(phone),
     checkIn,
     checkout,
     adults: Math.max(1, adults),
@@ -299,6 +299,21 @@ function readExpedia(text: string, subject: string): EmailBooking | null {
     paidCents: expediaCollects ? totalCents : undefined,
     virtualCard: virtualCard || undefined,
   };
+}
+
+/**
+ * A phone number as the motel would dial it: OTA emails write a US number
+ * as "1 (0) 6614803121" (country code, then a "(0)" trunk marker), which
+ * would otherwise be kept as the 12 digits 106614803121. US numbers become
+ * their 10 digits; others keep their digits with a leading +.
+ */
+export function tidyPhone(raw?: string) {
+  if (!raw?.trim()) return undefined;
+  const digits = raw.replace(/\(0\)/g, "").replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  if (digits.length === 10) return digits;
+  if (digits.length < 7) return undefined;
+  return `+${digits}`;
 }
 
 /** The booking in an email, or null when no reader knows its format. */

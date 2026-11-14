@@ -53,6 +53,8 @@ export async function ensureDefaultBankAccount(db: Db, propertyId: string) {
     insert into bank_accounts (property_id,name,is_default)
     select ${propertyId}::uuid,'Main Bank Account',true
     where not exists (select 1 from bank_accounts where property_id=${propertyId}::uuid)
+    -- Two screens opening at once both try this: the second one just finds it.
+    on conflict do nothing
   `;
 }
 

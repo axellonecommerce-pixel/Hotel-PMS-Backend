@@ -202,7 +202,7 @@ async function handlePOST(request: Request) {
     });
     return Response.json(result);
   } catch (error) {
-    if (isUserMessage(error, /checkout|deposit|balance|reservation/i)) {
+    if (isUserMessage(error, /check(?:ed)?[- ]?out|checked-in|deposit|balance|reservation|folio/i)) {
       return Response.json({ error: error.message }, { status: 409 });
     }
     return propertyAccessResponse(error);

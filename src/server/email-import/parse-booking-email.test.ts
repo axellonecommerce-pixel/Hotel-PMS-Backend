@@ -178,7 +178,7 @@ Nonrefundable`;
     const booking = parseBookingEmail({ subject: expediaSubject, text: expediaRows });
     expect(booking).toMatchObject({
       provider: "Expedia", kind: "new", channel: "Expedia", confirmation: "2599000001",
-      firstName: "Casey", lastName: "Sample", email: "abc123@m.expediapartnercentral.com", phone: "1 (209) 5550100",
+      firstName: "Casey", lastName: "Sample", email: "abc123@m.expediapartnercentral.com", phone: "2095550100",
       checkIn: "2026-11-09", checkout: "2026-11-10", adults: 2, children: 0, rooms: 1,
       roomTypeName: "Standard Room, 1 King Bed", nightlyRatesCents: [7999], subtotalCents: 7999, taxCents: 800, totalCents: 8799,
     });
@@ -232,7 +232,7 @@ Please bill only the nights booked by Expedia to the virtual card. The guest is 
       email: "xyz789@m.expediapartnercentral.com", checkIn: "2026-11-14", checkout: "2026-11-15", adults: 2, children: 0,
       roomTypeName: "Standard Room, 1 King Bed", nightlyRatesCents: [5903], taxCents: 590, totalCents: 6493, paidCents: 6493, virtualCard: true,
     });
-    expect(booking?.phone?.replace(/\D/g, "")).toBe("102095550111");
+    expect(booking?.phone).toBe("2095550111");
   });
 
   test("Expedia Partner Central: the same email with every cell on its own line", () => {

@@ -68,7 +68,10 @@ async function routePOST(request: Request) {
     }
     db.insert(attachments).values({ id, propertyId: session.propertyId, resourceType, resourceId, storageKey, originalName: file.name, mimeType: file.type, sizeBytes: file.size, deleteAfter, createdAt: createdAt.toISOString() }).run();
     return Response.json({ attachment: { id, originalName: file.name, deleteAfter } }, { status: 201 });
-  } catch (error) { return propertyAccessResponse(error); }
+  } catch (error) {
+    if (error instanceof Error && /linked hotel record/.test(error.message)) return Response.json({ error: error.message }, { status: 404 });
+    return propertyAccessResponse(error);
+  }
 }
 
 async function routeGET(request: Request) {
