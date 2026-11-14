@@ -36,13 +36,22 @@ async function routePATCH(request: Request) {
   }
 }
 
-/** Add a booking from review to Arrivals with every detail from its email. */
+const addSchema = z.object({
+  messageId: z.string().min(1),
+  firstName: z.string().trim().max(120).optional(),
+  lastName: z.string().trim().max(120).optional(),
+  roomTotalCents: z.number().int().positive().max(100_000_000).optional(),
+  paymentStatus: z.enum(["Guest Pays Hotel", "Paid Online", "Virtual Card Pending"]).optional(),
+});
+
+/** Add a booking from review to Arrivals with every detail from its email (and what staff filled in). */
 async function routePOST(request: Request) {
   try {
     const session = await requirePropertySession(request, "reservations.manage");
-    const parsed = resolveSchema.safeParse(await request.json().catch(() => null));
+    const parsed = addSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success || !hasProductionDatabase()) return Response.json({ error: "Choose a booking to add." }, { status: 400 });
-    const result = await addReviewedBooking(productionSql(), session.propertyId, parsed.data.messageId);
+    const { messageId, ...corrections } = parsed.data;
+    const result = await addReviewedBooking(productionSql(), session.propertyId, messageId, corrections);
     if (result.error) return Response.json(result, { status: 409 });
     await announceImport(productionSql(), session.propertyId, { status: "imported", message: "", reservationId: result.reservationId });
     return Response.json(result);

@@ -46,13 +46,17 @@ export type EmailBooking = {
   netCents?: number;
   /** Already paid online. */
   paidCents?: number;
+  /** The OTA collected from the guest and sends the motel a virtual card to charge. */
+  virtualCard?: boolean;
+  /** Chosen by staff in Booking emails to review; wins over what the email implied. */
+  paymentStatus?: "Guest Pays Hotel" | "Paid Online" | "Virtual Card Pending";
 };
 
 /** Card numbers, expiry and security codes never get past this point. */
 export function removeCardDetails(text: string) {
   return text
     .split(/\r?\n/)
-    .filter((line) => !/(card\s*(number|no\b|expir|exp\b|holder|type)|name\s+on\s+card|cvv|cvc|security\s+code)/i.test(line))
+    .filter((line) => !/(card\s*(number|no\b|expir|exp\b|holder|type)|name\s+on\s+card|cvv|cvc|security\s+code|validation\s+code|verification\s+code|expiration\s+date|expiry\s+date|valid\s+thru)/i.test(line))
     .join("\n")
     // Any 13–19 digit run (with spaces or dashes) that slipped through.
     .replace(/\b\d(?:[ -]?\d){12,18}\b/g, "[card removed]");
@@ -243,10 +247,11 @@ function readExpedia(text: string, subject: string): EmailBooking | null {
   // "Standard Room, 1 King Bed - Standard Rate": the room, without the rate plan.
   const roomTypeName = after(text, String.raw`Room\s+Type\s+Name`)?.replace(/\s+-\s+[^-]*\brate\b[^-]*$/i, "").trim();
   // Nightly prices sit between "Daily Rate" and the extra charges and taxes.
-  const rateBlock = /Daily\s+Rate([\s\S]*?)(?:Extra\s+Person|Taxes|Extra\s+Charges|Total\s*:)/i.exec(text)?.[1] ?? "";
+  const rateBlock = /Daily\s+Rate([\s\S]*?)(?:Extra\s+Person|Taxes|Extra\s+Charges|Total(?:\s+Cost)?\s*:)/i.exec(text)?.[1] ?? "";
   const listed = [...rateBlock.replace(/Rate\s+Code[^\n]*/gi, "").matchAll(/([\d,]+\.\d{2})/g)].map((match) => cents(match[1])!);
-  const taxCents = amountAfter(text, String.raw`(?:^|\n)[ \t]*Taxes?\s*:`);
-  const totalCents = amountAfter(text, String.raw`(?:^|\n)[ \t]*Total\s*:`);
+  // The price box sits beside other text, so its labels can be mid-line; "Total Cost:" or "Total:".
+  const taxCents = amountAfter(text, String.raw`\bTaxes?\s*:`);
+  const totalCents = amountAfter(text, String.raw`\bTotal(?:\s+Cost)?\s*:`);
   const extraCents = (amountAfter(text, String.raw`Extra\s+Person\s*:`) ?? 0) + (amountAfter(text, String.raw`Extra\s+Charges\s*:`) ?? 0);
   const listedSum = listed.reduce((sum, value) => sum + value, 0);
   const subtotalCents = totalCents !== undefined ? totalCents - (taxCents ?? 0) : listedSum || undefined;
@@ -257,13 +262,19 @@ function readExpedia(text: string, subject: string): EmailBooking | null {
 
   // "Hotel Collects Payment from Guest" (pays at the desk) or "Expedia Collects Payment" (prepaid; Expedia pays the motel).
   const expediaCollects = /Expedia\s+Collects/i.test(text) && !/Hotel\s+Collects/i.test(text);
+  // "Expedia collects payment from traveler: Hotel charges virtual card."
+  const virtualCard = expediaCollects && /charges?\s+(?:the\s+)?virtual\s+card|virtual\s+card\s+will\s+be\s+activated|Expedia\s+Virtual\s+Card/i.test(text);
   const heading = /(?:^|\n)\s*((?:New|Modified|Cancell?ed|Changed)\s+Reservation)/i.exec(text)?.[1] ?? "";
   // "Guest: Spencer Lowell" with the phone on the same line or the next one.
-  const guestAt = lines.findIndex((line) => /^Guest\s*:/i.test(line));
-  const guestLine = guestAt >= 0 ? lines[guestAt].replace(/^Guest\s*:\s*/i, "") : "";
+  // The label can share its line with "Reservation ID: …" and "Booked on: …";
+  // "Guest Email:" is not it. A name alone on the next line is read too.
+  const guestLabel = /(?:^|\s)Guest\s*:\s*/i;
+  const guestAt = lines.findIndex((line) => guestLabel.test(line));
+  const afterLabel = guestAt >= 0 ? lines[guestAt].slice((guestLabel.exec(lines[guestAt])?.index ?? 0)).replace(guestLabel, "") : "";
+  const guestLine = afterLabel.trim() || (guestAt >= 0 && !/:/.test(lines[guestAt + 1] ?? ":") ? lines[guestAt + 1] : "");
   const phonePattern = /([+(]?\d[\d ()-]{8,}\d)/;
   const phone = phonePattern.exec(guestLine)?.[1] ?? (guestAt >= 0 ? phonePattern.exec(/^[+(]?\d/.test(lines[guestAt + 1] ?? "") ? lines[guestAt + 1] : "")?.[1] : undefined);
-  const name = guestLine.replace(/Booked\s+on.*$/i, "").replace(phonePattern, "").trim();
+  const name = guestLine.replace(/Booked\s+on.*$/i, "").replace(phonePattern, "").replace(/\s{2,}/g, " ").trim();
   const brand = /hotels\.com/i.test(subject) ? "Hotels.com" : /vrbo/i.test(subject) ? "Vrbo" : "Expedia";
   return {
     provider: "Expedia",
@@ -286,6 +297,7 @@ function readExpedia(text: string, subject: string): EmailBooking | null {
     taxCents,
     totalCents,
     paidCents: expediaCollects ? totalCents : undefined,
+    virtualCard: virtualCard || undefined,
   };
 }
 

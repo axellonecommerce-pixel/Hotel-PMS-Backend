@@ -25,7 +25,7 @@ async function routeGET(request: Request, context: { params: Promise<{ reservati
       where r.id=${reservationId}::uuid and r.property_id=${session.propertyId}::uuid
     `;
     if (!reservation) return Response.json({ error: "Reservation not found." }, { status: 404 });
-    const [nights, promotions, commission] = await Promise.all([
+    const [nights, promotions, commission, extras] = await Promise.all([
       sql<Array<{ date: string; rooms: number; baseCents: number; discountCents: number; finalCents: number; baseRates: number[]; finalRates: number[] }>>`
         select nr.stay_date::text as date,count(*)::int as rooms,sum(nr.base_rate_cents)::int as "baseCents",sum(nr.discount_cents)::int as "discountCents",
           sum(nr.final_rate_cents)::int as "finalCents",array_agg(nr.base_rate_cents order by rr.id) as "baseRates",array_agg(nr.final_rate_cents order by rr.id) as "finalRates"
@@ -40,6 +40,15 @@ async function routeGET(request: Request, context: { params: Promise<{ reservati
         order by rp.applied_order
       `,
       readReservationCommission(sql as never, session.propertyId, reservationId),
+      // Everything else posted to the stay's folios (pets, damages, laundry, fees…), with its tax.
+      sql<Array<{ id: string; date: string; description: string; type: string; cents: number; taxCents: number }>>`
+        select c.id,c.service_date::text as date,c.description,c.type,c.amount_cents as cents,
+          coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)::int as "taxCents"
+        from charges c join folios f on f.id=c.folio_id
+        where f.reservation_id=${reservationId}::uuid and c.property_id=${session.propertyId}::uuid
+          and c.status='posted' and c.type<>'Room Rent'
+        order by c.service_date,c.created_at
+      `,
     ]);
     // Each promotion's share: applied in order to every room-night's rate.
     const promotionCents = promotions.map(() => 0);
@@ -74,6 +83,8 @@ async function routeGET(request: Request, context: { params: Promise<{ reservati
     const guestCents = sum("guestCents");
     // The booking's recorded commission (it may have been entered from the extranet).
     const commissionCents = commission.commissionCents;
+    const extraCents = extras.reduce((total, extra) => total + extra.cents, 0);
+    const extraTaxCents = extras.reduce((total, extra) => total + extra.taxCents, 0);
     return Response.json({
       source: reservation.source,
       otaPaymentStatus: reservation.otaPaymentStatus,
@@ -88,7 +99,12 @@ async function routeGET(request: Request, context: { params: Promise<{ reservati
       commissionCents: -commissionCents,
       commissionDeducted: commission.deducted,
       commissionPaidCents: commission.paidCents,
-      payoutCents: guestCents - commissionCents,
+      payoutCents: guestCents - commissionCents + extraCents + extraTaxCents,
+      extras,
+      extraCents,
+      extraTaxCents,
+      // Room and tax plus every extra charge: the whole stay.
+      stayTotalCents: guestCents + extraCents + extraTaxCents,
       nights: nightly,
     });
   } catch (error) { return propertyAccessResponse(error); }

@@ -182,7 +182,7 @@ async function routePOST(request: Request, context: { params: Promise<{ reservat
       `;
       const releasedAt = new Date().toISOString();
       await tx`
-        update reservations set status=${status},notes=${addReleaseMetadata(reservation.notes, { action: input.action, feeCents: input.feeCents, note: input.note, roomRentCharges, nightlyRates, commissionCents: releasedCommissionCents, at: releasedAt })},version=version+1,updated_at=now()
+        update reservations set status=${status},notes=${addReleaseMetadata(reservation.notes, { action: input.action, feeCents: input.feeCents, feeChargeId, note: input.note, roomRentCharges, nightlyRates, commissionCents: releasedCommissionCents, at: releasedAt })},version=version+1,updated_at=now()
         where id=${reservation.id}::uuid and property_id=${session.propertyId}::uuid
       `;
       await tx`

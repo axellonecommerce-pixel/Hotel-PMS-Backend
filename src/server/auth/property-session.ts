@@ -4,7 +4,8 @@ import { db } from "@/server/db/client";
 import { propertyMemberships } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { setRequestActor } from "@/server/db/request-context";
-import { tokenAssuranceLevel, twoStepRequired, verifySupabaseToken } from "./jwt";
+import { verifySupabaseToken } from "./jwt";
+import { missingSecondStep } from "./two-step";
 import { requirePlatformAdmin } from "./platform-admin";
 import { accessLayers, cleanStaffAccess, STAFF_ACCESS_KEY } from "./staff-access";
 import {
@@ -110,9 +111,8 @@ export async function requirePropertySession(request: Request, permission: Permi
     access: effectiveAccess(layers.custom ? layers.custom.basedOn : membership.role, layers.override, layers.roleOverride),
     roleLabel: layers.custom?.name ?? roleLabels[membership.role],
   };
-  // Owners and managers can do almost everything, so their sign-in needs the
-  // second step too (a custom role keeps its built-in role's rule).
-  if ((session.role === "owner" || session.role === "manager") && twoStepRequired() && tokenAssuranceLevel(bearerToken(request) ?? "") !== "aal2") {
+  // Anyone who turned two-step sign-in on must have entered the code.
+  if (await missingSecondStep(authUserId, bearerToken(request) ?? "")) {
     throw new PropertyAccessError(403, TWO_STEP_MESSAGE, "two_step_required");
   }
   setRequestActor({ authUserId, propertyId: membership.propertyId });

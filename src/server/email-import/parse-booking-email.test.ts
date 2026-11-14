@@ -195,6 +195,60 @@ Nonrefundable`;
     expect(booking).toMatchObject({ checkIn: "2026-11-09", checkout: "2026-11-11", adults: 3, children: 1, nightlyRatesCents: [7999, 8999], totalCents: 18698, paidCents: 18698 });
   });
 
+  // Laid out like a Hotels.com booking through Expedia Partner Central with a
+  // virtual card (made-up guest and card): "Guest:" shares the line with the
+  // reservation ID, and the price box says "Total Cost:".
+  const virtualCardEmail = `NOTICE: The following notice is for hotel partners only. All other vendors (including Activity Service Providers) please disregard.
+New Reservation
+Hotels.com Example Inn Sampletown
+Sampletown,CA,USA
+Reservation ID: 2601000002 Guest: Albert Sample Booked on: Nov 12, 2026 2:23 PM PST
+1 (0) 2095550111
+Guest Email: xyz789@m.expediapartnercentral.com
+Room Type Code: RoomCode
+Room Type Name: Standard Room, 1 King Bed - Standard Rate
+Pricing Model: Occupancy Based Pricing
+Payment Instructions: Expedia collects payment from traveler: Hotel charges virtual card.
+Check-In Check-Out Adults Kids/Ages Room Nights Hotel Conf
+Nov 14, 2026 Nov 15, 2026 2 0 1
+Special Request
+Daily Rate - 59.03 USD Extra Person: 0.00 USD
+Sat, Nov 14 Taxes: 5.90 USD
+Rate Code: Standalone Extra Charges: 0.00 USD
+Discount: Blue - Contracted Improved Membe Total Cost:64.93 USD
+Billing Details:
+Card Holder Name virtual card Billing Address 1111 Expedia Group Way W
+Card Number 4111-1111-1111-1111
+Expiration Date Nov 2029 Seattle, WA 98119
+Validation Code 123 USA
+Virtual card will be activated from the day of Check-in.
+Notes & Instructions
+Please bill only the nights booked by Expedia to the virtual card. The guest is responsible for any incidentals.`;
+
+  test("Expedia Partner Central: guest beside the reservation ID, Total Cost, virtual card", () => {
+    const booking = parseBookingEmail({ subject: "Expedia - New Booking - Arriving on 14 Nov 2026", text: virtualCardEmail });
+    expect(booking).toMatchObject({
+      provider: "Expedia", kind: "new", confirmation: "2601000002", firstName: "Albert", lastName: "Sample",
+      email: "xyz789@m.expediapartnercentral.com", checkIn: "2026-11-14", checkout: "2026-11-15", adults: 2, children: 0,
+      roomTypeName: "Standard Room, 1 King Bed", nightlyRatesCents: [5903], taxCents: 590, totalCents: 6493, paidCents: 6493, virtualCard: true,
+    });
+    expect(booking?.phone?.replace(/\D/g, "")).toBe("102095550111");
+  });
+
+  test("Expedia Partner Central: the same email with every cell on its own line", () => {
+    const text = virtualCardEmail
+      .replace("Reservation ID: 2601000002 Guest: Albert Sample Booked on: Nov 12, 2026 2:23 PM PST", "Reservation ID: 2601000002\nGuest: Albert Sample\nBooked on: Nov 12, 2026 2:23 PM PST")
+      .replace(/ (Extra Person|Taxes|Extra Charges|Total Cost):/g, "\n$1:");
+    const booking = parseBookingEmail({ subject: "Expedia - New Booking - Arriving on 14 Nov 2026", text });
+    expect(booking).toMatchObject({ firstName: "Albert", lastName: "Sample", nightlyRatesCents: [5903], taxCents: 590, totalCents: 6493, virtualCard: true });
+  });
+
+  test("card expiry and validation code lines never get past the card filter", () => {
+    const cleaned = removeCardDetails(virtualCardEmail);
+    expect(cleaned).not.toMatch(/4111|Expiration Date|Validation Code|\b123\b/);
+    expect(cleaned).toMatch(/Total Cost:64\.93/);
+  });
+
   test("Expedia Partner Central: a cancellation", () => {
     const booking = parseBookingEmail({ subject: "Expedia - Cancelled Booking - Arriving on 9 Nov 2026", text: expediaRows.replace("New Reservation", "Cancelled Reservation") });
     expect(booking?.kind).toBe("cancelled");

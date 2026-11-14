@@ -162,7 +162,8 @@ async function placeBooking(tx: TransactionSql, motel: Motel, booking: EmailBook
         promotionIds: [],
         taxRatePercentage: taxPercentage,
         taxExempt: false,
-        otaPaymentStatus: paidOnline ? "Paid Online" : "Guest Pays Hotel",
+        // Expedia Collect with a virtual card: the motel charges the card Expedia sends.
+        otaPaymentStatus: booking.paymentStatus ?? (booking.virtualCard ? "Virtual Card Pending" : paidOnline ? "Paid Online" : "Guest Pays Hotel"),
         ...(booking.commissionCents !== undefined ? { commissionCents: booking.commissionCents } : {}),
         source: source.name,
         online: {
@@ -189,14 +190,28 @@ async function placeBooking(tx: TransactionSql, motel: Motel, booking: EmailBook
 }
 
 /** Staff add a booking from Needs review to Arrivals (after freeing a room, adding a source, …). */
-export async function addReviewedBooking(sql: Sql, propertyId: string, messageId: string): Promise<{ entries: ImportEntry[]; error?: string; reservationId?: string }> {
+/** What staff fill in on the review card when the email did not say it clearly. */
+export type ReviewCorrections = { firstName?: string; lastName?: string; roomTotalCents?: number; paymentStatus?: EmailBooking["paymentStatus"] };
+
+export async function addReviewedBooking(sql: Sql, propertyId: string, messageId: string, corrections: ReviewCorrections = {}): Promise<{ entries: ImportEntry[]; error?: string; reservationId?: string }> {
   return sql.begin(async (tx) => {
     const log = await readImportLog(tx, propertyId, true);
     const entry = log.find((item) => item.messageId === messageId && item.status === "review");
     if (!entry?.booking) return { entries: log, error: "This email has no booking details to add. Enter it with New Arrival." };
+    const booking: EmailBooking = { ...entry.booking };
+    if (corrections.firstName?.trim()) booking.firstName = corrections.firstName.trim();
+    if (corrections.lastName?.trim()) booking.lastName = corrections.lastName.trim();
+    if (corrections.paymentStatus) booking.paymentStatus = corrections.paymentStatus;
+    // A room price the email did not give: spread over the nights like the email readers do.
+    if (!booking.nightlyRatesCents.length && corrections.roomTotalCents && booking.checkIn && booking.checkout && booking.checkout > booking.checkIn) {
+      const nights = Math.round((Date.parse(`${booking.checkout}T12:00:00Z`) - Date.parse(`${booking.checkIn}T12:00:00Z`)) / 86_400_000);
+      const each = Math.floor(corrections.roomTotalCents / nights);
+      booking.nightlyRatesCents = Array.from({ length: nights }, (_, index) => index === nights - 1 ? corrections.roomTotalCents! - each * (nights - 1) : each);
+      booking.subtotalCents = corrections.roomTotalCents;
+    }
     const [row] = await tx<Array<{ value: { emailImport?: unknown } }>>`
       select case when jsonb_typeof(value)='object' then value else (value#>>'{}')::jsonb end as value from property_settings where property_id=${propertyId}::uuid and key='application_settings'`;
-    const placed = await placeBooking(tx, { propertyId, settings: emailImportSettings(row?.value?.emailImport) }, entry.booking, entry.receivedAt);
+    const placed = await placeBooking(tx, { propertyId, settings: emailImportSettings(row?.value?.emailImport) }, booking, entry.receivedAt);
     if ("reason" in placed) return { entries: log, error: placed.reason };
     const next = log.map((item) => item.messageId === messageId ? { ...item, status: "imported" as const, reason: undefined, booking: undefined, reservationId: placed.reservationId, confirmationNumber: placed.confirmationNumber } : item);
     await writeImportLog(tx, propertyId, next);
@@ -213,9 +228,12 @@ export async function importBookingEmail(sql: Sql, motel: Motel, email: { messag
     await tx`insert into property_settings (property_id,key,value) values (${motel.propertyId}::uuid,${LOG_KEY},${tx.json({ entries: [] } as never)}) on conflict (property_id,key) do nothing`;
     const stored = await readImportLog(tx, motel.propertyId, true);
     const earlier = stored.find((entry) => entry.messageId === email.messageId);
-    // An email whose format was not known yet is read again (the Gmail script
-    // resends Needs review emails); any other email is only ever imported once.
-    const unreadBefore = earlier?.status === "review" && !earlier.provider && !earlier.booking;
+    // An email whose format was not known yet, or whose guest name or price
+    // could not be read, is read again (the Gmail script resends Needs review
+    // emails): a newer reader may now place it. Any other email is only ever
+    // imported once, and one staff already added or dismissed is left alone.
+    const partlyRead = Boolean(earlier?.booking && (!earlier.booking.firstName || !earlier.booking.nightlyRatesCents?.length));
+    const unreadBefore = earlier?.status === "review" && ((!earlier.provider && !earlier.booking) || partlyRead);
     if (earlier && !(unreadBefore && booking)) return { status: earlier.status === "review" ? "review" as const : "duplicate" as const, message: earlier.status === "review" ? earlier.reason ?? "Needs review." : "Already imported." };
     const log = unreadBefore ? stored.filter((entry) => entry !== earlier) : stored;
     const base = { messageId: email.messageId, receivedAt: email.receivedAt, processedAt: new Date().toISOString() };

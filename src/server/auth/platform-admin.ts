@@ -1,4 +1,4 @@
-import { tokenAssuranceLevel, twoStepRequired } from "./jwt";
+import { missingSecondStep } from "./two-step";
 import { setRequestActor } from "@/server/db/request-context";
 
 export class PlatformAdminAccessError extends Error {
@@ -39,8 +39,8 @@ export async function requirePlatformAdmin(request: Request) {
   // An address someone signed up with but never confirmed proves nothing.
   if (!user.email_confirmed_at) throw new PlatformAdminAccessError(403, "Confirm this account's email address before using the Platform Admin.");
   if (!configuredEmails().has(email)) throw new PlatformAdminAccessError(403, "This account is not a Platform Admin.");
-  // A Platform Admin can create and open every motel: always two steps.
-  if (twoStepRequired() && tokenAssuranceLevel(token) !== "aal2") throw new PlatformAdminAccessError(403, "Enter the 6-digit code from your authenticator app to continue.", "two_step_required");
+  // A Platform Admin who turned two-step sign-in on must have entered the code.
+  if (await missingSecondStep(user.id, token)) throw new PlatformAdminAccessError(403, "Enter the 6-digit code from your authenticator app to continue.", "two_step_required");
   setRequestActor({ authUserId: user.id, label: `Platform admin ${email}` });
   return { id: user.id, email };
 }

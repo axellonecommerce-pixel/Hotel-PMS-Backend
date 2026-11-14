@@ -14,7 +14,7 @@ const reinstateSchema = z.object({
 
 type ReleasedCharge = { id: string; serviceDate: string; amountCents: number; taxCents: number };
 type ReleasedNightlyRate = { reservationRoomId: string; stayDate: string; baseRateCents: number; discountCents: number; finalRateCents: number };
-type LifecycleEvent = { action?: string; roomRentCharges?: ReleasedCharge[]; nightlyRates?: ReleasedNightlyRate[]; commissionCents?: number };
+type LifecycleEvent = { action?: string; roomRentCharges?: ReleasedCharge[]; nightlyRates?: ReleasedNightlyRate[]; commissionCents?: number; feeCents?: number; feeChargeId?: string };
 
 function routeParams(context: { params: Promise<{ reservationId: string }> }) {
   return context.params.then(({ reservationId }) => reservationId);
@@ -128,6 +128,27 @@ async function routePOST(request: Request, context: { params: Promise<{ reservat
       }
       if (releasedRoomIds.size) await tx`update reservation_rooms set room_id=null,updated_at=now() where id in ${tx([...releasedRoomIds])}`;
       await tx`update reservation_rooms set status='reserved',updated_at=now() where reservation_id=${reservation.id}::uuid and property_id=${session.propertyId}::uuid`;
+      // The stay is back on, so its cancellation / no-show fee no longer
+      // applies: void it and reverse its revenue (the guest pays the room again).
+      const feeType = release.action === "no-show" ? "No-show Fee" : "Cancellation Fee";
+      const fees = release.feeChargeId
+        ? await tx<Array<{ id: string; amountCents: number }>>`
+            select id,amount_cents as "amountCents" from charges
+            where id=${release.feeChargeId}::uuid and property_id=${session.propertyId}::uuid and status='posted' for update`
+        : release.feeCents
+          ? await tx<Array<{ id: string; amountCents: number }>>`
+              select c.id,c.amount_cents as "amountCents" from charges c join folios f on f.id=c.folio_id
+              where f.reservation_id=${reservation.id}::uuid and c.property_id=${session.propertyId}::uuid
+                and c.type=${feeType} and c.status='posted' and c.amount_cents=${release.feeCents}
+              order by c.created_at desc limit 1 for update of c`
+          : [];
+      for (const fee of fees) {
+        await tx`update charges set status='voided',updated_at=now() where id=${fee.id}::uuid`;
+        if (fee.amountCents > 0) await postProductionLedger(tx, {
+          propertyId: session.propertyId, businessDate, resourceType: "reservation-release-fee-reversal", resourceId: fee.id,
+          description: `${feeType} reversed · reservation reinstated`, debitAccount: "Revenue:Cancellation Fees", creditAccount: "Guest Receivable", amountCents: fee.amountCents,
+        });
+      }
       if (release.commissionCents && release.commissionCents > 0) {
         await setReservationCommission(tx, { propertyId: session.propertyId, reservationId: reservation.id, targetCents: release.commissionCents, businessDate, reason: "Reinstated commission" });
       }
@@ -136,7 +157,7 @@ async function routePOST(request: Request, context: { params: Promise<{ reservat
       const [balance] = await tx<Array<{ balanceCents: number }>>`
         select (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios f on f.id=c.folio_id where f.reservation_id=${reservation.id}::uuid and c.status='posted'),0)-coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=${reservation.id}::uuid),0))::int as "balanceCents"
       `;
-      await logReservationActivity(tx, session, reservation.id, "Status", `Reinstated to Reserved · ${chargeIds.length} room night(s) restored${releasedRoomIds.size ? ` · ${releasedRoomIds.size} room(s) now unassigned (taken or blocked)` : ""}${parsed.data.note ? ` · ${parsed.data.note}` : ""}`);
+      await logReservationActivity(tx, session, reservation.id, "Status", `Reinstated to Reserved · ${chargeIds.length} room night(s) restored${fees.length ? ` · ${feeType.toLowerCase()} ${fees.map((fee) => `$${(fee.amountCents / 100).toFixed(2)}`).join(", ")} removed` : ""}${releasedRoomIds.size ? ` · ${releasedRoomIds.size} room(s) now unassigned (taken or blocked)` : ""}${parsed.data.note ? ` · ${parsed.data.note}` : ""}`);
       return { status: "Reserved", balanceCents: balance?.balanceCents ?? 0, version: reservation.version + 1, unassignedRooms: releasedRoomIds.size } as const;
     });
     if ("error" in result) return Response.json(result, { status: result.httpStatus });
