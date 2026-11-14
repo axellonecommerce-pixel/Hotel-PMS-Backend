@@ -12,7 +12,21 @@ function allowedOrigin(request: NextRequest) {
   return origin && allowed.includes(origin) ? origin : null;
 }
 
+/**
+ * Old copies of the PMS that must never reach this API again, whatever
+ * PMS_FRONTEND_ORIGINS still lists: they run old code without today's
+ * protections (two-step sign-in screen, content security policy).
+ */
+const RETIRED_FRONTEND_ORIGINS = new Set(["https://lustrous-arithmetic-baa66a.netlify.app"]);
+
 export function proxy(request: NextRequest) {
+  const requestOrigin = request.headers.get("origin")?.replace(/\/$/, "");
+  if (requestOrigin && RETIRED_FRONTEND_ORIGINS.has(requestOrigin)) {
+    return NextResponse.json(
+      { error: "This old InnSeva address is closed. Use https://hotelpmsfrontend.netlify.app." },
+      { status: 403, headers: { "Cache-Control": "no-store" } },
+    );
+  }
   const origin = allowedOrigin(request);
   const response = request.method === "OPTIONS" ? new NextResponse(null, { status: 204 }) : NextResponse.next();
   // Every API answer is private to the signed-in hotel: never cache it in a
