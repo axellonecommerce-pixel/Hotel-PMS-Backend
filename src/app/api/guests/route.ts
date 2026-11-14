@@ -138,9 +138,17 @@ async function listGuests(propertyId: string, only: string[] | null = null) {
   `;
   // Stay totals are what the guest was billed: every posted charge plus its
   // taxes (room tax, occupancy tax, …). Rate is the average nightly room rate.
-  const stays = await sql<Array<{ guestId: string; id: string; room: string | null; checkInDate: string; checkoutDate: string; rateCents: number; taxCents: number; totalCents: number; paymentType: string | null }>>`
+  const stays = await sql<Array<{ guestId: string; id: string; room: string | null; checkInDate: string; checkoutDate: string; rateCents: number; taxCents: number; totalCents: number; paymentType: string | null; confirmationNumber: string; nights: number; rooms: string | null; roomType: string | null; source: string | null; company: string | null; roomRentCents: number; extrasCents: number }>>`
     select r.main_guest_id as "guestId",r.id,coalesce((select room.number from reservation_rooms rr left join rooms room on room.id=rr.room_id where rr.reservation_id=r.id order by rr.created_at limit 1),'Unassigned') as room,
       r.arrival_date::text as "checkInDate",r.departure_date::text as "checkoutDate",
+      r.confirmation_number as "confirmationNumber",greatest(r.departure_date-r.arrival_date,1)::int as nights,
+      -- What a returning guest had: every room, its type, the source, the company.
+      (select string_agg(coalesce(room.number,'Unassigned'), ', ' order by rr.created_at) from reservation_rooms rr left join rooms room on room.id=rr.room_id where rr.reservation_id=r.id) as rooms,
+      (select string_agg(distinct rt.name, ', ') from reservation_rooms rr join room_types rt on rt.id=rr.room_type_id where rr.reservation_id=r.id) as "roomType",
+      (select bs.name from booking_sources bs where bs.id=r.booking_source_id) as source,
+      (select co.name from companies co where co.id=r.company_id) as company,
+      coalesce((select sum(c.amount_cents) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted' and c.type='Room Rent'),0)::int as "roomRentCents",
+      coalesce((select sum(c.amount_cents) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted' and c.type<>'Room Rent'),0)::int as "extrasCents",
       coalesce((select round(avg(nr.final_rate_cents)) from nightly_rates nr join reservation_rooms rr on rr.id=nr.reservation_room_id where rr.reservation_id=r.id),0)::int as "rateCents",
       coalesce((select sum(ct.amount_cents) from charge_taxes ct join charges c on c.id=ct.charge_id join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)::int as "taxCents",
       (coalesce((select sum(c.amount_cents) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)
