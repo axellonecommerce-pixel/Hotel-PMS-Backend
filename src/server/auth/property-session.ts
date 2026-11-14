@@ -4,7 +4,7 @@ import { db } from "@/server/db/client";
 import { propertyMemberships } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { setRequestActor } from "@/server/db/request-context";
-import { verifySupabaseToken } from "./jwt";
+import { tokenAssuranceLevel, twoStepRequired, verifySupabaseToken } from "./jwt";
 import { requirePlatformAdmin } from "./platform-admin";
 import { accessLayers, cleanStaffAccess, STAFF_ACCESS_KEY } from "./staff-access";
 import {
@@ -22,10 +22,12 @@ import {
 export { STAFF_ACCESS_KEY };
 
 export class PropertyAccessError extends Error {
-  constructor(public status: 401 | 403, message: string) {
+  constructor(public status: 401 | 403, message: string, public code?: "two_step_required") {
     super(message);
   }
 }
+
+export const TWO_STEP_MESSAGE = "Enter the 6-digit code from your authenticator app to continue.";
 
 function bearerToken(request: Request) {
   const authorization = request.headers.get("authorization");
@@ -108,6 +110,10 @@ export async function requirePropertySession(request: Request, permission: Permi
     access: effectiveAccess(layers.custom ? layers.custom.basedOn : membership.role, layers.override, layers.roleOverride),
     roleLabel: layers.custom?.name ?? roleLabels[membership.role],
   };
+  // An owner can do everything, so their sign-in needs the second step too.
+  if (session.role === "owner" && twoStepRequired() && tokenAssuranceLevel(bearerToken(request) ?? "") !== "aal2") {
+    throw new PropertyAccessError(403, TWO_STEP_MESSAGE, "two_step_required");
+  }
   setRequestActor({ authUserId, propertyId: membership.propertyId });
   const wanted = typeof permission === "string" ? [permission] : permission;
   const results = wanted.map((item) => authorizePropertyAccess(session, membership!.propertyId, item));
@@ -118,7 +124,7 @@ export async function requirePropertySession(request: Request, permission: Permi
 
 export function propertyAccessResponse(error: unknown) {
   if (error instanceof PropertyAccessError) {
-    return Response.json({ error: error.message }, { status: error.status });
+    return Response.json(error.code ? { error: error.message, code: error.code } : { error: error.message }, { status: error.status });
   }
   // The database's double-booking backstop (migration 0026) says which room
   // and reservation clash; that message is ours and safe to show.

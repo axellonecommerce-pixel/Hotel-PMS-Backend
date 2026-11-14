@@ -5,6 +5,7 @@ import { setRequestActor } from "@/server/db/request-context";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { announceImport, importBookingEmail, motelForImportKey } from "@/server/email-import/import-booking";
 import { withRequestContext } from "@/server/db/request-context";
+import { overRateLimit, rateLimitReached, tooManyRequests } from "@/server/http/rate-limit";
 
 /**
  * Booking emails from the motel's Gmail (the InnSeva script in Settings ›
@@ -23,7 +24,12 @@ const emailSchema = z.object({
 async function routePOST(request: Request) {
   try {
     if (!hasProductionDatabase()) return Response.json({ error: "Booking import is unavailable." }, { status: 503 });
+    // Guessing keys: 20 wrong keys in 10 minutes blocks that address for the
+    // rest of the window. (Google's servers run every motel's script, so
+    // correct keys are never limited by address.)
+    if (await rateLimitReached(request, "import-bad-key", 20, 600)) return tooManyRequests(600);
     const motel = await motelForImportKey(productionSql(), request.headers.get("x-import-key"));
+    if (!motel) await overRateLimit(request, "import-bad-key", 20, 600);
     if (!motel) return Response.json({ error: "Booking email import is off, or the key is wrong. Copy the script again from Settings › Online Bookings." }, { status: 401 });
     const parsed = emailSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return Response.json({ error: "The email could not be read." }, { status: 400 });

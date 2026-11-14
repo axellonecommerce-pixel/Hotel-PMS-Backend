@@ -79,3 +79,19 @@ export async function verifySupabaseToken(token: string, supabaseUrl: string, no
   if (!audience.includes("authenticated") || claims.role !== "authenticated") return null;
   return typeof claims.sub === "string" && /^[0-9a-f-]{36}$/i.test(claims.sub) ? claims.sub : null;
 }
+
+/**
+ * The sign-in's assurance level ("aal1" = password only, "aal2" = password
+ * and the authenticator-app code). Read from a token already verified.
+ */
+export function tokenAssuranceLevel(token: string): "aal1" | "aal2" | null {
+  try {
+    const claims = decodeJson(token.split(".")[1] ?? "");
+    return claims.aal === "aal2" ? "aal2" : claims.aal === "aal1" ? "aal1" : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Owners and Platform Admins sign in with two steps (unless turned off for a test server). */
+export const twoStepRequired = () => process.env.PMS_REQUIRE_TWO_STEP !== "false" && process.env.PMS_DEMO_AUTH_ENABLED !== "true";

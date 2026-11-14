@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { withRequestContext } from "@/server/db/request-context";
+import { bookedOvernightRoomsSql, chargedNoShowRoomsSql, compRoomsSql, dayUseRoomsSoldSql, overnightRoomsSoldSql } from "@/server/reports/rooms-sold";
 
 const querySchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -31,33 +32,20 @@ async function routeGET(request: Request) {
         count(*) filter (where cleanliness_status <> 'clean')::int as "dirtyRooms"
       from rooms where property_id=${session.propertyId}::uuid and active=true
     `;
-    const daily = await productionSql()<Array<{ date: string; occupied: number; dayUse: number; arrivals: number; departures: number; cleaned: number }>>`
+    const daily = await productionSql()<Array<{ date: string; occupied: number; dayUse: number; noShows: number; comp: number; booked: number; arrivals: number; departures: number; cleaned: number }>>`
       select day::date::text as date,
-        coalesce((select count(distinct rr.room_id)
-          from reservation_rooms rr
-          join reservations r on r.id=rr.reservation_id
-          where r.property_id=${session.propertyId}::uuid
-            and rr.room_id is not null
-            and rr.status in ('reserved','checked_in','checked_out')
-            and r.status not in ('cancelled','no_show')
-            and r.arrival_date <= day::date
-            and r.departure_date > day::date
-            and (rr.checked_out_at is null or (rr.checked_out_at at time zone coalesce((select timezone from properties where id=${session.propertyId}::uuid),'UTC'))::date > day::date)),0)::int as occupied,
-        coalesce((select count(distinct rr.room_id)
-          from reservation_rooms rr
-          join reservations r on r.id=rr.reservation_id
-          where r.property_id=${session.propertyId}::uuid
-            and rr.room_id is not null
-            and rr.status in ('reserved','checked_in','checked_out')
-            and r.status not in ('cancelled','no_show')
-            and r.arrival_date=day::date and r.departure_date=day::date),0)::int as "dayUse",
+        ${overnightRoomsSoldSql(productionSql(), session.propertyId)} as occupied,
+        ${dayUseRoomsSoldSql(productionSql(), session.propertyId)} as "dayUse",
+        ${chargedNoShowRoomsSql(productionSql(), session.propertyId)} as "noShows",
+        ${compRoomsSql(productionSql(), session.propertyId)} as comp,
+        ${bookedOvernightRoomsSql(productionSql(), session.propertyId)} as booked,
         coalesce((select count(*) from reservations r
           where r.property_id=${session.propertyId}::uuid
             and r.arrival_date=day::date
             and r.status in ('reserved','checked_in','checked_out')),0)::int as arrivals,
         -- Rooms that checked out (or are due out) that day, and rooms housekeeping finished that day.
-        coalesce((select count(distinct rr.room_id) from reservation_rooms rr join reservations r on r.id=rr.reservation_id
-          where r.property_id=${session.propertyId}::uuid and rr.room_id is not null and rr.status in ('checked_in','checked_out','reserved')
+        coalesce((select count(*) from reservation_rooms rr join reservations r on r.id=rr.reservation_id
+          where r.property_id=${session.propertyId}::uuid and rr.status in ('checked_in','checked_out','reserved')
             and r.status not in ('cancelled','no_show') and r.departure_date=day::date and r.arrival_date < day::date),0)::int as departures,
         coalesce((select count(*) from housekeeping_records h where h.property_id=${session.propertyId}::uuid and h.service_date=day::date and h.assignment_status='completed'),0)::int as cleaned
       from generate_series(${input.data.startDate}::date,${input.data.endDate}::date,'1 day'::interval) as days(day)
@@ -73,9 +61,11 @@ async function routeGET(request: Request) {
       arrival: record.arrivals,
       departures: record.departures,
       cleaned: record.cleaned,
-      available: Math.max(0, rentableRooms - record.occupied),
+      available: Math.max(0, rentableRooms - Math.max(record.occupied, record.booked)),
       dayUse: record.dayUse,
-      occupancyRate: rentableRooms ? ((record.occupied + record.dayUse) / rentableRooms) * 100 : 0,
+      noShows: record.noShows,
+      comp: record.comp,
+      occupancyRate: rentableRooms ? (record.occupied / rentableRooms) * 100 : 0,
     })).reverse();
     const occupancyRates = rows.map((row) => Number(row.occupancyRate));
     return Response.json({
@@ -90,7 +80,9 @@ async function routeGET(request: Request) {
         columns: [
           { key: "date", label: "Date", format: "date" },
           { key: "occupied", label: "Occupied", format: "number", align: "right" },
-          { key: "dayUse", label: "Day Use Sold", format: "number", align: "right" },
+          { key: "dayUse", label: "Day Use", format: "number", align: "right" },
+          { key: "comp", label: "Comp Rooms", format: "number", align: "right" },
+          { key: "noShows", label: "Charged No-shows", format: "number", align: "right" },
           { key: "arrival", label: "Scheduled Arrivals", format: "number", align: "right" },
           { key: "departures", label: "Departures", format: "number", align: "right" },
           { key: "cleaned", label: "Rooms Cleaned", format: "number", align: "right" },
@@ -98,7 +90,7 @@ async function routeGET(request: Request) {
           { key: "occupancyRate", label: "Occupancy (Rentable)", format: "percent", align: "right" },
         ],
         rows,
-        note: "Occupied room-nights come from saved room assignments. Same-day day-use stays count as rooms sold but do not reduce overnight availability. Each day shows its own departures, rooms housekeeping finished, and rooms left to sell (rentable minus occupied). Dirty Now is today's live count. A guest who checked out early is not counted on the nights after.",
+        note: "Industry rules (USALI / STR): Occupied = paid overnight rooms in house (checked in or checked out, room rent above $0); occupancy = occupied ÷ rentable rooms. Day use, comp rooms and charged no-shows are shown on their own and are not occupied rooms. Bookings that have not arrived are not counted. Available to Sell subtracts every booked room, arrived or not. A guest who checked out early is not counted on the nights after.",
       },
     });
   } catch (error) {

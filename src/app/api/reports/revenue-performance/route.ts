@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { withRequestContext } from "@/server/db/request-context";
+import { roomsSoldSql, soldRoomRevenueSql } from "@/server/reports/rooms-sold";
 
 const querySchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -18,13 +19,14 @@ async function routeGET(request: Request) {
     const [inventory] = await productionSql()<Array<{ rooms: number }>>`
       select count(*) filter (where active=true and service_status='rentable')::int as rooms from rooms where property_id=${session.propertyId}::uuid
     `;
-    const rows = await productionSql()<Array<{ date: string; roomRevenue: number; otherRevenue: number; taxes: number; expenses: number; roomsSold: number }>>`
+    const rows = await productionSql()<Array<{ date: string; roomRevenue: number; otherRevenue: number; taxes: number; expenses: number; roomsSold: number; soldRoomRevenue: number }>>`
       select day::date::text as date,
         coalesce((select sum(le.credit_cents-le.debit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account='Room Revenue'),0)::int as "roomRevenue",
         coalesce((select sum(le.credit_cents-le.debit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account like 'Revenue:%'),0)::int as "otherRevenue",
         coalesce((select sum(le.credit_cents-le.debit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date and le.account='Tax Payable'),0)::int as taxes,
         coalesce((select sum(e.amount_cents) from expenses e where e.property_id=${session.propertyId}::uuid and e.expense_date=day::date),0)::int as expenses,
-        coalesce((select count(distinct rr.room_id) from reservation_rooms rr join reservations r on r.id=rr.reservation_id where r.property_id=${session.propertyId}::uuid and rr.room_id is not null and rr.status in ('reserved','checked_in','checked_out') and r.status not in ('cancelled','no_show') and ((r.arrival_date <= day::date and r.departure_date > day::date) or (r.arrival_date=day::date and r.departure_date=day::date))),0)::int as "roomsSold"
+        ${roomsSoldSql(productionSql(), session.propertyId)} as "roomsSold",
+        ${soldRoomRevenueSql(productionSql(), session.propertyId)} as "soldRoomRevenue"
       from generate_series(${input.data.startDate}::date,${input.data.endDate}::date,'1 day'::interval) as days(day)
       order by day desc
     `;
@@ -51,9 +53,9 @@ async function routeGET(request: Request) {
         id: row.date, date: row.date, roomRevenue: row.roomRevenue, otherRevenue: row.otherRevenue, taxes: row.taxes, expenses: row.expenses,
         net: row.roomRevenue + row.otherRevenue - row.expenses, roomsSold: row.roomsSold,
         occupancy: inventory?.rooms ? row.roomsSold / inventory.rooms * 100 : 0,
-        adr: row.roomsSold ? row.roomRevenue / row.roomsSold : 0, revpar: inventory?.rooms ? row.roomRevenue / inventory.rooms : 0,
+        adr: row.roomsSold ? row.soldRoomRevenue / row.roomsSold : 0, revpar: inventory?.rooms ? row.soldRoomRevenue / inventory.rooms : 0,
       })),
-      note: "Revenue comes from posted ledger credits and operating expenses from posted expense records. Day-use stays are included in rooms sold without reducing overnight inventory.",
+      note: "Industry rules (USALI / STR): Rooms Sold = paid overnight rooms in house (checked in or checked out). Day use, comp rooms, no-shows and bookings not yet arrived are not rooms sold. ADR = room revenue of stays that arrived (overnight and day use) plus No-show Fees, divided by rooms sold; RevPAR = the same revenue divided by rentable rooms. The Room Revenue column is posted ledger room revenue; expenses come from posted expense records.",
     } });
   } catch (error) { return propertyAccessResponse(error); }
 }

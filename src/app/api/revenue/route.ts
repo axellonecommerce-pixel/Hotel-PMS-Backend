@@ -4,6 +4,7 @@ import { summarizeRevenueLedger } from "@/server/finance/revenue-summary";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { withRequestContext } from "@/server/db/request-context";
+import { soldRoomRevenueSql } from "@/server/reports/rooms-sold";
 
 const querySchema = z.object({
   start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -17,7 +18,7 @@ async function routeGET(request: Request) {
     if (!parsed.success) return Response.json({ error: "A valid revenue date range is required." }, { status: 400 });
     if (!hasProductionDatabase()) return Response.json({ records: [] });
     const sql = productionSql();
-    const [rows, paymentBreakdown, reservationSources, dailyPayments] = await Promise.all([
+    const [rows, paymentBreakdown, reservationSources, dailyPayments, soldRevenue] = await Promise.all([
       sql<Array<{ date: string; roomRevenueCents: number; taxCents: number; miscellaneousRevenueCents: number }>>`
       select business_date::text as date,
         coalesce(sum(credit_cents-debit_cents) filter (where account='Room Revenue'),0)::int as "roomRevenueCents",
@@ -38,16 +39,19 @@ async function routeGET(request: Request) {
         group by p.method order by cents desc,label
       `,
       sql<Array<{ label: string; cents: number; count: number }>>`
+        -- Room revenue earned in the range, by source: posted room rent dated
+        -- in the range from every stay (also stays that arrived earlier).
+        -- Adds up to the Room Revenue figure on the same page.
         select coalesce(nullif(bs.name,''),'Direct') as label,
-          coalesce(sum(nr.final_rate_cents),0)::int as cents,
+          coalesce(sum(c.amount_cents),0)::int as cents,
           count(distinct r.id)::int as count
-        from reservations r
+        from charges c
+        join folios f on f.id=c.folio_id
+        join reservations r on r.id=f.reservation_id
         left join booking_sources bs on bs.id=r.booking_source_id
-        left join reservation_rooms rr on rr.reservation_id=r.id
-        left join nightly_rates nr on nr.reservation_room_id=rr.id and nr.stay_date >= ${parsed.data.start}::date and nr.stay_date <= ${parsed.data.end}::date
         where r.property_id=${session.propertyId}::uuid
-          and r.arrival_date between ${parsed.data.start}::date and ${parsed.data.end}::date
-          and r.status not in ('cancelled','no_show')
+          and c.type='Room Rent' and c.status='posted'
+          and c.service_date between ${parsed.data.start}::date and ${parsed.data.end}::date
         group by coalesce(nullif(bs.name,''),'Direct') order by cents desc,label
       `,
       // Money taken each day by kind (net of refunds), for the Daily Revenue table.
@@ -69,7 +73,15 @@ async function routeGET(request: Request) {
             and p.effective_date between ${parsed.data.start}::date and ${parsed.data.end}::date
         ) x group by x.date
       `,
+      // Room revenue of the rooms counted as sold (in house + charged
+      // no-shows), the numerator of ADR and RevPAR, so a booking that has not
+      // arrived yet never raises them.
+      sql<Array<{ date: string; cents: number }>>`
+        select day::date::text as date, ${soldRoomRevenueSql(sql, session.propertyId)} as cents
+        from generate_series(${parsed.data.start}::date,${parsed.data.end}::date,'1 day'::interval) as days(day)
+      `,
     ]);
+    const soldByDate = new Map(soldRevenue.map((day) => [day.date, day.cents]));
     // Days with payments but no posted revenue still get a row.
     const byDate = new Map(dailyPayments.map((day) => [day.date, day]));
     const ledgerDates = new Set(rows.map((row) => row.date));
@@ -77,9 +89,9 @@ async function routeGET(request: Request) {
       .sort((left, right) => right.date.localeCompare(left.date));
     const records = summarizeRevenueLedger(allRows).map((record) => {
       const day = byDate.get(record.date);
-      return { ...record, cashCents: day?.cashCents ?? 0, creditCents: day?.creditCents ?? 0, directBillCents: day?.directBillCents ?? 0, otherPaymentCents: day?.otherPaymentCents ?? 0 };
+      return { ...record, soldRoomRevenueCents: soldByDate.get(record.date) ?? 0, cashCents: day?.cashCents ?? 0, creditCents: day?.creditCents ?? 0, directBillCents: day?.directBillCents ?? 0, otherPaymentCents: day?.otherPaymentCents ?? 0 };
     });
-    return Response.json({ records, paymentBreakdown, reservationSources });
+    return Response.json({ records, paymentBreakdown, reservationSources, soldRoomRevenueCents: soldRevenue.reduce((sum, day) => sum + day.cents, 0) });
   } catch (error) { return propertyAccessResponse(error); }
 }
 

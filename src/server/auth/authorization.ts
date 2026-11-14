@@ -25,6 +25,8 @@ export const permissions = [
   "guests.manage",
   "folios.manage",
   "payments.manage",
+  // Deleting a recorded payment (refunds stay under payments.manage).
+  "payments.delete",
   "companies.manage",
   "cash.manage",
   "night_audit.run",
@@ -38,6 +40,8 @@ export const permissions = [
   "payroll.manage",
   "reports.view",
   "property.manage",
+  // Download every guest's details at once (one guest's own record needs only guests.manage).
+  "guests.export",
   // Owner only: never given to another login.
   "users.manage",
   "backups.manage",
@@ -51,7 +55,8 @@ const allPermissions = new Set<Permission>(permissions);
 const roleDefaults: Record<Role, ReadonlySet<Permission>> = {
   owner: allPermissions,
   // Only the owner manages logins and access (Settings › Users & Roles).
-  manager: new Set<Permission>(permissions.filter((permission) => permission !== "users.manage")),
+  // Downloading the whole guest list stays with the owner unless they allow it.
+  manager: new Set<Permission>(permissions.filter((permission) => permission !== "users.manage" && permission !== "guests.export")),
   front_desk: new Set<Permission>([
     "property.read",
     "dashboard.view",

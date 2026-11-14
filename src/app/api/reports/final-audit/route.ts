@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { withRequestContext } from "@/server/db/request-context";
+import { roomsSoldSql } from "@/server/reports/rooms-sold";
 
 const querySchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -34,9 +35,7 @@ async function routeGET(request: Request) {
         coalesce((select sum(le.debit_cents-le.credit_cents) from ledger_entries le where le.property_id=${session.propertyId}::uuid and le.business_date=day::date),0)::int as "ledgerVariance",
         coalesce((select sum(p.amount_cents-coalesce((select sum(ref.amount_cents) from refunds ref where ref.payment_id=p.id),0)) from payments p where p.property_id=${session.propertyId}::uuid and p.effective_date=day::date and p.method not in ('BAD DEBT','OTA COMMISSION','DIRECT BILL')),0)::int as payments,
         coalesce((select sum(cd.amount_cents) from cash_drops cd join cash_shifts cs on cs.id=cd.cash_shift_id join business_days bd on bd.id=cs.business_day_id where cd.property_id=${session.propertyId}::uuid and bd.business_date=day::date),0)::int as "cashDrop",
-        coalesce((select count(distinct rr.room_id) from reservation_rooms rr join reservations r on r.id=rr.reservation_id where r.property_id=${session.propertyId}::uuid and rr.room_id is not null and rr.status in ('reserved','checked_in','checked_out') and r.status not in ('cancelled','no_show') and ((r.arrival_date <= day::date and r.departure_date > day::date) or (r.arrival_date=day::date and r.departure_date=day::date))
-          -- A guest who checked out early did not use the room on the nights after.
-          and (rr.checked_out_at is null or (rr.checked_out_at at time zone coalesce((select timezone from properties where id=${session.propertyId}::uuid),'UTC'))::date > day::date or r.arrival_date=r.departure_date)),0)::int as "soldRooms",
+        ${roomsSoldSql(productionSql(), session.propertyId)} as "soldRooms",
         ${inventory?.rentableRooms ?? 0}::int as "rentableRooms",
         -- Guest ledger (what in-house and departed guests owe; negative = paid
         -- in advance). Opening + charges - payments - transfers = closing.

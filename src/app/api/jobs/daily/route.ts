@@ -51,6 +51,8 @@ async function routePOST(request: Request) {
         values (${invoice.propertyId}::uuid,'manager','INVOICE_REMINDER','Company invoice requires follow-up',${`${invoice.number} was due ${invoice.dueDate}.`},'invoice',${invoice.id}::uuid)`;
     });
     const recurringExpensesPosted = await sql.begin((tx) => postDueRecurringExpenses(tx));
+    // Request-limit counts only matter for a few minutes.
+    await sql`delete from api_rate_limits where window_start < now() - interval '1 day'`.catch(() => undefined);
     // Automatic card deposits, one motel at a time so one motel's problem never stops another's.
     let cardDeposits = 0;
     const autoDepositMotels = await sql<Array<{ propertyId: string }>>`select property_id as "propertyId" from property_settings where key='card_deposits' and coalesce((value->>'enabled')::boolean,false)`;
