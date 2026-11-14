@@ -5,6 +5,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { postProductionLedger, propertyBusinessDate } from "@/server/finance/production-finance";
 import { logReservationActivity, money } from "@/server/activity/reservation-activity";
+import { alertOwnerOfMoneyChange } from "@/server/activity/owner-alerts";
 import { postPaymentLedger, postRefundLedger, reversePaymentLedger } from "@/server/finance/payment-ledger";
 import { isCardMethod } from "@/server/finance/card-settlements";
 import { ProcessorError } from "@/server/terminal/stripe";
@@ -160,6 +161,7 @@ async function handlePATCH(request: Request, context: { params: Promise<{ reserv
       await postRefundLedger(tx, session.propertyId, payment.id, createdRefund.id, parsed.data.amountCents, refundDate);
       await tx`update payment_allocations set amount_cents=${payment.allocatedCents - parsed.data.amountCents} where payment_id=${payment.id}::uuid and folio_id=${payment.folioId}::uuid`;
       await logReservationActivity(tx, session, reservationId, "Payment", `Refund ${money(parsed.data.amountCents)} of ${payment.method} payment`);
+      await alertOwnerOfMoneyChange(tx, session, reservationId, { kind: "refunded", amountCents: parsed.data.amountCents, method: payment.method });
       return { paymentId: payment.id, refundedCents: payment.refundedCents + parsed.data.amountCents };
     });
     return Response.json({ refund });
@@ -191,18 +193,8 @@ async function routeDELETE(request: Request, context: { params: Promise<{ reserv
       await tx`delete from payment_allocations where payment_id=${payment.id}::uuid`;
       await tx`delete from payments where id=${payment.id}::uuid`;
       await logReservationActivity(tx, session, reservationId, "Payment", `Payment deleted · ${money(payment.amountCents)} ${payment.method}`);
-      // The owner always hears about a deleted payment (cash taken and the
-      // payment removed is the most common front-desk theft).
-      if (session.role !== "owner") {
-        const [who] = await tx<Array<{ name: string | null; confirmation: string | null }>>`
-          select (select e.name from employees e join property_memberships m on m.id=e.membership_id
-                  where m.auth_user_id=${session.authUserId}::uuid and m.property_id=${session.propertyId}::uuid limit 1) as name,
-                 (select confirmation_number from reservations where id=${reservationId}::uuid) as confirmation
-        `;
-        await tx`insert into notifications (property_id,recipient_role,type,title,message,resource_type,resource_id)
-          values (${session.propertyId}::uuid,'owner','PAYMENT_DELETED','Payment deleted',
-            ${`${who?.name ?? "A staff member"} deleted a ${money(payment.amountCents)} ${payment.method} payment on reservation ${who?.confirmation ?? ""}.`},'reservation',${reservationId}::uuid)`;
-      }
+      // The owner always hears about a deleted payment.
+      await alertOwnerOfMoneyChange(tx, session, reservationId, { kind: "deleted", amountCents: payment.amountCents, method: payment.method });
       return true;
     });
     if (!deleted) return Response.json({ error: "Payment not found." }, { status: 404 });

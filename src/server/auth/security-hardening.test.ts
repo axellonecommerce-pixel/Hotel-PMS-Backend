@@ -36,3 +36,16 @@ describe("two-step sign-in level", () => {
     expect(tokenAssuranceLevel("not-a-token")).toBeNull();
   });
 });
+
+describe("backups and the database connection", () => {
+  test("only the owner restores backups by default", () => {
+    expect(hasPermission("owner", "backups.manage")).toBe(true);
+    for (const role of ["manager", "front_desk", "accountant", "housekeeping"] as const) expect(hasPermission(role, "backups.manage")).toBe(false);
+  });
+  test("every database but this computer's is reached over TLS", async () => {
+    const { databaseNeedsTls } = await import("@/server/db/tls");
+    expect(databaseNeedsTls("postgresql://postgres.ref:pw@aws-0-us-east-1.pooler.supabase.com:6543/postgres")).toBe(true);
+    expect(databaseNeedsTls("postgres://postgres@localhost:54329/t")).toBe(false);
+    expect(databaseNeedsTls("not a url")).toBe(true);
+  });
+});

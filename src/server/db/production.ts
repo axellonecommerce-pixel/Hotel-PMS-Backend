@@ -1,3 +1,4 @@
+import { databaseNeedsTls } from "@/server/db/tls";
 import postgres, { type Sql } from "postgres";
 
 import { currentRequestActor } from "./request-context";
@@ -28,6 +29,9 @@ export function productionSql() {
   lastUsed = now;
   if (!client) {
     client = postgres(connectionString, {
+      // Always encrypted to the database (Supabase can then refuse any
+      // unencrypted connection); a database on this computer has no TLS.
+      ssl: databaseNeedsTls(connectionString) ? "require" : false,
       max: 5,
       prepare: false,
       idle_timeout: 20,
@@ -56,3 +60,4 @@ function attributeTransactions(sql: Sql) {
     return begin(...args.slice(0, -1), attributed);
   };
 }
+

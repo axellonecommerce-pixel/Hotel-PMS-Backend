@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { databaseNeedsTls } from "../src/server/db/tls";
 import { readdir } from "node:fs/promises";
 
 /**
@@ -25,7 +26,7 @@ const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required (use --env-file=.env.local).");
 const host = new URL(databaseUrl.replace(/^postgres(ql)?:/, "http:")).username.split(".")[1] ?? "database";
 // Show the migrations' own notes (for example "Skipped … existing row(s) do not pass it"); hide routine ones.
-const sql = postgres(databaseUrl, { prepare: false, max: 1, onnotice: (notice) => { if (/^(Skipped|Default privileges)/.test(notice.message ?? "")) console.log(`[${host}] Note: ${notice.message}`); } });
+const sql = postgres(databaseUrl, { ssl: databaseNeedsTls(databaseUrl) ? "require" : false, prepare: false, max: 1, onnotice: (notice) => { if (/^(Skipped|Default privileges)/.test(notice.message ?? "")) console.log(`[${host}] Note: ${notice.message}`); } });
 
 const statements = (text: string) => text.split("--> statement-breakpoint").map((part) => part.trim()).filter((part) => part.replace(/--[^\n]*/g, "").trim());
 async function runFile(path: string) {

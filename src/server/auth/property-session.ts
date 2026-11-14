@@ -110,8 +110,9 @@ export async function requirePropertySession(request: Request, permission: Permi
     access: effectiveAccess(layers.custom ? layers.custom.basedOn : membership.role, layers.override, layers.roleOverride),
     roleLabel: layers.custom?.name ?? roleLabels[membership.role],
   };
-  // An owner can do everything, so their sign-in needs the second step too.
-  if (session.role === "owner" && twoStepRequired() && tokenAssuranceLevel(bearerToken(request) ?? "") !== "aal2") {
+  // Owners and managers can do almost everything, so their sign-in needs the
+  // second step too (a custom role keeps its built-in role's rule).
+  if ((session.role === "owner" || session.role === "manager") && twoStepRequired() && tokenAssuranceLevel(bearerToken(request) ?? "") !== "aal2") {
     throw new PropertyAccessError(403, TWO_STEP_MESSAGE, "two_step_required");
   }
   setRequestActor({ authUserId, propertyId: membership.propertyId });

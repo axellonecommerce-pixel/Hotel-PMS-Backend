@@ -56,7 +56,8 @@ const roleDefaults: Record<Role, ReadonlySet<Permission>> = {
   owner: allPermissions,
   // Only the owner manages logins and access (Settings › Users & Roles).
   // Downloading the whole guest list stays with the owner unless they allow it.
-  manager: new Set<Permission>(permissions.filter((permission) => permission !== "users.manage" && permission !== "guests.export")),
+  // Restoring a backup replaces every record: the owner's decision alone.
+  manager: new Set<Permission>(permissions.filter((permission) => permission !== "users.manage" && permission !== "guests.export" && permission !== "backups.manage")),
   front_desk: new Set<Permission>([
     "property.read",
     "dashboard.view",
