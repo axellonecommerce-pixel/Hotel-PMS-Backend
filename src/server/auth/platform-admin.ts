@@ -1,7 +1,8 @@
+import { tokenAssuranceLevel, twoStepRequired } from "./jwt";
 import { setRequestActor } from "@/server/db/request-context";
 
 export class PlatformAdminAccessError extends Error {
-  constructor(public status: 401 | 403, message: string) {
+  constructor(public status: 401 | 403, message: string, public code?: "two_step_required") {
     super(message);
   }
 }
@@ -38,11 +39,13 @@ export async function requirePlatformAdmin(request: Request) {
   // An address someone signed up with but never confirmed proves nothing.
   if (!user.email_confirmed_at) throw new PlatformAdminAccessError(403, "Confirm this account's email address before using the Platform Admin.");
   if (!configuredEmails().has(email)) throw new PlatformAdminAccessError(403, "This account is not a Platform Admin.");
+  // A Platform Admin can create and open every motel: always two steps.
+  if (twoStepRequired() && tokenAssuranceLevel(token) !== "aal2") throw new PlatformAdminAccessError(403, "Enter the 6-digit code from your authenticator app to continue.", "two_step_required");
   setRequestActor({ authUserId: user.id, label: `Platform admin ${email}` });
   return { id: user.id, email };
 }
 
 export function platformAdminAccessResponse(error: unknown) {
-  if (error instanceof PlatformAdminAccessError) return Response.json({ error: error.message }, { status: error.status });
+  if (error instanceof PlatformAdminAccessError) return Response.json(error.code ? { error: error.message, code: error.code } : { error: error.message }, { status: error.status });
   throw error;
 }

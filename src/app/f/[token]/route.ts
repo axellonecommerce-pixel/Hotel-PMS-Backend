@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { hashFolioToken } from "@/server/guest-messages/folio-links";
+import { overRateLimit } from "@/server/http/rate-limit";
 
 /**
  * The page a guest opens from a folio link (/f/<code>): the folio exactly as
@@ -51,6 +52,8 @@ function headers() {
 export async function GET(_request: Request, context: { params: Promise<{ token: string }> }) {
   const { token } = await context.params;
   if (!/^[A-Za-z0-9_-]{20,64}$/.test(token)) return page(404, "<p>This folio link is not valid.</p>");
+  // A guest opens their link a few times; trying many codes is blocked.
+  if (await overRateLimit(_request, "folio-link", 30)) return page(429, "<p>Too many tries. Please wait a minute and open the link again.</p>");
   if (!hasProductionDatabase()) return page(503, "<p>The folio is unavailable right now. Please try again later.</p>");
   const [link] = await productionSql()<Array<{ id: string; documentHtml: string; revoked: boolean }>>`
     select id, document_html as "documentHtml", revoked_at is not null as revoked

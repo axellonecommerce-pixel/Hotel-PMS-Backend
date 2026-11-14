@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { hasPermission } from "@/server/auth/authorization";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { recordChange } from "@/server/realtime/change-events";
@@ -100,6 +101,10 @@ async function routeGET(request: Request) {
     const parsed = querySchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
     if (!parsed.success) return Response.json({ error: "Choose a guest and a file type." }, { status: 400 });
     const { guestId, format } = parsed.data;
+    // Every guest at once is the owner's call (Users & Roles › Download guest data).
+    if (!guestId && !hasPermission(session.role, "guests.export", session.access)) {
+      return Response.json({ error: "Downloading all guests needs the owner's permission (Users & Roles › Download all guest data)." }, { status: 403 });
+    }
     const sql = productionSql();
     const [motel] = await sql<Array<{ name: string }>>`select name from properties where id=${session.propertyId}::uuid`;
     const guests = await sql<Array<{ id: string; firstName: string; lastName: string; phone: string | null; email: string | null; address: unknown; status: string; remarks: string | null; dnrReason: string | null; roomPreferences: unknown; archivedAt: string | null; createdAt: string }>>`

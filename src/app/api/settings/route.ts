@@ -2,7 +2,7 @@ import { and, eq } from "drizzle-orm";
 import type { TransactionSql } from "postgres";
 import { z } from "zod";
 
-import { settingsKeySections } from "@/server/auth/authorization";
+import { hasPermission, inScope, settingsKeySections, type PropertySession } from "@/server/auth/authorization";
 import { propertyAccessResponse, requirePropertySession, requireSettingsSection } from "@/server/auth/property-session";
 import { db } from "@/server/db/client";
 import { propertySettings } from "@/server/db/schema";
@@ -268,6 +268,19 @@ async function synchronizePropertyIdentity(tx: Parameters<typeof synchronizeConf
   `;
 }
 
+/**
+ * Settings every login reads, minus secrets only Settings › Online Bookings
+ * may see: the Gmail booking-import key (it lets a script add bookings). A
+ * save never needs it back: saves replace only the sections they name, and
+ * changing Online Bookings requires that section.
+ */
+function withoutPrivateKeys<T>(settings: T, session: PropertySession): T {
+  if (session.role === "owner" || (hasPermission(session.role, "property.manage", session.access) && inScope(session.access?.settings ?? "all", "Online Bookings"))) return settings;
+  const copy = { ...(settings as Record<string, unknown>) };
+  if (copy.emailImport && typeof copy.emailImport === "object") copy.emailImport = { ...(copy.emailImport as Record<string, unknown>), key: "" };
+  return copy as T;
+}
+
 async function routeGET(request: Request) {
   try {
     const session = await requirePropertySession(request, "property.read");
@@ -292,7 +305,7 @@ async function routeGET(request: Request) {
           select number,cleanliness_status as "cleanlinessStatus",service_status as "serviceStatus"
           from rooms where property_id=${session.propertyId}::uuid
         `;
-        return Response.json({ settings: mergeLiveRoomState(storedSettings, liveRooms) });
+        return Response.json({ settings: withoutPrivateKeys(mergeLiveRoomState(storedSettings, liveRooms), session) });
       }
 
       // Properties created before application_settings was introduced already
