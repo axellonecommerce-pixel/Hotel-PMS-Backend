@@ -82,9 +82,9 @@ Representative groups: `/auth`, `/property`, `/users`, `/guests`, `/reservations
 
 ## 8. Jobs and retention
 
-- Scheduler: automatic Night Audit, seven-day overdue reminders, ID-image deletion warning, one-year ID-image deletion, recurring expense generation, and export cleanup. A configured property-local Night Audit time is persisted as property data; the UI must describe it as a service window unless the deployed scheduler supports exact per-property execution.
+- Scheduler: automatic Night Audit, seven-day overdue reminders, recurring expense generation, and export cleanup. No job deletes motel data on a schedule; data is kept until an authorized deletion or the motel's account is permanently deleted. A configured property-local Night Audit time is persisted as property data; the UI must describe it as a service window unless the deployed scheduler supports exact per-property execution.
 - Jobs are idempotent, property-timezone aware, retryable, and observable.
-- ID image deletion removes object storage content and active references while retaining guest/stay data. Backups must respect deletion tombstones.
+- Guest ID photos are never stored. The daily job removes any legacy ID photo still in private storage while keeping the guest's ID type and number. Backups exclude ID photos and restores never bring them back.
 - Closed business days cannot reopen; corrections occur through current-day adjusting transactions where applicable.
 
 ## 9. Backup/restore

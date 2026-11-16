@@ -198,7 +198,7 @@ flowchart TD
   G --> H[Generate Final Audit control summary and open next day]
 ```
 
-## 9. Guest merge and ID retention
+## 9. Guest merge and data retention
 
 ```mermaid
 flowchart TD
@@ -207,11 +207,10 @@ flowchart TD
   C --> D[Newest profile fields + combined remarks/DNR]
   D --> E[Deduplicate identical payment sources; retain different ones]
   B -->|No| F[Create profile]
-  E --> G[Store ID image for one year]
+  E --> G[Keep ID type and number; discard any ID photo]
   F --> G
-  G --> H[Notify staff 7 days before deletion]
-  H --> I[Optional profile + ID PDF download]
-  I --> J[Delete image; keep profile/stays]
+  G --> H[Keep profile, stays and all records while the motel uses InnSeva]
+  H --> I[Removed only by an authorized delete or when the motel account is permanently deleted]
 ```
 
 ## 10. Backup restore
