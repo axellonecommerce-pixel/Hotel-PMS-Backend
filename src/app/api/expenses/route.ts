@@ -7,6 +7,7 @@ import { expenses } from "@/server/db/schema";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { postProductionLedger } from "@/server/finance/production-finance";
 import { BankAccountError, bankAccountFor, CASH_SOURCES, creditAccountFor, isBankMethod, payOut } from "@/server/finance/cash-sources";
+import { paidWagesAsExpenses } from "@/server/finance/paid-wages";
 import { ShiftRequiredError } from "@/server/finance/shift-guard";
 import { recordChange } from "@/server/realtime/change-events";
 import { withIdempotency } from "@/server/http/idempotency";
@@ -42,6 +43,10 @@ async function routeGET(request: Request) {
         from expenses e left join vendors v on v.id=e.vendor_id left join bank_accounts ba on ba.id=e.bank_account_id
         where e.property_id=${session.propertyId}::uuid order by e.expense_date desc,e.created_at desc
       `;
+      // Paid wages are an expense too. They are shown here read-only, from the
+      // payroll entry itself (the P&L already counts them as "Wages"), so
+      // nothing is entered twice and past payments show without any re-entry.
+      const wages = await paidWagesAsExpenses(productionSql(), session.propertyId);
       const recurringExpenses = await productionSql()<Array<{
         id: string; category: string; vendor: string; description: string;
         paymentMethod: string; amountCents: number; recurrence: string; nextDueDate: string;
@@ -54,7 +59,10 @@ async function routeGET(request: Request) {
         order by re.next_run_on,re.created_at
       `;
       return Response.json({
-        expenses: records.map((record) => ({ ...record, receiptName: record.receiptName ?? undefined, cashSource: record.cashSource ?? undefined, bankAccountId: record.bankAccountId ?? undefined, bankAccountName: record.bankAccountName ?? undefined, recurring: false, enteredBy: "Hotel Staff" })),
+        expenses: [
+          ...records.map((record) => ({ ...record, receiptName: record.receiptName ?? undefined, cashSource: record.cashSource ?? undefined, bankAccountId: record.bankAccountId ?? undefined, bankAccountName: record.bankAccountName ?? undefined, recurring: false, enteredBy: "Hotel Staff" })),
+          ...wages.map((wage) => ({ ...wage, cashSource: wage.cashSource ?? undefined, bankAccountId: wage.bankAccountId ?? undefined, bankAccountName: wage.bankAccountName ?? undefined, recurring: false, enteredBy: "Payroll", source: "payroll" as const })),
+        ].sort((left, right) => right.date.localeCompare(left.date)),
         recurringExpenses,
       });
     }

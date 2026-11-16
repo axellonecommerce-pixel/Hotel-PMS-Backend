@@ -460,6 +460,7 @@ async function routeGET(request: Request) {
         select ro.id, ro.number as room, rt.name as "roomType",
           (stay.status='checked_in') as occupied,
           case when stay.status='checked_in' and stay.departure <= ${day.date}::date then 'Pending Depart'
+            when stay.status='checked_in' and stay.arrival >= ${day.date}::date then 'Arrived Today'
             when stay.status='checked_in' then 'Stay Over'
             when departed.id is not null then 'Departed'
             when stay.status='reserved' then 'Arrival' else 'Vacant' end as "stayStatus",

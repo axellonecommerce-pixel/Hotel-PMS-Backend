@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { withRequestContext } from "@/server/db/request-context";
+import { roomsCleanedCountSql } from "@/server/housekeeping/rooms-cleaned";
 
 const querySchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -24,9 +25,7 @@ async function routeGET(request: Request) {
     const records = await productionSql()<LaborRecord[]>`
       select te.id,te.work_date::text as "workDate",e.name as employee,coalesce(e.hourly_rate_cents,0) as "hourlyRateCents",
         greatest(0,round(extract(epoch from (te.clock_out_at-te.clock_in_at)) / 60)::int-te.break_minutes) as "paidMinutes",
-        coalesce((select count(*) from housekeeping_records h
-          where h.property_id=te.property_id and h.housekeeper_employee_id=te.employee_id
-            and h.service_date=te.work_date and h.assignment_status='completed'),0)::int as "roomsCleaned"
+        ${productionSql().unsafe(roomsCleanedCountSql("te"))} as "roomsCleaned"
       from time_entries te join employees e on e.id=te.employee_id
       where te.property_id=${session.propertyId}::uuid
         and te.work_date between ${input.data.startDate}::date and ${input.data.endDate}::date

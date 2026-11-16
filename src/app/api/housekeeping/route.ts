@@ -47,6 +47,19 @@ async function routeGET(request: Request) {
       join rooms r on r.id=h.room_id
       left join employees e on e.id=h.housekeeper_employee_id
       where h.property_id=${session.propertyId}::uuid and h.service_date=${date.data.date}
+      union all
+      -- Rooms still assigned when the Night Audit moved the business date keep
+      -- their housekeeper, so marking them clean still counts for her.
+      select r.number,
+        case when h.assignment_status='in_progress' then 'Cleaning' else 'Assigned' end,
+        e.name
+      from housekeeping_records h
+      join rooms r on r.id=h.room_id
+      left join employees e on e.id=h.housekeeper_employee_id
+      where h.property_id=${session.propertyId}::uuid and h.service_date=${date.data.date}::date - 1
+        and h.assignment_status in ('assigned','in_progress') and h.housekeeper_employee_id is not null
+        and r.cleanliness_status <> 'clean'
+        and not exists (select 1 from housekeeping_records t where t.room_id=h.room_id and t.service_date=${date.data.date}::date)
     `;
     return Response.json({ records });
   } catch (error) { return propertyAccessResponse(error); }
@@ -62,9 +75,20 @@ async function routePUT(request: Request) {
       for (const update of parsed.data.updates) {
         const [room] = await tx<Array<{ id: string }>>`select id from rooms where property_id=${session.propertyId}::uuid and number=${update.roomNumber} limit 1`;
         if (!room) continue;
-        const [employee] = update.assignedHousekeeper
+        let [employee] = update.assignedHousekeeper
           ? await tx<Array<{ id: string }>>`select id from employees where property_id=${session.propertyId}::uuid and lower(name)=lower(${update.assignedHousekeeper}) limit 1`
           : [];
+        // Marked clean (or being cleaned) without a name: keep whoever the room
+        // was assigned to today, or on the previous business day.
+        if (!employee && (update.status === "Clean" || update.status === "Cleaning")) {
+          [employee] = await tx<Array<{ id: string }>>`
+            select housekeeper_employee_id as id from housekeeping_records
+            where room_id=${room.id}::uuid and housekeeper_employee_id is not null
+              and (service_date=${parsed.data.serviceDate}::date
+                or (service_date=${parsed.data.serviceDate}::date - 1 and assignment_status in ('assigned','in_progress')))
+            order by service_date desc limit 1
+          `;
+        }
         const state = recordState(update.status);
         await tx`
           insert into housekeeping_records (property_id,room_id,housekeeper_employee_id,service_date,service_type,cleanliness_status,assignment_status,completed_at)
@@ -73,7 +97,9 @@ async function routePUT(request: Request) {
             housekeeper_employee_id=excluded.housekeeper_employee_id,
             cleanliness_status=excluded.cleanliness_status,
             assignment_status=excluded.assignment_status,
-            completed_at=excluded.completed_at
+            -- Marking an already-clean room clean again keeps its first cleaning time.
+            completed_at=case when excluded.assignment_status='completed' and housekeeping_records.assignment_status='completed'
+              then coalesce(housekeeping_records.completed_at, excluded.completed_at) else excluded.completed_at end
         `;
         await tx`update rooms set cleanliness_status=${state.cleanliness}, updated_at=now() where id=${room.id}::uuid`;
       }

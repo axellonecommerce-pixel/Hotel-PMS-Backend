@@ -3,6 +3,7 @@ import { z } from "zod";
 import { propertyAccessResponse, requirePropertySession } from "@/server/auth/property-session";
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { withRequestContext } from "@/server/db/request-context";
+import { paidWagesAsExpenses } from "@/server/finance/paid-wages";
 
 const querySchema = z.object({
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -15,13 +16,16 @@ async function routeGET(request: Request) {
     const input = querySchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
     if (!input.success || input.data.startDate > input.data.endDate) return Response.json({ error: "Choose a valid report date range." }, { status: 400 });
     if (!hasProductionDatabase()) return Response.json({ error: "The production reporting database is unavailable." }, { status: 503 });
-    const records = await productionSql()<Array<{ id: string; date: string; category: string; vendor: string; description: string; amountCents: number }>>`
+    const entered = await productionSql()<Array<{ id: string; date: string; category: string; vendor: string; description: string; amountCents: number }>>`
       select e.id,e.expense_date::text as date,e.category,coalesce(v.name,'Other') as vendor,e.description,e.amount_cents as "amountCents"
       from expenses e left join vendors v on v.id=e.vendor_id
       where e.property_id=${session.propertyId}::uuid
         and e.expense_date between ${input.data.startDate}::date and ${input.data.endDate}::date
       order by e.expense_date desc,e.created_at desc
     `;
+    // Wages paid through Payroll count as an expense on the day they were paid.
+    const wages = await paidWagesAsExpenses(productionSql(), session.propertyId, { start: input.data.startDate, end: input.data.endDate });
+    const records = [...entered, ...wages].sort((left, right) => right.date.localeCompare(left.date));
     const total = records.reduce((sum, record) => sum + record.amountCents, 0);
     const largest = records.reduce((current, record) => !current || record.amountCents > current.amountCents ? record : current, null as typeof records[number] | null);
     return Response.json({ report: {
@@ -39,7 +43,7 @@ async function routeGET(request: Request) {
         { key: "amount", label: "Amount", format: "money", align: "right" },
       ],
       rows: records.map((record) => ({ id: record.id, date: record.date, category: record.category, vendor: record.vendor, description: record.description, amount: record.amountCents })),
-      note: "Expenses are tenant-scoped posted expense records in the selected business-date range.",
+      note: "Expenses entered in the selected date range, plus wages paid through Payroll (on the day they were paid).",
     } });
   } catch (error) { return propertyAccessResponse(error); }
 }
