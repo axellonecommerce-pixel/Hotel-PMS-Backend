@@ -28,6 +28,11 @@ export class PropertyAccessError extends Error {
   }
 }
 
+/** The sign-in could not be checked right now (Supabase unreachable). */
+export class SignInCheckUnavailable extends Error {
+  constructor() { super("The sign-in could not be checked right now. Try again in a moment."); }
+}
+
 export const TWO_STEP_MESSAGE = "Enter the 6-digit code from your authenticator app to continue.";
 
 function bearerToken(request: Request) {
@@ -60,10 +65,13 @@ export async function verifiedAuthUserId(request: Request) {
   const local = await verifySupabaseToken(token, supabaseUrl);
   if (local === null) throw new PropertyAccessError(401, "The login session is invalid or expired.");
   if (local !== "unverifiable") return local;
+  // Supabase down or unreachable is "try again" (503), not "signed out" (401):
+  // a 401 makes the app sign the desk out.
   const response = await fetch(`${supabaseUrl.replace(/\/$/, "")}/auth/v1/user`, {
     headers: { apikey: supabaseKey, authorization: `Bearer ${token}` },
     cache: "no-store",
-  });
+  }).catch(() => null);
+  if (!response || response.status >= 500 || response.status === 429) throw new SignInCheckUnavailable();
   if (!response.ok) throw new PropertyAccessError(401, "The login session is invalid or expired.");
   const user = await response.json() as { id?: string };
   if (!user.id) throw new PropertyAccessError(401, "The login session has no user identity.");
@@ -127,6 +135,7 @@ export function propertyAccessResponse(error: unknown) {
   if (error instanceof PropertyAccessError) {
     return Response.json(error.code ? { error: error.message, code: error.code } : { error: error.message }, { status: error.status });
   }
+  if (error instanceof SignInCheckUnavailable) return Response.json({ error: error.message }, { status: 503 });
   // The database's double-booking backstop (migration 0026) says which room
   // and reservation clash; that message is ours and safe to show.
   const dbError = error as { code?: unknown; message?: unknown; severity?: unknown };
