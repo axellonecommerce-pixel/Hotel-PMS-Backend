@@ -40,7 +40,7 @@ Set `PMS_FRONTEND_ORIGINS` to the comma-separated frontend origins allowed to ca
 ## Guest loyalty cards
 
 Apply `0031_loyalty_program.sql`, `0032_auto_loyalty_members.sql`, and
-`0033_loyalty_management.sql` before
+`0033_loyalty_management.sql`, then `0034_complete_loyalty_operations.sql` before
 enabling the Loyalty page. Saving a scanned guest ID automatically assigns a
 stable, property-specific member ID that is searchable in Guest Directory.
 Completed paid stays credit nights actually stayed; day-use stays and unused
@@ -52,6 +52,12 @@ The property-wide offer is managed in Settings › Loyalty & Offers. Each guest
 can override the qualifying nights, reward type/value, description, terms, and
 expiration from Guest Directory › Loyalty details. Existing issued rewards keep
 the offer terms that applied when they were earned.
+
+Targeted campaigns can select all, local, nearby, inactive, close-to-reward, or
+hand-picked members. A customer's personal offer takes priority, then an active
+campaign, then the property default. Redeeming a reward against an open
+reservation posts a visible folio credit, reduces Room Revenue and applicable
+Tax Payable, and stores enough information to reverse the redemption exactly.
 
 Native Apple Wallet and Google Wallet buttons are optional. Configure
 `APPLE_WALLET_PASS_URL` and `GOOGLE_WALLET_SAVE_URL` only after the matching

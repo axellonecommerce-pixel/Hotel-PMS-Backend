@@ -25,14 +25,13 @@ export async function GET(_request: Request, context: { params: Promise<{ token:
   const [card] = await productionSql()<Array<Record<string, unknown>>>`
     select p.name as "propertyName",g.first_name as "firstName",left(g.last_name,1) as "lastInitial",
       lm.member_number as "memberNumber",lm.status,lp.name as "programName",
-      coalesce(lm.custom_nights_required,lp.nights_required)::int as "nightsRequired",
-      coalesce(nullif(lm.custom_reward_description,''),lp.reward_description) as "rewardDescription",
-      coalesce(lm.custom_terms,lp.terms) as terms,
+      eo.nights_required as "nightsRequired",eo.reward_description as "rewardDescription",eo.terms,
       greatest(coalesce((select sum(nights_delta) from loyalty_transactions where membership_id=lm.id),0),0)::int as "progressNights",
       greatest(coalesce((select sum(nights_delta) from loyalty_transactions where membership_id=lm.id and type in ('enrollment_credit','stay_credit','stay_reversal')),0),0)::int as "totalQualifyingNights",
-      (select count(*)::int from loyalty_rewards where membership_id=lm.id and status='available') as "availableRewards"
+      (select count(*)::int from loyalty_rewards where membership_id=lm.id and status='available' and (expires_at is null or expires_at>now())) as "availableRewards"
     from loyalty_wallet_passes wp join loyalty_memberships lm on lm.id=wp.membership_id
     join loyalty_programs lp on lp.id=lm.program_id join guests g on g.id=lm.guest_id join properties p on p.id=lm.property_id
+    join loyalty_effective_offers eo on eo.membership_id=lm.id
     where wp.token_hash=${hash} and wp.platform='web' and wp.status='active' and lm.status<>'closed'
   `;
   if (!card) return new Response("Card not found or replaced.", { status: 404 });

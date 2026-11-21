@@ -41,6 +41,7 @@ begin
   for table_name in
     select c.table_name
     from information_schema.columns c
+    join information_schema.tables t on t.table_schema=c.table_schema and t.table_name=c.table_name and t.table_type='BASE TABLE'
     where c.table_schema = 'public'
       and c.column_name = 'property_id'
       and c.table_name <> 'property_memberships'

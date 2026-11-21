@@ -82,22 +82,22 @@ async function routePUT(request: Request) {
         returning id
       `;
       if (input.status === "active") {
-        const members = await tx<Array<{ id: string; customNightsRequired: number | null; customRewardDescription: string | null; customRewardType: string | null; customRewardValueCents: number | null; customRewardPercentBasisPoints: number | null; customTerms: string | null; customRewardExpiresDays: number | null }>>`
-          select id,custom_nights_required as "customNightsRequired",custom_reward_description as "customRewardDescription",
-            custom_reward_type as "customRewardType",custom_reward_value_cents as "customRewardValueCents",
-            custom_reward_percent_basis_points as "customRewardPercentBasisPoints",custom_terms as "customTerms",
-            custom_reward_expires_days as "customRewardExpiresDays"
-          from loyalty_memberships where property_id=${session.propertyId}::uuid and program_id=${program.id}::uuid and status='active' for update
+        const members = await tx<Array<{ id: string; nightsRequired: number; rewardDescription: string; rewardType: string; rewardValueCents: number | null; rewardPercentBasisPoints: number | null; terms: string | null; rewardExpiresDays: number | null }>>`
+          select lm.id,eo.nights_required as "nightsRequired",eo.reward_description as "rewardDescription",
+            eo.reward_type as "rewardType",eo.reward_value_cents as "rewardValueCents",
+            eo.reward_percent_basis_points as "rewardPercentBasisPoints",eo.terms,eo.reward_expires_days as "rewardExpiresDays"
+          from loyalty_memberships lm join loyalty_effective_offers eo on eo.membership_id=lm.id
+          where lm.property_id=${session.propertyId}::uuid and lm.program_id=${program.id}::uuid and lm.status='active' for update of lm
         `;
         for (const member of members) await issueAvailableRewards(tx, session.propertyId, {
           id: member.id, programId: program.id,
-          nightsRequired: member.customNightsRequired ?? input.nightsRequired,
-          rewardDescription: member.customRewardDescription || input.rewardDescription,
-          rewardValueCents: member.customRewardValueCents ?? input.rewardValueCents,
-          rewardType: member.customRewardType ?? input.rewardType,
-          rewardPercentBasisPoints: member.customRewardPercentBasisPoints ?? input.rewardPercentBasisPoints,
-          terms: member.customTerms ?? input.terms,
-          rewardExpiresDays: member.customRewardExpiresDays ?? input.rewardExpiresDays,
+          nightsRequired: member.nightsRequired,
+          rewardDescription: member.rewardDescription,
+          rewardValueCents: member.rewardValueCents,
+          rewardType: member.rewardType,
+          rewardPercentBasisPoints: member.rewardPercentBasisPoints,
+          terms: member.terms,
+          rewardExpiresDays: member.rewardExpiresDays,
         }, session.authUserId);
       }
     });

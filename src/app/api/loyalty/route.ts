@@ -5,6 +5,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { withRequestContext } from "@/server/db/request-context";
 import { ensureLoyaltyMembership, issueAvailableRewards } from "@/server/loyalty/service";
+import { applyLoyaltyReward, restoreLoyaltyReward } from "@/server/loyalty/redemption";
 import { recordChange } from "@/server/realtime/change-events";
 
 const bodySchema = z.discriminatedUnion("action", [
@@ -12,7 +13,7 @@ const bodySchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("adjust"), membershipId: z.string().uuid(), nightsDelta: z.number().int().min(-365).max(365).refine((value) => value !== 0), reason: z.string().trim().min(3).max(500) }),
   z.object({ action: z.literal("update"), membershipId: z.string().uuid(), status: z.enum(["active", "paused", "closed"]).optional(), customNightsRequired: z.number().int().min(1).max(365).nullable().optional(), customRewardDescription: z.string().trim().max(160).nullable().optional(), customRewardType: z.enum(["free_night", "fixed_discount", "percent_discount", "member_rate"]).nullable().optional(), customRewardValueCents: z.number().int().min(1).max(10_000_000).nullable().optional(), customRewardPercentBasisPoints: z.number().int().min(1).max(10_000).nullable().optional(), customTerms: z.string().trim().max(2_000).nullable().optional(), customRewardExpiresDays: z.number().int().min(1).max(3_650).nullable().optional(), smsConsent: z.boolean().optional(), emailConsent: z.boolean().optional() }),
   z.object({ action: z.literal("wallet_link"), membershipId: z.string().uuid() }),
-  z.object({ action: z.literal("redeem_reward"), membershipId: z.string().uuid(), rewardId: z.string().uuid(), reservationId: z.string().uuid().nullable().optional() }),
+  z.object({ action: z.literal("redeem_reward"), membershipId: z.string().uuid(), rewardId: z.string().uuid(), reservationId: z.string().uuid() }),
   z.object({ action: z.literal("restore_reward"), membershipId: z.string().uuid(), rewardId: z.string().uuid(), reason: z.string().trim().min(3).max(500) }),
 ]);
 
@@ -29,17 +30,15 @@ async function details(propertyId: string, guestId: string) {
       lp.reward_type as "programRewardType",lp.reward_value_cents as "programRewardValueCents",
       lp.reward_percent_basis_points as "programRewardPercentBasisPoints",lp.terms as "programTerms",
       lp.reward_expires_days as "programRewardExpiresDays",
-      coalesce(lm.custom_nights_required,lp.nights_required)::int as "nightsRequired",
-      coalesce(nullif(lm.custom_reward_description,''),lp.reward_description) as "rewardDescription",
-      coalesce(lm.custom_reward_type,lp.reward_type) as "rewardType",
-      coalesce(lm.custom_reward_value_cents,lp.reward_value_cents) as "rewardValueCents",
-      coalesce(lm.custom_reward_percent_basis_points,lp.reward_percent_basis_points) as "rewardPercentBasisPoints",
-      coalesce(lm.custom_terms,lp.terms) as terms,
-      coalesce(lm.custom_reward_expires_days,lp.reward_expires_days) as "rewardExpiresDays",
+      eo.campaign_name as "campaignName",eo.nights_required as "nightsRequired",
+      eo.reward_description as "rewardDescription",eo.reward_type as "rewardType",
+      eo.reward_value_cents as "rewardValueCents",eo.reward_percent_basis_points as "rewardPercentBasisPoints",
+      eo.terms,eo.reward_expires_days as "rewardExpiresDays",
       greatest(coalesce((select sum(lt.nights_delta) from loyalty_transactions lt where lt.membership_id=lm.id),0),0)::int as "progressNights",
       greatest(coalesce((select sum(lt.nights_delta) from loyalty_transactions lt where lt.membership_id=lm.id and lt.type in ('enrollment_credit','stay_credit','stay_reversal')),0),0)::int as "totalQualifyingNights",
-      (select count(*)::int from loyalty_rewards lr where lr.membership_id=lm.id and lr.status='available') as "availableRewards"
+      (select count(*)::int from loyalty_rewards lr where lr.membership_id=lm.id and lr.status='available' and (lr.expires_at is null or lr.expires_at>now())) as "availableRewards"
     from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id
+    join loyalty_effective_offers eo on eo.membership_id=lm.id
     where lm.property_id=${propertyId}::uuid and lm.guest_id=${guestId}::uuid
   `;
   if (!membership) return null;
@@ -55,6 +54,7 @@ async function details(propertyId: string, guestId: string) {
     select lr.id,lr.status,lr.description,lr.value_cents as "valueCents",lr.reward_type as "rewardType",
       lr.percent_basis_points as "percentBasisPoints",lr.terms,lr.issued_at::text as "issuedAt",
       lr.reserved_at::text as "reservedAt",lr.redeemed_at::text as "redeemedAt",lr.expires_at::text as "expiresAt",
+      lr.applied_discount_cents as "appliedDiscountCents",lr.applied_tax_cents as "appliedTaxCents",lr.redemption_note as "redemptionNote",
       r.confirmation_number as "confirmationNumber"
     from loyalty_rewards lr left join reservations r on r.id=lr.reservation_id
     where lr.property_id=${propertyId}::uuid and lr.membership_id=${membershipId}::uuid
@@ -64,7 +64,17 @@ async function details(propertyId: string, guestId: string) {
     select platform,status,created_at::text as "createdAt",last_synced_at::text as "lastSyncedAt"
     from loyalty_wallet_passes where property_id=${propertyId}::uuid and membership_id=${membershipId}::uuid
   `;
-  return { ...membership, transactions, rewards, wallet };
+  const eligibleReservations = await sql<Array<Record<string, unknown>>>`
+    select r.id,r.confirmation_number as "confirmationNumber",r.status,r.arrival_date::text as "arrivalDate",r.departure_date::text as "departureDate",
+      (coalesce((select sum(c.amount_cents+coalesce((select sum(ct.amount_cents) from charge_taxes ct where ct.charge_id=c.id),0)) from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted'),0)
+       -coalesce((select sum(pa.amount_cents) from payment_allocations pa join folios f on f.id=pa.folio_id where f.reservation_id=r.id),0))::int as "balanceCents"
+    from reservations r where r.property_id=${propertyId}::uuid and r.main_guest_id=${guestId}::uuid
+      and r.status not in ('cancelled','no_show')
+      and exists(select 1 from folios f where f.reservation_id=r.id and f.status='open')
+      and exists(select 1 from charges c join folios f on f.id=c.folio_id where f.reservation_id=r.id and c.status='posted' and c.type='Room Rent' and c.amount_cents>0)
+    order by r.arrival_date desc limit 25
+  `;
+  return { ...membership, transactions, rewards, wallet, eligibleReservations: eligibleReservations.filter((reservation) => Number(reservation.balanceCents) > 0) };
 }
 
 async function routeGET(request: Request) {
@@ -112,14 +122,12 @@ async function routePOST(request: Request) {
 
       const [member] = await tx<Array<{ id: string; guestId: string; status: string; programStatus: string; guestStatus: string; programId: string; nightsRequired: number; rewardDescription: string; rewardValueCents: number | null; rewardType: string; rewardPercentBasisPoints: number | null; terms: string | null; rewardExpiresDays: number | null }>>`
         select lm.id,lm.guest_id as "guestId",lm.status,lp.status as "programStatus",g.guest_status as "guestStatus",lm.program_id as "programId",
-          coalesce(lm.custom_nights_required,lp.nights_required)::int as "nightsRequired",
-          coalesce(nullif(lm.custom_reward_description,''),lp.reward_description) as "rewardDescription",
-          coalesce(lm.custom_reward_value_cents,lp.reward_value_cents) as "rewardValueCents",
-          coalesce(lm.custom_reward_type,lp.reward_type) as "rewardType",
-          coalesce(lm.custom_reward_percent_basis_points,lp.reward_percent_basis_points) as "rewardPercentBasisPoints",
-          coalesce(lm.custom_terms,lp.terms) as terms,
-          coalesce(lm.custom_reward_expires_days,lp.reward_expires_days) as "rewardExpiresDays"
+          eo.nights_required as "nightsRequired",eo.reward_description as "rewardDescription",
+          eo.reward_value_cents as "rewardValueCents",eo.reward_type as "rewardType",
+          eo.reward_percent_basis_points as "rewardPercentBasisPoints",eo.terms,
+          eo.reward_expires_days as "rewardExpiresDays"
         from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id
+        join loyalty_effective_offers eo on eo.membership_id=lm.id
         join guests g on g.id=lm.guest_id and g.property_id=lm.property_id
         where lm.id=${input.membershipId}::uuid and lm.property_id=${session.propertyId}::uuid for update of lm
       `;
@@ -148,24 +156,18 @@ async function routePOST(request: Request) {
           consented_at=case when ${input.smsConsent === true || input.emailConsent === true} then coalesce(consented_at,now()) else consented_at end,
           updated_at=now() where id=${member.id}::uuid`;
         const [updated] = await tx<Array<{ status: string; programStatus: string; nightsRequired: number; rewardDescription: string; rewardValueCents: number | null; rewardType: string; rewardPercentBasisPoints: number | null; terms: string | null; rewardExpiresDays: number | null }>>`
-          select lm.status,lp.status as "programStatus",coalesce(lm.custom_nights_required,lp.nights_required)::int as "nightsRequired",
-            coalesce(nullif(lm.custom_reward_description,''),lp.reward_description) as "rewardDescription",
-            coalesce(lm.custom_reward_value_cents,lp.reward_value_cents) as "rewardValueCents",
-            coalesce(lm.custom_reward_type,lp.reward_type) as "rewardType",
-            coalesce(lm.custom_reward_percent_basis_points,lp.reward_percent_basis_points) as "rewardPercentBasisPoints",
-            coalesce(lm.custom_terms,lp.terms) as terms,
-            coalesce(lm.custom_reward_expires_days,lp.reward_expires_days) as "rewardExpiresDays"
-          from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id where lm.id=${member.id}::uuid
+          select lm.status,lp.status as "programStatus",eo.nights_required as "nightsRequired",
+            eo.reward_description as "rewardDescription",eo.reward_value_cents as "rewardValueCents",
+            eo.reward_type as "rewardType",eo.reward_percent_basis_points as "rewardPercentBasisPoints",
+            eo.terms,eo.reward_expires_days as "rewardExpiresDays"
+          from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id
+          join loyalty_effective_offers eo on eo.membership_id=lm.id where lm.id=${member.id}::uuid
         `;
         if (updated?.status === "active" && updated.programStatus === "active") await issueAvailableRewards(tx, session.propertyId, { id: member.id, programId: member.programId, nightsRequired: updated.nightsRequired, rewardDescription: updated.rewardDescription, rewardValueCents: updated.rewardValueCents, rewardType: updated.rewardType, rewardPercentBasisPoints: updated.rewardPercentBasisPoints, terms: updated.terms, rewardExpiresDays: updated.rewardExpiresDays }, session.authUserId);
       } else if (input.action === "redeem_reward") {
-        const [reward] = await tx<Array<{ id: string }>>`select id from loyalty_rewards where id=${input.rewardId}::uuid and membership_id=${member.id}::uuid and property_id=${session.propertyId}::uuid and status='available' and (expires_at is null or expires_at>now()) for update`;
-        if (!reward) throw new Error("This reward is not available to redeem.");
-        await tx`update loyalty_rewards set status='redeemed',reservation_id=${input.reservationId ?? null}::uuid,redeemed_at=now(),updated_at=now() where id=${reward.id}::uuid`;
+        await applyLoyaltyReward(tx, { propertyId: session.propertyId, authUserId: session.authUserId }, { membershipId: member.id, rewardId: input.rewardId, reservationId: input.reservationId });
       } else if (input.action === "restore_reward") {
-        const [reward] = await tx<Array<{ id: string }>>`select id from loyalty_rewards where id=${input.rewardId}::uuid and membership_id=${member.id}::uuid and property_id=${session.propertyId}::uuid and status='redeemed' for update`;
-        if (!reward) throw new Error("Only a redeemed reward can be restored.");
-        await tx`update loyalty_rewards set status='available',reservation_id=null,redeemed_at=null,redemption_note=${input.reason},updated_at=now() where id=${reward.id}::uuid`;
+        await restoreLoyaltyReward(tx, { propertyId: session.propertyId, authUserId: session.authUserId }, { membershipId: member.id, rewardId: input.rewardId, reason: input.reason });
       } else {
         if (member.status !== "active" || member.guestStatus === "do_not_rent") throw new Error("Only an active loyalty member can receive a wallet card.");
         const token = randomBytes(32).toString("base64url");

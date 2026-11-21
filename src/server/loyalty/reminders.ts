@@ -11,7 +11,7 @@ function fill(template: string, row: Candidate, nightsLeft: number) {
     .replaceAll("{reward}", row.rewardDescription).replaceAll("{memberId}", row.memberNumber);
 }
 
-async function sendSms(to: string, message: string) {
+export async function sendSms(to: string, message: string) {
   const sid = process.env.TWILIO_ACCOUNT_SID; const token = process.env.TWILIO_AUTH_TOKEN; const from = process.env.TWILIO_FROM_NUMBER;
   if (!sid || !token || !from) throw new Error("SMS provider is not configured.");
   const body = new URLSearchParams({ To: to, From: from, Body: message });
@@ -19,7 +19,7 @@ async function sendSms(to: string, message: string) {
   if (!response.ok) throw new Error(`SMS provider returned ${response.status}.`);
 }
 
-async function sendEmail(to: string, subject: string, message: string) {
+export async function sendEmail(to: string, subject: string, message: string) {
   const key = process.env.RESEND_API_KEY; const from = process.env.LOYALTY_EMAIL_FROM;
   if (!key || !from) throw new Error("Email provider is not configured.");
   const response = await fetch("https://api.resend.com/emails", { method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }, body: JSON.stringify({ from, to: [to], subject, text: message }) });
@@ -31,12 +31,12 @@ export async function processLoyaltyReminders(sql: Sql) {
   const candidates = await sql<Candidate[]>`
     select lm.property_id as "propertyId",lm.id as "membershipId",g.first_name as "firstName",g.phone,g.email,
       lm.sms_consent as "smsConsent",lm.email_consent as "emailConsent",lm.member_number as "memberNumber",
-      coalesce(nullif(lm.custom_reward_description,''),lp.reward_description) as "rewardDescription",
-      coalesce(lm.custom_nights_required,lp.nights_required)::int as "nightsRequired",
+      eo.reward_description as "rewardDescription",eo.nights_required as "nightsRequired",
       coalesce((select sum(nights_delta) from loyalty_transactions where membership_id=lm.id),0)::int as balance,
       (select count(*)::int from loyalty_rewards where membership_id=lm.id and status='available' and (expires_at is null or expires_at>now())) as "availableRewards",
       lp.reminder_settings as settings
     from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id join guests g on g.id=lm.guest_id
+    join loyalty_effective_offers eo on eo.membership_id=lm.id
     where lm.status='active' and lp.status='active' and g.guest_status<>'do_not_rent'
       and coalesce((lp.reminder_settings->>'enabled')::boolean,false)
   `;

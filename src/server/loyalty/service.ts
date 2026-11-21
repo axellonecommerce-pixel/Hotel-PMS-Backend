@@ -151,14 +151,12 @@ export async function ensureLoyaltyMembership(
 
   let [member] = await tx<Array<Omit<EnsuredLoyaltyMember, "created">>>`
     select lm.id,lm.guest_id as "guestId",lm.member_number as "memberNumber",lm.status,lp.status as "programStatus",lm.program_id as "programId",
-      coalesce(lm.custom_nights_required,lp.nights_required)::int as "nightsRequired",
-      coalesce(nullif(lm.custom_reward_description,''),lp.reward_description) as "rewardDescription",
-      coalesce(lm.custom_reward_value_cents,lp.reward_value_cents) as "rewardValueCents",
-      coalesce(lm.custom_reward_type,lp.reward_type) as "rewardType",
-      coalesce(lm.custom_reward_percent_basis_points,lp.reward_percent_basis_points) as "rewardPercentBasisPoints",
-      coalesce(lm.custom_terms,lp.terms) as terms,
-      coalesce(lm.custom_reward_expires_days,lp.reward_expires_days) as "rewardExpiresDays"
+      eo.nights_required as "nightsRequired",eo.reward_description as "rewardDescription",
+      eo.reward_value_cents as "rewardValueCents",eo.reward_type as "rewardType",
+      eo.reward_percent_basis_points as "rewardPercentBasisPoints",eo.terms,
+      eo.reward_expires_days as "rewardExpiresDays"
     from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id
+    join loyalty_effective_offers eo on eo.membership_id=lm.id
     where lm.property_id=${input.propertyId}::uuid and lm.guest_id=${guest.id}::uuid
     for update of lm
   `;
@@ -182,14 +180,12 @@ export async function ensureLoyaltyMembership(
     created = Boolean(inserted);
     [member] = await tx<Array<Omit<EnsuredLoyaltyMember, "created">>>`
       select lm.id,lm.guest_id as "guestId",lm.member_number as "memberNumber",lm.status,lp.status as "programStatus",lm.program_id as "programId",
-        coalesce(lm.custom_nights_required,lp.nights_required)::int as "nightsRequired",
-        coalesce(nullif(lm.custom_reward_description,''),lp.reward_description) as "rewardDescription",
-        coalesce(lm.custom_reward_value_cents,lp.reward_value_cents) as "rewardValueCents",
-        coalesce(lm.custom_reward_type,lp.reward_type) as "rewardType",
-        coalesce(lm.custom_reward_percent_basis_points,lp.reward_percent_basis_points) as "rewardPercentBasisPoints",
-        coalesce(lm.custom_terms,lp.terms) as terms,
-        coalesce(lm.custom_reward_expires_days,lp.reward_expires_days) as "rewardExpiresDays"
+        eo.nights_required as "nightsRequired",eo.reward_description as "rewardDescription",
+        eo.reward_value_cents as "rewardValueCents",eo.reward_type as "rewardType",
+        eo.reward_percent_basis_points as "rewardPercentBasisPoints",eo.terms,
+        eo.reward_expires_days as "rewardExpiresDays"
       from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id
+      join loyalty_effective_offers eo on eo.membership_id=lm.id
       where lm.property_id=${input.propertyId}::uuid and lm.guest_id=${guest.id}::uuid
       for update of lm
     `;
@@ -287,13 +283,10 @@ export async function syncReservationLoyalty(
     confirmationNumber: string;
   }>>`
     select lm.id as "membershipId",lm.program_id as "programId",lm.status,lp.status as "programStatus",
-      coalesce(lm.custom_nights_required,lp.nights_required)::int as "nightsRequired",
-      coalesce(nullif(lm.custom_reward_description,''),lp.reward_description) as "rewardDescription",
-      coalesce(lm.custom_reward_value_cents,lp.reward_value_cents) as "rewardValueCents",
-      coalesce(lm.custom_reward_type,lp.reward_type) as "rewardType",
-      coalesce(lm.custom_reward_percent_basis_points,lp.reward_percent_basis_points) as "rewardPercentBasisPoints",
-      coalesce(lm.custom_terms,lp.terms) as terms,
-      coalesce(lm.custom_reward_expires_days,lp.reward_expires_days) as "rewardExpiresDays",
+      eo.nights_required as "nightsRequired",eo.reward_description as "rewardDescription",
+      eo.reward_value_cents as "rewardValueCents",eo.reward_type as "rewardType",
+      eo.reward_percent_basis_points as "rewardPercentBasisPoints",eo.terms,
+      eo.reward_expires_days as "rewardExpiresDays",
       r.status as "reservationStatus",r.version,
       greatest(
         least(
@@ -307,6 +300,7 @@ export async function syncReservationLoyalty(
     from reservations r join properties p on p.id=r.property_id
     join loyalty_memberships lm on lm.guest_id=r.main_guest_id and lm.property_id=r.property_id
     join loyalty_programs lp on lp.id=lm.program_id
+    join loyalty_effective_offers eo on eo.membership_id=lm.id
     where r.id=${input.reservationId}::uuid and r.property_id=${input.propertyId}::uuid
     for update of lm
   `;
