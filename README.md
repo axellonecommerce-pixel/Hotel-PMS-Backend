@@ -40,7 +40,8 @@ Set `PMS_FRONTEND_ORIGINS` to the comma-separated frontend origins allowed to ca
 ## Guest loyalty cards
 
 Apply `0031_loyalty_program.sql`, `0032_auto_loyalty_members.sql`, and
-`0033_loyalty_management.sql`, then `0034_complete_loyalty_operations.sql` before
+`0033_loyalty_management.sql`, `0034_complete_loyalty_operations.sql`, then
+`0035_loyalty_qualification_windows.sql` before
 enabling the Loyalty page. Saving a scanned guest ID automatically assigns a
 stable, property-specific member ID that is searchable in Guest Directory.
 Completed paid stays credit nights actually stayed; day-use stays and unused
@@ -49,9 +50,11 @@ The generated QR code opens a revocable web loyalty card without requiring a
 wallet provider.
 
 The property-wide offer is managed in Settings › Loyalty & Offers. Each guest
-can override the qualifying nights, reward type/value, description, terms, and
-expiration from Guest Directory › Loyalty details. Existing issued rewards keep
-the offer terms that applied when they were earned.
+can override the qualifying nights, reward type/value, description, terms,
+expiration, and earning deadline from Guest Directory › Loyalty details.
+Property, campaign, and customer offers can require the nights within a number
+of days or between fixed checkout dates. Existing issued rewards keep the offer
+terms that applied when they were earned.
 
 Targeted campaigns can select all, local, nearby, inactive, close-to-reward, or
 hand-picked members. A customer's personal offer takes priority, then an active

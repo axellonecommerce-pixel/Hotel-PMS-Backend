@@ -16,11 +16,17 @@ const offerSchema = z.object({
   rewardPercentBasisPoints: z.number().int().min(1).max(10_000).nullable(),
   rewardDescription: z.string().trim().min(3).max(160), terms: z.string().trim().max(2_000).nullable(),
   startsAt: z.string().datetime().nullable(), endsAt: z.string().datetime().nullable(),
+  qualificationType: z.enum(["none", "days", "date_range"]).default("none"),
+  qualificationDays: z.number().int().min(1).max(3_650).nullable().default(null),
+  qualificationStartsOn: z.string().date().nullable().default(null), qualificationEndsOn: z.string().date().nullable().default(null),
   memberIds: z.array(z.string().uuid()).max(5_000).default([]),
 }).superRefine((value, context) => {
   if ((value.rewardType === "fixed_discount" || value.rewardType === "member_rate") && !value.rewardValueCents) context.addIssue({ code: "custom", path: ["rewardValueCents"], message: "Enter a dollar value." });
   if (value.rewardType === "percent_discount" && !value.rewardPercentBasisPoints) context.addIssue({ code: "custom", path: ["rewardPercentBasisPoints"], message: "Enter a percentage." });
   if (value.startsAt && value.endsAt && value.endsAt <= value.startsAt) context.addIssue({ code: "custom", path: ["endsAt"], message: "End date must be after the start date." });
+  if (value.qualificationType === "days" && !value.qualificationDays) context.addIssue({ code: "custom", path: ["qualificationDays"], message: "Enter how many days members have to complete the nights." });
+  if (value.qualificationType === "date_range" && (!value.qualificationStartsOn || !value.qualificationEndsOn)) context.addIssue({ code: "custom", path: ["qualificationStartsOn"], message: "Choose both qualifying dates." });
+  if (value.qualificationStartsOn && value.qualificationEndsOn && value.qualificationEndsOn < value.qualificationStartsOn) context.addIssue({ code: "custom", path: ["qualificationEndsOn"], message: "The last qualifying date must be on or after the first date." });
   if (value.audience === "custom" && !value.memberIds.length) context.addIssue({ code: "custom", path: ["memberIds"], message: "Choose at least one member." });
 });
 
@@ -35,6 +41,8 @@ async function readCampaigns(propertyId: string) {
     select lc.id,lc.name,lc.status,lc.audience,lc.nights_required as "nightsRequired",lc.reward_type as "rewardType",
       lc.reward_value_cents as "rewardValueCents",lc.reward_percent_basis_points as "rewardPercentBasisPoints",
       lc.reward_description as "rewardDescription",lc.terms,lc.starts_at::text as "startsAt",lc.ends_at::text as "endsAt",
+      lc.qualification_type as "qualificationType",lc.qualification_days as "qualificationDays",
+      lc.qualification_starts_on::text as "qualificationStartsOn",lc.qualification_ends_on::text as "qualificationEndsOn",
       lc.created_at::text as "createdAt",lc.updated_at::text as "updatedAt",
       coalesce((select count(*) from loyalty_campaign_members lcm where lcm.campaign_id=lc.id),0)::int as "memberCount",
       coalesce((select jsonb_agg(lcm.membership_id) from loyalty_campaign_members lcm where lcm.campaign_id=lc.id),'[]'::jsonb) as "memberIds"
@@ -43,9 +51,10 @@ async function readCampaigns(propertyId: string) {
   const members = await sql<Array<Record<string, unknown>>>`
     select lm.id,g.first_name as "firstName",g.last_name as "lastName",lm.member_number as "memberNumber",
       coalesce(g.address->>'city','') as city,coalesce(g.address->>'state','') as state,
-      greatest(coalesce((select sum(nights_delta) from loyalty_transactions where membership_id=lm.id),0),0)::int as "progressNights",
+      lmp.progress_nights as "progressNights",
       eo.nights_required as "nightsRequired"
     from loyalty_memberships lm join guests g on g.id=lm.guest_id join loyalty_effective_offers eo on eo.membership_id=lm.id
+    join loyalty_member_progress lmp on lmp.membership_id=lm.id
     where lm.property_id=${propertyId}::uuid and lm.status='active' and g.guest_status<>'do_not_rent'
     order by g.last_name,g.first_name
   `;
@@ -57,12 +66,13 @@ async function audienceMemberIds(tx: TransactionSql<Record<string, never>>, prop
   return tx<Array<{ id: string }>>`
     select lm.id from loyalty_memberships lm join guests g on g.id=lm.guest_id
     join properties p on p.id=lm.property_id join loyalty_effective_offers eo on eo.membership_id=lm.id
+    join loyalty_member_progress lmp on lmp.membership_id=lm.id
     where lm.property_id=${propertyId}::uuid and lm.status='active' and g.guest_status<>'do_not_rent' and (
       ${audience}='all'
       or (${audience}='local' and nullif(lower(g.address->>'city'),'')=lower(p.city))
       or (${audience}='nearby' and nullif(lower(g.address->>'state'),'')=lower(p.state))
       or (${audience}='inactive' and not exists(select 1 from reservations r where r.main_guest_id=g.id and r.status='checked_out' and r.departure_date>=(now() at time zone p.timezone)::date-90))
-      or (${audience}='close_to_reward' and greatest(coalesce((select sum(nights_delta) from loyalty_transactions where membership_id=lm.id),0),0) between greatest(eo.nights_required-2,1) and eo.nights_required-1)
+      or (${audience}='close_to_reward' and lmp.progress_nights between greatest(eo.nights_required-2,1) and eo.nights_required-1)
     )
   `;
 }
@@ -84,8 +94,8 @@ async function routePOST(request: Request) {
       if (input.action === "save") {
         const campaign = input.campaign;
         const [saved] = campaign.id
-          ? await tx<Array<{ id: string }>>`update loyalty_campaigns set name=${campaign.name},audience=${campaign.audience},nights_required=${campaign.nightsRequired},reward_type=${campaign.rewardType},reward_value_cents=${campaign.rewardValueCents},reward_percent_basis_points=${campaign.rewardPercentBasisPoints},reward_description=${campaign.rewardDescription},terms=${campaign.terms},starts_at=${campaign.startsAt},ends_at=${campaign.endsAt},updated_at=now() where id=${campaign.id}::uuid and property_id=${session.propertyId}::uuid and status<>'ended' returning id`
-          : await tx<Array<{ id: string }>>`insert into loyalty_campaigns (property_id,name,audience,nights_required,reward_type,reward_value_cents,reward_percent_basis_points,reward_description,terms,starts_at,ends_at) values (${session.propertyId}::uuid,${campaign.name},${campaign.audience},${campaign.nightsRequired},${campaign.rewardType},${campaign.rewardValueCents},${campaign.rewardPercentBasisPoints},${campaign.rewardDescription},${campaign.terms},${campaign.startsAt},${campaign.endsAt}) returning id`;
+          ? await tx<Array<{ id: string }>>`update loyalty_campaigns set name=${campaign.name},audience=${campaign.audience},nights_required=${campaign.nightsRequired},reward_type=${campaign.rewardType},reward_value_cents=${campaign.rewardValueCents},reward_percent_basis_points=${campaign.rewardPercentBasisPoints},reward_description=${campaign.rewardDescription},terms=${campaign.terms},starts_at=${campaign.startsAt},ends_at=${campaign.endsAt},qualification_anchor_at=case when (qualification_type,qualification_days,qualification_starts_on,qualification_ends_on) is distinct from (${campaign.qualificationType},${campaign.qualificationType === "days" ? campaign.qualificationDays : null},${campaign.qualificationType === "date_range" ? campaign.qualificationStartsOn : null}::date,${campaign.qualificationType === "date_range" ? campaign.qualificationEndsOn : null}::date) then now() else qualification_anchor_at end,qualification_type=${campaign.qualificationType},qualification_days=${campaign.qualificationType === "days" ? campaign.qualificationDays : null},qualification_starts_on=${campaign.qualificationType === "date_range" ? campaign.qualificationStartsOn : null}::date,qualification_ends_on=${campaign.qualificationType === "date_range" ? campaign.qualificationEndsOn : null}::date,updated_at=now() where id=${campaign.id}::uuid and property_id=${session.propertyId}::uuid and status<>'ended' returning id`
+          : await tx<Array<{ id: string }>>`insert into loyalty_campaigns (property_id,name,audience,nights_required,reward_type,reward_value_cents,reward_percent_basis_points,reward_description,terms,starts_at,ends_at,qualification_type,qualification_days,qualification_starts_on,qualification_ends_on) values (${session.propertyId}::uuid,${campaign.name},${campaign.audience},${campaign.nightsRequired},${campaign.rewardType},${campaign.rewardValueCents},${campaign.rewardPercentBasisPoints},${campaign.rewardDescription},${campaign.terms},${campaign.startsAt},${campaign.endsAt},${campaign.qualificationType},${campaign.qualificationType === "days" ? campaign.qualificationDays : null},${campaign.qualificationType === "date_range" ? campaign.qualificationStartsOn : null}::date,${campaign.qualificationType === "date_range" ? campaign.qualificationEndsOn : null}::date) returning id`;
         if (!saved) throw new Error("Campaign not found or already ended.");
         if (campaign.audience === "custom") {
           await tx`delete from loyalty_campaign_members where campaign_id=${saved.id}::uuid and property_id=${session.propertyId}::uuid`;
@@ -103,7 +113,7 @@ async function routePOST(request: Request) {
         await tx`delete from loyalty_campaign_members where campaign_id=${campaign.id}::uuid and property_id=${session.propertyId}::uuid`;
         if (matched.length) await tx`insert into loyalty_campaign_members (property_id,campaign_id,membership_id) select ${session.propertyId}::uuid,${campaign.id}::uuid,id from loyalty_memberships where id=any(${matched.map((member) => member.id)}::uuid[]) on conflict do nothing`;
       }
-      await tx`update loyalty_campaigns set status='active',updated_at=now() where id=${campaign.id}::uuid`;
+      await tx`update loyalty_campaigns set status='active',qualification_anchor_at=now(),updated_at=now() where id=${campaign.id}::uuid`;
       const members = await tx<Array<{ id: string; programId: string; nightsRequired: number; rewardDescription: string; rewardType: string; rewardValueCents: number | null; rewardPercentBasisPoints: number | null; terms: string | null; rewardExpiresDays: number | null }>>`
         select lm.id,lm.program_id as "programId",eo.nights_required as "nightsRequired",eo.reward_description as "rewardDescription",eo.reward_type as "rewardType",eo.reward_value_cents as "rewardValueCents",eo.reward_percent_basis_points as "rewardPercentBasisPoints",eo.terms,eo.reward_expires_days as "rewardExpiresDays"
         from loyalty_campaign_members lcm join loyalty_memberships lm on lm.id=lcm.membership_id join loyalty_effective_offers eo on eo.membership_id=lm.id

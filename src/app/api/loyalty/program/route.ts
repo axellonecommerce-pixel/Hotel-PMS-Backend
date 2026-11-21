@@ -25,6 +25,10 @@ const programSchema = z.object({
   rewardDescription: z.string().trim().min(3).max(160),
   terms: z.string().trim().max(2_000).nullable(),
   rewardExpiresDays: z.number().int().min(1).max(3_650).nullable(),
+  qualificationType: z.enum(["none", "days", "date_range"]).default("none"),
+  qualificationDays: z.number().int().min(1).max(3_650).nullable().default(null),
+  qualificationStartsOn: z.string().date().nullable().default(null),
+  qualificationEndsOn: z.string().date().nullable().default(null),
   reminderSettings: reminderSchema,
 }).superRefine((value, context) => {
   if ((value.rewardType === "fixed_discount" || value.rewardType === "member_rate") && !value.rewardValueCents) {
@@ -33,6 +37,9 @@ const programSchema = z.object({
   if (value.rewardType === "percent_discount" && !value.rewardPercentBasisPoints) {
     context.addIssue({ code: "custom", path: ["rewardPercentBasisPoints"], message: "Enter a percentage for this reward." });
   }
+  if (value.qualificationType === "days" && !value.qualificationDays) context.addIssue({ code: "custom", path: ["qualificationDays"], message: "Enter how many days customers have to complete the nights." });
+  if (value.qualificationType === "date_range" && (!value.qualificationStartsOn || !value.qualificationEndsOn)) context.addIssue({ code: "custom", path: ["qualificationStartsOn"], message: "Choose both the first and last qualifying date." });
+  if (value.qualificationStartsOn && value.qualificationEndsOn && value.qualificationEndsOn < value.qualificationStartsOn) context.addIssue({ code: "custom", path: ["qualificationEndsOn"], message: "The last qualifying date must be on or after the first date." });
 });
 
 const defaultReminders = {
@@ -47,6 +54,8 @@ async function readProgram(propertyId: string) {
     select id,name,status,nights_required as "nightsRequired",reward_type as "rewardType",
       reward_value_cents as "rewardValueCents",reward_percent_basis_points as "rewardPercentBasisPoints",
       reward_description as "rewardDescription",terms,reward_expires_days as "rewardExpiresDays",
+      qualification_type as "qualificationType",qualification_days as "qualificationDays",
+      qualification_starts_on::text as "qualificationStartsOn",qualification_ends_on::text as "qualificationEndsOn",
       reminder_settings as "reminderSettings",created_at::text as "createdAt",updated_at::text as "updatedAt"
     from loyalty_programs where property_id=${propertyId}::uuid
   `;
@@ -71,14 +80,23 @@ async function routePUT(request: Request) {
     await productionSql().begin(async (tx) => {
       const [program] = await tx<Array<{ id: string }>>`
         insert into loyalty_programs
-          (property_id,name,status,nights_required,reward_type,reward_value_cents,reward_percent_basis_points,reward_description,terms,reward_expires_days,reminder_settings,updated_at)
+          (property_id,name,status,nights_required,reward_type,reward_value_cents,reward_percent_basis_points,reward_description,terms,reward_expires_days,
+           qualification_type,qualification_days,qualification_starts_on,qualification_ends_on,reminder_settings,updated_at)
         values
           (${session.propertyId}::uuid,${input.name},${input.status},${input.nightsRequired},${input.rewardType},
-           ${input.rewardValueCents},${input.rewardPercentBasisPoints},${input.rewardDescription},${input.terms},${input.rewardExpiresDays},${tx.json(input.reminderSettings)},now())
+           ${input.rewardValueCents},${input.rewardPercentBasisPoints},${input.rewardDescription},${input.terms},${input.rewardExpiresDays},
+           ${input.qualificationType},${input.qualificationType === "days" ? input.qualificationDays : null},
+           ${input.qualificationType === "date_range" ? input.qualificationStartsOn : null}::date,
+           ${input.qualificationType === "date_range" ? input.qualificationEndsOn : null}::date,${tx.json(input.reminderSettings)},now())
         on conflict (property_id) do update set name=excluded.name,status=excluded.status,nights_required=excluded.nights_required,
           reward_type=excluded.reward_type,reward_value_cents=excluded.reward_value_cents,
           reward_percent_basis_points=excluded.reward_percent_basis_points,reward_description=excluded.reward_description,
-          terms=excluded.terms,reward_expires_days=excluded.reward_expires_days,reminder_settings=excluded.reminder_settings,updated_at=now()
+          terms=excluded.terms,reward_expires_days=excluded.reward_expires_days,
+          qualification_anchor_at=case when (loyalty_programs.qualification_type,loyalty_programs.qualification_days,loyalty_programs.qualification_starts_on,loyalty_programs.qualification_ends_on)
+            is distinct from (excluded.qualification_type,excluded.qualification_days,excluded.qualification_starts_on,excluded.qualification_ends_on) then now() else loyalty_programs.qualification_anchor_at end,
+          qualification_type=excluded.qualification_type,qualification_days=excluded.qualification_days,
+          qualification_starts_on=excluded.qualification_starts_on,qualification_ends_on=excluded.qualification_ends_on,
+          reminder_settings=excluded.reminder_settings,updated_at=now()
         returning id
       `;
       if (input.status === "active") {

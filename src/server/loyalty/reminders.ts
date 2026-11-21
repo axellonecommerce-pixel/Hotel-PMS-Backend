@@ -32,12 +32,14 @@ export async function processLoyaltyReminders(sql: Sql) {
     select lm.property_id as "propertyId",lm.id as "membershipId",g.first_name as "firstName",g.phone,g.email,
       lm.sms_consent as "smsConsent",lm.email_consent as "emailConsent",lm.member_number as "memberNumber",
       eo.reward_description as "rewardDescription",eo.nights_required as "nightsRequired",
-      coalesce((select sum(nights_delta) from loyalty_transactions where membership_id=lm.id),0)::int as balance,
+      lmp.progress_nights as balance,
       (select count(*)::int from loyalty_rewards where membership_id=lm.id and status='available' and (expires_at is null or expires_at>now())) as "availableRewards",
       lp.reminder_settings as settings
     from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id join guests g on g.id=lm.guest_id
     join loyalty_effective_offers eo on eo.membership_id=lm.id
+    join loyalty_member_progress lmp on lmp.membership_id=lm.id
     where lm.status='active' and lp.status='active' and g.guest_status<>'do_not_rent'
+      and lmp.qualification_status in ('unlimited','active')
       and coalesce((lp.reminder_settings->>'enabled')::boolean,false)
   `;
   let queued = 0; let sent = 0; let failed = 0;

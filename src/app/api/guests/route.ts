@@ -140,12 +140,14 @@ async function listGuests(propertyId: string, only: string[] | null = null) {
   const loyalty = await sql<Array<Record<string, unknown>>>`
     select lm.guest_id as "guestId",lm.id as "membershipId",lm.member_number as "memberNumber",lm.status,
       lp.name as "programName",eo.nights_required as "nightsRequired",eo.reward_description as "rewardDescription",
-      greatest(coalesce((select sum(lt.nights_delta) from loyalty_transactions lt where lt.membership_id=lm.id),0),0)::int as "progressNights",
+      lmp.progress_nights as "progressNights",lmp.qualification_status as "qualificationStatus",
+      lmp.effective_starts_on::text as "qualificationStartsOn",lmp.effective_ends_on::text as "qualificationEndsOn",
       greatest(coalesce((select sum(lt.nights_delta) from loyalty_transactions lt where lt.membership_id=lm.id and lt.type in ('enrollment_credit','stay_credit','stay_reversal')),0),0)::int as "totalQualifyingNights",
       (select count(*)::int from loyalty_rewards lr where lr.membership_id=lm.id and lr.status='available' and (lr.expires_at is null or lr.expires_at>now())) as "availableRewards",
       lm.joined_at::text as "joinedAt"
     from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id
     join loyalty_effective_offers eo on eo.membership_id=lm.id
+    join loyalty_member_progress lmp on lmp.membership_id=lm.id
     where lm.property_id=${propertyId}::uuid ${onlyGuests("lm.guest_id")}
   `;
   // Stay totals are what the guest was billed: every posted charge plus its

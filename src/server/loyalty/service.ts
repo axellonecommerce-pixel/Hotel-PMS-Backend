@@ -42,8 +42,8 @@ export async function issueAvailableRewards(
   actorAuthUserId: string,
 ) {
   const [balanceRow] = await tx<Array<{ nights: number }>>`
-    select coalesce(sum(nights_delta),0)::int as nights
-    from loyalty_transactions where property_id=${propertyId}::uuid and membership_id=${member.id}::uuid
+    select progress_nights as nights from loyalty_member_progress
+    where property_id=${propertyId}::uuid and membership_id=${member.id}::uuid
   `;
   let balance = balanceRow?.nights ?? 0;
   let issued = 0;
@@ -206,8 +206,8 @@ async function voidAvailableRewardsForNegativeBalance(
   actorAuthUserId: string,
 ) {
   const [balanceRow] = await tx<Array<{ nights: number }>>`
-    select coalesce(sum(nights_delta),0)::int as nights
-    from loyalty_transactions where property_id=${propertyId}::uuid and membership_id=${membershipId}::uuid
+    select raw_progress_nights as nights from loyalty_member_progress
+    where property_id=${propertyId}::uuid and membership_id=${membershipId}::uuid
   `;
   let balance = balanceRow?.nights ?? 0;
   while (balance < 0) {
@@ -233,8 +233,8 @@ async function voidAvailableRewardsForNegativeBalance(
       balance += reward.nights;
     } else {
       const [current] = await tx<Array<{ nights: number }>>`
-        select coalesce(sum(nights_delta),0)::int as nights
-        from loyalty_transactions where property_id=${propertyId}::uuid and membership_id=${membershipId}::uuid
+        select raw_progress_nights as nights from loyalty_member_progress
+        where property_id=${propertyId}::uuid and membership_id=${membershipId}::uuid
       `;
       balance = current?.nights ?? 0;
     }

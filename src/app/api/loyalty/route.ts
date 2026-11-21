@@ -11,7 +11,7 @@ import { recordChange } from "@/server/realtime/change-events";
 const bodySchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("enroll"), guestId: z.string().uuid(), nightsRequired: z.number().int().min(1).max(365).default(10), rewardDescription: z.string().trim().min(3).max(160).default("One free night"), smsConsent: z.boolean().default(false), emailConsent: z.boolean().default(false) }),
   z.object({ action: z.literal("adjust"), membershipId: z.string().uuid(), nightsDelta: z.number().int().min(-365).max(365).refine((value) => value !== 0), reason: z.string().trim().min(3).max(500) }),
-  z.object({ action: z.literal("update"), membershipId: z.string().uuid(), status: z.enum(["active", "paused", "closed"]).optional(), customNightsRequired: z.number().int().min(1).max(365).nullable().optional(), customRewardDescription: z.string().trim().max(160).nullable().optional(), customRewardType: z.enum(["free_night", "fixed_discount", "percent_discount", "member_rate"]).nullable().optional(), customRewardValueCents: z.number().int().min(1).max(10_000_000).nullable().optional(), customRewardPercentBasisPoints: z.number().int().min(1).max(10_000).nullable().optional(), customTerms: z.string().trim().max(2_000).nullable().optional(), customRewardExpiresDays: z.number().int().min(1).max(3_650).nullable().optional(), smsConsent: z.boolean().optional(), emailConsent: z.boolean().optional() }),
+  z.object({ action: z.literal("update"), membershipId: z.string().uuid(), status: z.enum(["active", "paused", "closed"]).optional(), customNightsRequired: z.number().int().min(1).max(365).nullable().optional(), customRewardDescription: z.string().trim().max(160).nullable().optional(), customRewardType: z.enum(["free_night", "fixed_discount", "percent_discount", "member_rate"]).nullable().optional(), customRewardValueCents: z.number().int().min(1).max(10_000_000).nullable().optional(), customRewardPercentBasisPoints: z.number().int().min(1).max(10_000).nullable().optional(), customTerms: z.string().trim().max(2_000).nullable().optional(), customRewardExpiresDays: z.number().int().min(1).max(3_650).nullable().optional(), customQualificationType: z.enum(["none", "days", "date_range"]).nullable().optional(), customQualificationDays: z.number().int().min(1).max(3_650).nullable().optional(), customQualificationStartsOn: z.string().date().nullable().optional(), customQualificationEndsOn: z.string().date().nullable().optional(), smsConsent: z.boolean().optional(), emailConsent: z.boolean().optional() }),
   z.object({ action: z.literal("wallet_link"), membershipId: z.string().uuid() }),
   z.object({ action: z.literal("redeem_reward"), membershipId: z.string().uuid(), rewardId: z.string().uuid(), reservationId: z.string().uuid() }),
   z.object({ action: z.literal("restore_reward"), membershipId: z.string().uuid(), rewardId: z.string().uuid(), reason: z.string().trim().min(3).max(500) }),
@@ -26,19 +26,26 @@ async function details(propertyId: string, guestId: string) {
       lm.custom_reward_type as "customRewardType",lm.custom_reward_value_cents as "customRewardValueCents",
       lm.custom_reward_percent_basis_points as "customRewardPercentBasisPoints",lm.custom_terms as "customTerms",
       lm.custom_reward_expires_days as "customRewardExpiresDays",
+      lm.custom_qualification_type as "customQualificationType",lm.custom_qualification_days as "customQualificationDays",
+      lm.custom_qualification_starts_on::text as "customQualificationStartsOn",lm.custom_qualification_ends_on::text as "customQualificationEndsOn",
       lp.name as "programName",lp.nights_required as "programNightsRequired",lp.reward_description as "programRewardDescription",
       lp.reward_type as "programRewardType",lp.reward_value_cents as "programRewardValueCents",
       lp.reward_percent_basis_points as "programRewardPercentBasisPoints",lp.terms as "programTerms",
       lp.reward_expires_days as "programRewardExpiresDays",
+      lp.qualification_type as "programQualificationType",lp.qualification_days as "programQualificationDays",
+      lp.qualification_starts_on::text as "programQualificationStartsOn",lp.qualification_ends_on::text as "programQualificationEndsOn",
       eo.campaign_name as "campaignName",eo.nights_required as "nightsRequired",
       eo.reward_description as "rewardDescription",eo.reward_type as "rewardType",
       eo.reward_value_cents as "rewardValueCents",eo.reward_percent_basis_points as "rewardPercentBasisPoints",
-      eo.terms,eo.reward_expires_days as "rewardExpiresDays",
-      greatest(coalesce((select sum(lt.nights_delta) from loyalty_transactions lt where lt.membership_id=lm.id),0),0)::int as "progressNights",
+      eo.terms,eo.reward_expires_days as "rewardExpiresDays",eo.qualification_type as "qualificationType",
+      eo.qualification_days as "qualificationDays",lmp.effective_starts_on::text as "qualificationStartsOn",
+      lmp.effective_ends_on::text as "qualificationEndsOn",lmp.qualification_status as "qualificationStatus",
+      lmp.progress_nights as "progressNights",
       greatest(coalesce((select sum(lt.nights_delta) from loyalty_transactions lt where lt.membership_id=lm.id and lt.type in ('enrollment_credit','stay_credit','stay_reversal')),0),0)::int as "totalQualifyingNights",
       (select count(*)::int from loyalty_rewards lr where lr.membership_id=lm.id and lr.status='available' and (lr.expires_at is null or lr.expires_at>now())) as "availableRewards"
     from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id
     join loyalty_effective_offers eo on eo.membership_id=lm.id
+    join loyalty_member_progress lmp on lmp.membership_id=lm.id
     where lm.property_id=${propertyId}::uuid and lm.guest_id=${guestId}::uuid
   `;
   if (!membership) return null;
@@ -93,6 +100,11 @@ async function routePOST(request: Request) {
     const parsed = bodySchema.safeParse(await request.json().catch(() => ({})));
     if (!parsed.success) return Response.json({ error: parsed.error.issues[0]?.message ?? "Loyalty change is invalid." }, { status: 400 });
     const input = parsed.data;
+    if (input.action === "update") {
+      if (input.customQualificationType === "days" && !input.customQualificationDays) return Response.json({ error: "Enter how many days this customer has to complete the nights." }, { status: 400 });
+      if (input.customQualificationType === "date_range" && (!input.customQualificationStartsOn || !input.customQualificationEndsOn)) return Response.json({ error: "Choose both qualifying dates for this customer." }, { status: 400 });
+      if (input.customQualificationStartsOn && input.customQualificationEndsOn && input.customQualificationEndsOn < input.customQualificationStartsOn) return Response.json({ error: "The last qualifying date must be on or after the first date." }, { status: 400 });
+    }
     let guestId = "";
     let walletUrl: string | undefined;
     await productionSql().begin(async (tx) => {
@@ -135,7 +147,7 @@ async function routePOST(request: Request) {
       guestId = member.guestId;
       if (input.action === "adjust") {
         if (Math.abs(input.nightsDelta) > 10 && session.role !== "owner" && session.role !== "manager") throw new Error("An owner or manager must approve adjustments over 10 nights.");
-        const [balance] = await tx<Array<{ nights: number }>>`select coalesce(sum(nights_delta),0)::int as nights from loyalty_transactions where membership_id=${member.id}::uuid`;
+        const [balance] = await tx<Array<{ nights: number }>>`select progress_nights as nights from loyalty_member_progress where membership_id=${member.id}::uuid`;
         if ((balance?.nights ?? 0) + input.nightsDelta < 0) throw new Error("This adjustment would make the night balance negative.");
         await tx`insert into loyalty_transactions (property_id,membership_id,type,nights_delta,description,idempotency_key,actor_auth_user_id)
           values (${session.propertyId}::uuid,${member.id}::uuid,'manual_adjustment',${input.nightsDelta},${input.reason},${`adjust:${randomBytes(12).toString("hex")}`},${session.authUserId}::uuid)`;
@@ -151,6 +163,14 @@ async function routePOST(request: Request) {
           custom_reward_percent_basis_points=case when ${input.customRewardPercentBasisPoints !== undefined} then ${input.customRewardPercentBasisPoints ?? null} else custom_reward_percent_basis_points end,
           custom_terms=case when ${input.customTerms !== undefined} then ${input.customTerms || null} else custom_terms end,
           custom_reward_expires_days=case when ${input.customRewardExpiresDays !== undefined} then ${input.customRewardExpiresDays ?? null} else custom_reward_expires_days end,
+          custom_qualification_anchor_at=case when ${input.customQualificationType !== undefined || input.customQualificationDays !== undefined || input.customQualificationStartsOn !== undefined || input.customQualificationEndsOn !== undefined}
+            and (custom_qualification_type,custom_qualification_days,custom_qualification_starts_on,custom_qualification_ends_on) is distinct from
+              (${input.customQualificationType ?? null},${input.customQualificationType === "days" ? input.customQualificationDays ?? null : null},${input.customQualificationType === "date_range" ? input.customQualificationStartsOn ?? null : null}::date,${input.customQualificationType === "date_range" ? input.customQualificationEndsOn ?? null : null}::date)
+            then now() else custom_qualification_anchor_at end,
+          custom_qualification_type=case when ${input.customQualificationType !== undefined} then ${input.customQualificationType ?? null} else custom_qualification_type end,
+          custom_qualification_days=case when ${input.customQualificationType !== undefined || input.customQualificationDays !== undefined} then ${input.customQualificationType === "days" ? input.customQualificationDays ?? null : null} else custom_qualification_days end,
+          custom_qualification_starts_on=case when ${input.customQualificationType !== undefined || input.customQualificationStartsOn !== undefined} then ${input.customQualificationType === "date_range" ? input.customQualificationStartsOn ?? null : null}::date else custom_qualification_starts_on end,
+          custom_qualification_ends_on=case when ${input.customQualificationType !== undefined || input.customQualificationEndsOn !== undefined} then ${input.customQualificationType === "date_range" ? input.customQualificationEndsOn ?? null : null}::date else custom_qualification_ends_on end,
           sms_consent=case when ${input.smsConsent !== undefined} then ${input.smsConsent ?? false} else sms_consent end,
           email_consent=case when ${input.emailConsent !== undefined} then ${input.emailConsent ?? false} else email_consent end,
           consented_at=case when ${input.smsConsent === true || input.emailConsent === true} then coalesce(consented_at,now()) else consented_at end,
