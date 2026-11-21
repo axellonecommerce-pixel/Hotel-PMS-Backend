@@ -36,6 +36,10 @@ For local development only, set `PMS_DEMO_AUTH_ENABLED=true`, `PMS_DEMO_AUTH_TOK
 Motels are created on the Platform page (`/platform`, Platform Admins only), which creates the property, its owner login, employee and starting settings.
 
 Set `PMS_FRONTEND_ORIGINS` to the comma-separated frontend origins allowed to call the API. Reservation clients subscribe to `GET /api/events`; writes use a required expected version and return `409 EDIT_CONFLICT` instead of overwriting a newer edit.
+Set `PMS_PUBLIC_CARD_ORIGIN` to the branded frontend origin (for example,
+`https://app.innseva.com`). Public loyalty links and their embedded QR codes
+use this origin instead of exposing the API deployment hostname. When omitted,
+the API selects the branded entry in `PMS_FRONTEND_ORIGINS`.
 
 ## Guest loyalty cards
 

@@ -5,6 +5,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { productionSql } from "@/server/db/production";
 import { withRequestContext } from "@/server/db/request-context";
 import { ensureLoyaltyMembership, issueAvailableRewards } from "@/server/loyalty/service";
+import { publicCardUrl } from "@/server/loyalty/public-card-url";
 import { applyLoyaltyReward, restoreLoyaltyReward } from "@/server/loyalty/redemption";
 import { recordChange } from "@/server/realtime/change-events";
 
@@ -195,7 +196,7 @@ async function routePOST(request: Request) {
         await tx`insert into loyalty_wallet_passes (property_id,membership_id,platform,token_hash,status)
           values (${session.propertyId}::uuid,${member.id}::uuid,'web',${hash},'active')
           on conflict (membership_id,platform) do update set token_hash=excluded.token_hash,status='active',updated_at=now()`;
-        walletUrl = new URL(`/l/${token}`, request.url).toString();
+        walletUrl = publicCardUrl(request.url, token);
       }
     });
     await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "guest", entityId: guestId, action: "updated", entityVersion: Date.now(), payload: { change: `loyalty-${input.action}` } });
