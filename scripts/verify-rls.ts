@@ -1,5 +1,7 @@
 import postgres from "postgres";
 
+import { databaseNeedsTls } from "@/server/db/tls";
+
 /**
  * Checks that Supabase's data API cannot reach InnSeva's tables (see
  * drizzle-production/0024_close_data_api.sql). Read-only: it writes nothing.
@@ -8,7 +10,12 @@ import postgres from "postgres";
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required. Add it to .env.local before running this check.");
 
-const sql = postgres(databaseUrl, { prepare: false, max: 1, onnotice: () => undefined });
+const sql = postgres(databaseUrl, {
+  ssl: databaseNeedsTls(databaseUrl) ? "require" : false,
+  prepare: false,
+  max: 1,
+  onnotice: () => undefined,
+});
 const problems: string[] = [];
 const notes: string[] = [];
 const rollback = new Error("ROLLBACK");
