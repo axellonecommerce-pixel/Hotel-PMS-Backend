@@ -8,6 +8,7 @@ import { propertyBusinessDate } from "@/server/finance/production-finance";
 import { logReservationActivity } from "@/server/activity/reservation-activity";
 import { recordChange } from "@/server/realtime/change-events";
 import { withRequestContext } from "@/server/db/request-context";
+import { syncReservationLoyalty } from "@/server/loyalty/service";
 
 const undoSchema = z.object({ reason: z.string().trim().min(3).max(500) });
 
@@ -78,6 +79,11 @@ async function routePOST(request: Request, context: { params: Promise<{ reservat
         notes = `${reservation.notes ?? ""}\ncheckout undone: ${parsed.data.reason}`.trim();
       }
       await tx`update reservations set status='checked_in', notes=${notes}, version=version+1, updated_at=now() where id=${reservation.id}::uuid`;
+      await syncReservationLoyalty(tx, {
+        propertyId: session.propertyId,
+        reservationId: reservation.id,
+        actorAuthUserId: session.authUserId,
+      });
       await logReservationActivity(tx, session, reservation.id, "Status", `Checkout undone · back In House${invoice ? " · company invoice draft removed" : ""} · Reason: ${parsed.data.reason}`);
       return { reservationId: reservation.id, rooms: rooms.map((room) => room.number).filter(Boolean) };
     });

@@ -136,6 +136,17 @@ async function listGuests(propertyId: string, only: string[] | null = null) {
   const remarks = await sql<Array<{ guestId: string; id: string; text: string; createdAt: string }>>`
     select guest_id as "guestId",id,remark as text,created_at::text as "createdAt" from guest_remarks where property_id=${propertyId}::uuid ${onlyGuests("guest_id")} order by created_at
   `;
+  const loyalty = await sql<Array<Record<string, unknown>>>`
+    select lm.guest_id as "guestId",lm.id as "membershipId",lm.member_number as "memberNumber",lm.status,
+      lp.name as "programName",coalesce(lm.custom_nights_required,lp.nights_required)::int as "nightsRequired",
+      coalesce(nullif(lm.custom_reward_description,''),lp.reward_description) as "rewardDescription",
+      greatest(coalesce((select sum(lt.nights_delta) from loyalty_transactions lt where lt.membership_id=lm.id),0),0)::int as "progressNights",
+      greatest(coalesce((select sum(lt.nights_delta) from loyalty_transactions lt where lt.membership_id=lm.id and lt.type in ('enrollment_credit','stay_credit','stay_reversal')),0),0)::int as "totalQualifyingNights",
+      (select count(*)::int from loyalty_rewards lr where lr.membership_id=lm.id and lr.status='available') as "availableRewards",
+      lm.joined_at::text as "joinedAt"
+    from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id
+    where lm.property_id=${propertyId}::uuid ${onlyGuests("lm.guest_id")}
+  `;
   // Stay totals are what the guest was billed: every posted charge plus its
   // taxes (room tax, occupancy tax, …). Rate is the average nightly room rate.
   const stays = await sql<Array<{ guestId: string; id: string; room: string | null; checkInDate: string; checkoutDate: string; rateCents: number; taxCents: number; totalCents: number; paymentType: string | null; confirmationNumber: string; nights: number; rooms: string | null; roomType: string | null; source: string | null; company: string | null; roomRentCents: number; extrasCents: number }>>`
@@ -162,6 +173,7 @@ async function listGuests(propertyId: string, only: string[] | null = null) {
   const sourcesByGuest = new Map<string, Array<typeof paymentSources[number]>>();
   const remarksByGuest = new Map<string, Array<typeof remarks[number]>>();
   const staysByGuest = new Map<string, Array<typeof stays[number]>>();
+  const loyaltyByGuest = new Map(loyalty.map((member) => [String(member.guestId), member]));
   for (const source of paymentSources) sourcesByGuest.set(source.guestId, [...(sourcesByGuest.get(source.guestId) ?? []), source]);
   for (const remark of remarks) remarksByGuest.set(remark.guestId, [...(remarksByGuest.get(remark.guestId) ?? []), remark]);
   for (const stay of stays) staysByGuest.set(stay.guestId, [...(staysByGuest.get(stay.guestId) ?? []), stay]);
@@ -176,6 +188,7 @@ async function listGuests(propertyId: string, only: string[] | null = null) {
       vehicle: vehicle ? { plate: vehicle.plate, make: vehicle.make ?? "", color: vehicle.color ?? "", year: vehicle.year ?? "" } : undefined,
       savedPaymentSources: (sourcesByGuest.get(guest.id) ?? []).map((source) => { const label = source.label ?? source.method; const tokenReference = source.externalReference ?? ""; const number = source.last4 ?? ""; const details = prefs.paymentSourceDetails?.[paymentSourceKey({ label, tokenReference, number })] ?? { note: prefs.paymentSourceNotes?.[`${label.trim().toLowerCase()}|${tokenReference.trim()}`] }; return { id: source.id, label, tokenReference, number: number || undefined, note: details.note, date: details.date }; }),
       remarkEntries: (remarksByGuest.get(guest.id) ?? []).map((remark) => ({ id: remark.id, text: remark.text, createdAt: remark.createdAt })),
+      loyalty: loyaltyByGuest.get(guest.id) ?? undefined,
       totalStays: guestStays.length, lastStayDate: guestStays[0]?.checkoutDate,
       stayHistory: guestStays.map((stay) => ({ ...stay, room: stay.room ?? "Unassigned", paymentType: stay.paymentType ?? "—" })),
     };
@@ -201,6 +214,9 @@ async function routeGET(request: Request) {
         or exists (select 1 from guest_vehicles x where x.guest_id=g.id and x.updated_at > ${since}::timestamptz)
         or exists (select 1 from guest_payment_sources x where x.guest_id=g.id and x.created_at > ${since}::timestamptz)
         or exists (select 1 from guest_remarks x where x.guest_id=g.id and x.created_at > ${since}::timestamptz)
+        or exists (select 1 from loyalty_memberships x where x.guest_id=g.id and x.updated_at > ${since}::timestamptz)
+        or exists (select 1 from loyalty_memberships lm join loyalty_transactions x on x.membership_id=lm.id where lm.guest_id=g.id and x.created_at > ${since}::timestamptz)
+        or exists (select 1 from loyalty_memberships lm join loyalty_rewards x on x.membership_id=lm.id where lm.guest_id=g.id and x.updated_at > ${since}::timestamptz)
         or exists (select 1 from reservations r where r.main_guest_id=g.id and (r.updated_at > ${since}::timestamptz
           or exists (select 1 from folios f join charges c on c.folio_id=f.id where f.reservation_id=r.id and c.updated_at > ${since}::timestamptz)
           or exists (select 1 from payments p where p.reservation_id=r.id and p.created_at > ${since}::timestamptz)))
@@ -413,6 +429,10 @@ async function routeDELETE(request: Request) {
       for (const table of ["guest_identities", "guest_vehicles", "guest_payment_sources", "guest_remarks"] as const) {
         await tx.unsafe(`delete from ${table} where guest_id=$1 and property_id=$2`, [guestId, session.propertyId]);
       }
+      // A deleted/anonymized person must not keep a usable card or receive
+      // future offer reminders. Ledger history remains for auditability.
+      await tx`update loyalty_memberships set status='closed',sms_consent=false,email_consent=false,updated_at=now() where guest_id=${guestId}::uuid and property_id=${session.propertyId}::uuid`;
+      await tx`update loyalty_wallet_passes set status='revoked',updated_at=now() where membership_id in (select id from loyalty_memberships where guest_id=${guestId}::uuid and property_id=${session.propertyId}::uuid)`;
       if (stays === 0) {
         await tx`delete from guests where id=${guestId}::uuid and property_id=${session.propertyId}::uuid`;
         return { mode: "deleted" as const, photos: photos.map((photo) => photo.key) };

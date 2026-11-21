@@ -143,6 +143,46 @@ export const guestRemarks = sqliteTable(
   (table) => [index("guest_remarks_guest_date_idx").on(table.guestId, table.createdAt)],
 );
 
+export const loyaltyPrograms = sqliteTable(
+  "loyalty_programs",
+  {
+    id: id("id"), propertyId: text("property_id").notNull().references(() => properties.id),
+    name: text("name").notNull(), status: text("status").notNull(), nightsRequired: integer("nights_required").notNull(),
+    rewardType: text("reward_type").notNull(), rewardValueCents: integer("reward_value_cents"), rewardDescription: text("reward_description").notNull(),
+    createdAt: createdAt(), updatedAt: updatedAt(),
+  },
+  (table) => [uniqueIndex("loyalty_programs_property_key").on(table.propertyId)],
+);
+
+export const loyaltyMemberships = sqliteTable(
+  "loyalty_memberships",
+  {
+    id: id("id"), propertyId: text("property_id").notNull().references(() => properties.id), guestId: text("guest_id").notNull().references(() => guests.id),
+    programId: text("program_id").notNull().references(() => loyaltyPrograms.id), memberNumber: text("member_number").notNull(), status: text("status").notNull(),
+    customNightsRequired: integer("custom_nights_required"), customRewardDescription: text("custom_reward_description"),
+    smsConsent: integer("sms_consent", { mode: "boolean" }).notNull().default(false), emailConsent: integer("email_consent", { mode: "boolean" }).notNull().default(false),
+    consentedAt: text("consented_at"), joinedAt: text("joined_at").notNull(), updatedAt: updatedAt(),
+  },
+  (table) => [uniqueIndex("loyalty_memberships_property_guest_key").on(table.propertyId, table.guestId), uniqueIndex("loyalty_memberships_property_number_key").on(table.propertyId, table.memberNumber)],
+);
+
+export const loyaltyRewards = sqliteTable("loyalty_rewards", {
+  id: id("id"), propertyId: text("property_id").notNull().references(() => properties.id), membershipId: text("membership_id").notNull().references(() => loyaltyMemberships.id),
+  programId: text("program_id").notNull().references(() => loyaltyPrograms.id), status: text("status").notNull(), description: text("description").notNull(), valueCents: integer("value_cents"),
+  reservationId: text("reservation_id"), issuedAt: text("issued_at").notNull(), reservedAt: text("reserved_at"), redeemedAt: text("redeemed_at"), expiresAt: text("expires_at"), updatedAt: updatedAt(),
+});
+
+export const loyaltyTransactions = sqliteTable("loyalty_transactions", {
+  id: id("id"), propertyId: text("property_id").notNull().references(() => properties.id), membershipId: text("membership_id").notNull().references(() => loyaltyMemberships.id),
+  reservationId: text("reservation_id"), rewardId: text("reward_id"), type: text("type").notNull(), nightsDelta: integer("nights_delta").notNull(), description: text("description").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(), actorAuthUserId: text("actor_auth_user_id"), createdAt: createdAt(),
+}, (table) => [uniqueIndex("loyalty_transactions_property_idempotency_key").on(table.propertyId, table.idempotencyKey)]);
+
+export const loyaltyWalletPasses = sqliteTable("loyalty_wallet_passes", {
+  id: id("id"), propertyId: text("property_id").notNull().references(() => properties.id), membershipId: text("membership_id").notNull().references(() => loyaltyMemberships.id),
+  platform: text("platform").notNull(), externalId: text("external_id"), tokenHash: text("token_hash"), status: text("status").notNull(), lastSyncedAt: text("last_synced_at"), createdAt: createdAt(), updatedAt: updatedAt(),
+}, (table) => [uniqueIndex("loyalty_wallet_passes_member_platform_key").on(table.membershipId, table.platform), uniqueIndex("loyalty_wallet_passes_token_key").on(table.tokenHash)]);
+
 export const companies = sqliteTable(
   "companies",
   {

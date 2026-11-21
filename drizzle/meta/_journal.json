@@ -78,6 +78,13 @@
       "when": 1792166756752,
       "tag": "0010_tricky_wrecking_crew",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1795237123083,
+      "tag": "0011_zippy_valkyrie",
+      "breakpoints": true
     }
   ]
 }

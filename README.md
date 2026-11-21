@@ -37,6 +37,20 @@ Motels are created on the Platform page (`/platform`, Platform Admins only), whi
 
 Set `PMS_FRONTEND_ORIGINS` to the comma-separated frontend origins allowed to call the API. Reservation clients subscribe to `GET /api/events`; writes use a required expected version and return `409 EDIT_CONFLICT` instead of overwriting a newer edit.
 
+## Guest loyalty cards
+
+Apply `0031_loyalty_program.sql` before enabling the Loyalty page. Guest
+Directory enrolls a guest, assigns a property-specific member ID, credits
+eligible checked-out stays, and tracks reward progress in an immutable ledger.
+The generated QR code opens a revocable web loyalty card without requiring a
+wallet provider.
+
+Native Apple Wallet and Google Wallet buttons are optional. Configure
+`APPLE_WALLET_PASS_URL` and `GOOGLE_WALLET_SAVE_URL` only after the matching
+issuer service and credentials are ready; each issuer URL receives the private
+card token as its `token` query parameter. SMS/email choices record guest
+consent, but delivery still requires a messaging provider and scheduled job.
+
 ## Platform Admin
 
 The central motel and subscription console is available at the frontend route

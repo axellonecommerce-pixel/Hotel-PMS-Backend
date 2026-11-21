@@ -9,6 +9,7 @@ import { recordChange } from "@/server/realtime/change-events";
 import { isUserMessage } from "@/server/http/errors";
 import { withIdempotency } from "@/server/http/idempotency";
 import { withRequestContext } from "@/server/db/request-context";
+import { syncReservationLoyalty } from "@/server/loyalty/service";
 
 const checkoutSchema = z.object({
   reservationId: z.string().uuid(),
@@ -186,6 +187,11 @@ async function handlePOST(request: Request) {
           });
           await logReservationActivity(tx, session, reservation.id, "Billing", `Balance ${money(transferredCents)} transferred to ${company?.name ?? "the company"} invoice ${invoice.number}`);
         }
+        await syncReservationLoyalty(tx, {
+          propertyId: session.propertyId,
+          reservationId: reservation.id,
+          actorAuthUserId: session.authUserId,
+        });
       }
       const checkedOutNumbers = await tx<Array<{ number: string }>>`select room.number from reservation_rooms rr join rooms room on room.id=rr.room_id where rr.id in ${tx(input.reservationRoomIds)} order by room.number`;
       await logReservationActivity(tx, session, reservation.id, "Status", `Checked out${checkedOutNumbers.length ? ` · Room ${checkedOutNumbers.map((room) => room.number).join(", ")}` : ""}${remaining.count ? ` · ${remaining.count} room(s) still in house` : ""}`);

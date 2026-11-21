@@ -167,6 +167,88 @@ export const guestVehicles = pgTable("guest_vehicles", {
   updatedAt: updatedAt(),
 }, (table) => [index("guest_vehicle_guest").on(table.guestId)]);
 
+export const loyaltyPrograms = pgTable("loyalty_programs", {
+  id: id(),
+  propertyId: propertyId(),
+  name: text("name").notNull().default("Loyalty Rewards"),
+  status: text("status").notNull().default("active"),
+  nightsRequired: integer("nights_required").notNull().default(10),
+  rewardType: text("reward_type").notNull().default("free_night"),
+  rewardValueCents: integer("reward_value_cents"),
+  rewardDescription: text("reward_description").notNull().default("One free night"),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, (table) => [uniqueIndex("loyalty_programs_property_key").on(table.propertyId)]);
+
+export const loyaltyMemberships = pgTable("loyalty_memberships", {
+  id: id(),
+  propertyId: propertyId(),
+  guestId: uuid("guest_id").notNull().references(() => guests.id),
+  programId: uuid("program_id").notNull().references(() => loyaltyPrograms.id),
+  memberNumber: text("member_number").notNull(),
+  status: text("status").notNull().default("active"),
+  customNightsRequired: integer("custom_nights_required"),
+  customRewardDescription: text("custom_reward_description"),
+  smsConsent: boolean("sms_consent").notNull().default(false),
+  emailConsent: boolean("email_consent").notNull().default(false),
+  consentedAt: timestamp("consented_at", { withTimezone: true }),
+  joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: updatedAt(),
+}, (table) => [
+  uniqueIndex("loyalty_memberships_property_guest_key").on(table.propertyId, table.guestId),
+  uniqueIndex("loyalty_memberships_property_number_key").on(table.propertyId, table.memberNumber),
+  index("loyalty_memberships_property_status").on(table.propertyId, table.status),
+]);
+
+export const loyaltyRewards = pgTable("loyalty_rewards", {
+  id: id(),
+  propertyId: propertyId(),
+  membershipId: uuid("membership_id").notNull().references(() => loyaltyMemberships.id),
+  programId: uuid("program_id").notNull().references(() => loyaltyPrograms.id),
+  status: text("status").notNull().default("available"),
+  description: text("description").notNull(),
+  valueCents: integer("value_cents"),
+  reservationId: uuid("reservation_id").references(() => reservations.id),
+  issuedAt: timestamp("issued_at", { withTimezone: true }).notNull().defaultNow(),
+  reservedAt: timestamp("reserved_at", { withTimezone: true }),
+  redeemedAt: timestamp("redeemed_at", { withTimezone: true }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  updatedAt: updatedAt(),
+}, (table) => [index("loyalty_rewards_member_status").on(table.membershipId, table.status, table.issuedAt)]);
+
+export const loyaltyTransactions = pgTable("loyalty_transactions", {
+  id: id(),
+  propertyId: propertyId(),
+  membershipId: uuid("membership_id").notNull().references(() => loyaltyMemberships.id),
+  reservationId: uuid("reservation_id").references(() => reservations.id),
+  rewardId: uuid("reward_id").references(() => loyaltyRewards.id),
+  type: text("type").notNull(),
+  nightsDelta: integer("nights_delta").notNull(),
+  description: text("description").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  actorAuthUserId: uuid("actor_auth_user_id"),
+  createdAt: createdAt(),
+}, (table) => [
+  uniqueIndex("loyalty_transactions_property_idempotency_key").on(table.propertyId, table.idempotencyKey),
+  index("loyalty_transactions_member_time").on(table.membershipId, table.createdAt),
+]);
+
+export const loyaltyWalletPasses = pgTable("loyalty_wallet_passes", {
+  id: id(),
+  propertyId: propertyId(),
+  membershipId: uuid("membership_id").notNull().references(() => loyaltyMemberships.id),
+  platform: text("platform").notNull(),
+  externalId: text("external_id"),
+  tokenHash: text("token_hash"),
+  status: text("status").notNull().default("active"),
+  lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, (table) => [
+  uniqueIndex("loyalty_wallet_passes_member_platform_key").on(table.membershipId, table.platform),
+  uniqueIndex("loyalty_wallet_passes_token_key").on(table.tokenHash),
+]);
+
 export const companies = pgTable("companies", {
   id: id(),
   propertyId: propertyId(),

@@ -114,7 +114,7 @@ async function routeGET(request: Request) {
       order by last_name, first_name`;
     if (guestId && !guests.length) return Response.json({ error: "Guest not found." }, { status: 404 });
     const ids = guests.map((guest) => guest.id);
-    const [identities, vehicles, remarks, stays] = await Promise.all([
+    const [identities, vehicles, remarks, stays, loyalty, loyaltyTransactions, loyaltyRewards] = await Promise.all([
       sql<Array<{ guestId: string; idType: string; idNumber: string | null; capturedAt: string | null }>>`
         select guest_id::text as "guestId", id_type as "idType", id_number as "idNumber", captured_at::text as "capturedAt"
         from guest_identities where property_id=${session.propertyId}::uuid and guest_id = any(${ids}::uuid[])`,
@@ -123,6 +123,18 @@ async function routeGET(request: Request) {
       sql<Array<{ guestId: string; remark: string; createdAt: string }>>`
         select guest_id::text as "guestId", remark, created_at::text as "createdAt" from guest_remarks where property_id=${session.propertyId}::uuid and guest_id = any(${ids}::uuid[]) order by created_at`,
       staysFor(sql, session.propertyId, ids),
+      sql<Array<{ guestId: string; id: string; memberNumber: string; status: string; programName: string; nightsRequired: number; rewardDescription: string; joinedAt: string }>>`
+        select lm.guest_id::text as "guestId",lm.id::text,lm.member_number as "memberNumber",lm.status,lp.name as "programName",
+          coalesce(lm.custom_nights_required,lp.nights_required)::int as "nightsRequired",
+          coalesce(nullif(lm.custom_reward_description,''),lp.reward_description) as "rewardDescription",lm.joined_at::text as "joinedAt"
+        from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id
+        where lm.property_id=${session.propertyId}::uuid and lm.guest_id = any(${ids}::uuid[])`,
+      sql<Array<{ membershipId: string; type: string; nightsDelta: number; description: string; createdAt: string }>>`
+        select membership_id::text as "membershipId",type,nights_delta as "nightsDelta",description,created_at::text as "createdAt"
+        from loyalty_transactions where property_id=${session.propertyId}::uuid and membership_id in (select id from loyalty_memberships where guest_id = any(${ids}::uuid[])) order by created_at`,
+      sql<Array<{ membershipId: string; status: string; description: string; issuedAt: string; redeemedAt: string | null }>>`
+        select membership_id::text as "membershipId",status,description,issued_at::text as "issuedAt",redeemed_at::text as "redeemedAt"
+        from loyalty_rewards where property_id=${session.propertyId}::uuid and membership_id in (select id from loyalty_memberships where guest_id = any(${ids}::uuid[])) order by issued_at`,
     ]);
     const exportedAt = new Date().toISOString();
     // Note who downloaded guest data (shown in the activity feed like other changes).
@@ -130,13 +142,17 @@ async function routeGET(request: Request) {
     const fileBase = guestId ? `guest-${slug(`${guests[0].firstName} ${guests[0].lastName}`)}-${exportedAt.slice(0, 10)}` : `all-guests-${slug(motel?.name ?? "motel")}-${exportedAt.slice(0, 10)}`;
 
     if (format === "json") {
-      const records = guests.map((guest) => ({
-        ...guest,
-        identities: identities.filter((item) => item.guestId === guest.id).map(({ guestId: _g, ...item }) => item),
-        vehicles: vehicles.filter((item) => item.guestId === guest.id).map(({ guestId: _g, ...item }) => item),
-        remarkHistory: remarks.filter((item) => item.guestId === guest.id).map(({ guestId: _g, ...item }) => item),
-        stays: (stays.get(guest.id) ?? []).map((stay) => ({ ...stay, totals: totals(stay) })),
-      }));
+      const records = guests.map((guest) => {
+        const member = loyalty.find((item) => item.guestId === guest.id);
+        return {
+          ...guest,
+          identities: identities.filter((item) => item.guestId === guest.id).map(({ guestId: _g, ...item }) => item),
+          vehicles: vehicles.filter((item) => item.guestId === guest.id).map(({ guestId: _g, ...item }) => item),
+          remarkHistory: remarks.filter((item) => item.guestId === guest.id).map(({ guestId: _g, ...item }) => item),
+          stays: (stays.get(guest.id) ?? []).map((stay) => ({ ...stay, totals: totals(stay) })),
+          loyalty: member ? { ...member, transactions: loyaltyTransactions.filter((item) => item.membershipId === member.id), rewards: loyaltyRewards.filter((item) => item.membershipId === member.id) } : null,
+        };
+      });
       const body = JSON.stringify({ motel: motel?.name ?? null, exportedAt, guests: guestId ? undefined : records, guest: guestId ? records[0] : undefined }, null, 2);
       return new Response(body, { headers: { "Content-Type": "application/json; charset=utf-8", "Content-Disposition": `attachment; filename="${fileBase}.json"` } });
     }
@@ -146,12 +162,13 @@ async function routeGET(request: Request) {
     const rows = guestId
       ? (stays.get(guestId)?.length ? stays.get(guestId)! : [null]).map((stay) => {
         const guest = guests[0];
+        const member = loyalty.find((item) => item.guestId === guest.id);
         const sum = stay ? totals(stay) : null;
         return {
           "Guest": `${guest.firstName} ${guest.lastName}`.trim(), "Phone": guest.phone, "Email": guest.email, "Address": address(guest.address),
           "ID": identities.filter((item) => item.guestId === guest.id).map((item) => `${item.idType} ${item.idNumber ?? ""}`.trim()).join("; "),
           "Vehicles": vehicles.filter((item) => item.guestId === guest.id).map((item) => [item.year, item.color, item.make, item.plate].filter(Boolean).join(" ")).join("; "),
-          "Status": guest.status, "Do Not Rent reason": guest.dnrReason,
+          "Status": guest.status, "Do Not Rent reason": guest.dnrReason, "Loyalty member ID": member?.memberNumber ?? "", "Loyalty status": member?.status ?? "",
           "Confirmation": stay?.confirmation ?? "", "Stay status": stay?.status ?? "", "Arrival": stay?.arrival ?? "", "Departure": stay?.departure ?? "",
           "Rooms": stay?.rooms.map((room) => [room.number, room.roomType].filter(Boolean).join(" ")).join("; ") ?? "",
           "Source": stay?.source ?? "", "Company": stay?.company ?? "", "Guest on stay as": stay?.role ?? "",
@@ -161,12 +178,13 @@ async function routeGET(request: Request) {
       })
       : guests.map((guest) => {
         const list = stays.get(guest.id) ?? [];
+        const member = loyalty.find((item) => item.guestId === guest.id);
         const spent = list.reduce((sum, stay) => sum + totals(stay).paidCents, 0);
         return {
           "Guest": `${guest.firstName} ${guest.lastName}`.trim(), "Phone": guest.phone, "Email": guest.email, "Address": address(guest.address),
           "ID": identities.filter((item) => item.guestId === guest.id).map((item) => `${item.idType} ${item.idNumber ?? ""}`.trim()).join("; "),
           "Vehicles": vehicles.filter((item) => item.guestId === guest.id).map((item) => [item.year, item.color, item.make, item.plate].filter(Boolean).join(" ")).join("; "),
-          "Status": guest.status, "Do Not Rent reason": guest.dnrReason, "Remarks": guest.remarks,
+          "Status": guest.status, "Do Not Rent reason": guest.dnrReason, "Remarks": guest.remarks, "Loyalty member ID": member?.memberNumber ?? "", "Loyalty status": member?.status ?? "",
           "Stays": list.length, "First stay": list.at(-1)?.arrival ?? "", "Last stay": list[0]?.arrival ?? "", "Total paid": money(spent),
           "Guest since": guest.createdAt.slice(0, 10),
         };
