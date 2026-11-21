@@ -39,17 +39,28 @@ Set `PMS_FRONTEND_ORIGINS` to the comma-separated frontend origins allowed to ca
 
 ## Guest loyalty cards
 
-Apply `0031_loyalty_program.sql` before enabling the Loyalty page. Guest
-Directory enrolls a guest, assigns a property-specific member ID, credits
-eligible checked-out stays, and tracks reward progress in an immutable ledger.
+Apply `0031_loyalty_program.sql`, `0032_auto_loyalty_members.sql`, and
+`0033_loyalty_management.sql` before
+enabling the Loyalty page. Saving a scanned guest ID automatically assigns a
+stable, property-specific member ID that is searchable in Guest Directory.
+Completed paid stays credit nights actually stayed; day-use stays and unused
+scheduled nights do not count. Reward progress is kept in an immutable ledger.
 The generated QR code opens a revocable web loyalty card without requiring a
 wallet provider.
+
+The property-wide offer is managed in Settings › Loyalty & Offers. Each guest
+can override the qualifying nights, reward type/value, description, terms, and
+expiration from Guest Directory › Loyalty details. Existing issued rewards keep
+the offer terms that applied when they were earned.
 
 Native Apple Wallet and Google Wallet buttons are optional. Configure
 `APPLE_WALLET_PASS_URL` and `GOOGLE_WALLET_SAVE_URL` only after the matching
 issuer service and credentials are ready; each issuer URL receives the private
 card token as its `token` query parameter. SMS/email choices record guest
-consent, but delivery still requires a messaging provider and scheduled job.
+consent. Automated delivery uses the scheduled `/api/jobs/loyalty-reminders`
+job: configure the Twilio variables for SMS and `RESEND_API_KEY` plus
+`LOYALTY_EMAIL_FROM` for email. Reminders are disabled by default and are sent
+only on channels the guest separately consented to.
 
 ## Platform Admin
 

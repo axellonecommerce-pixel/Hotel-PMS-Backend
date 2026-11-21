@@ -1,6 +1,7 @@
 {
   "crons": [
     { "path": "/api/jobs/daily", "schedule": "15 8 * * *" },
-    { "path": "/api/jobs/night-audit", "schedule": "30 8 * * *" }
+    { "path": "/api/jobs/night-audit", "schedule": "30 8 * * *" },
+    { "path": "/api/jobs/loyalty-reminders", "schedule": "15 17 * * *" }
   ]
 }

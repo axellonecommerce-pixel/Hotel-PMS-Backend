@@ -4,6 +4,7 @@ import { propertyAccessResponse, requirePropertySession } from "@/server/auth/pr
 import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { recordChange } from "@/server/realtime/change-events";
 import { profileDate } from "@/server/guests/profile-dates";
+import { ensureLoyaltyMembership } from "@/server/loyalty/service";
 import { deletePrivateFiles } from "@/server/storage/private-files";
 import { withRequestContext } from "@/server/db/request-context";
 
@@ -265,6 +266,19 @@ async function routePATCH(request: Request) {
       const dnrRemarks = input.dnrRemarks ?? null;
       const dnrCode = input.dnrCode ?? null;
       await tx`update guests set first_name=coalesce(${input.firstName ?? null},first_name),last_name=coalesce(${input.lastName ?? null},last_name),phone=case when ${input.phone !== undefined} then ${input.phone?.replace(/\D/g, "") || null} else phone end,email=case when ${input.email !== undefined} then ${input.email || null} else email end,address=${tx.json(address as never)},remarks=case when ${input.notes !== undefined} then ${notes} else remarks end,guest_status=coalesce(${input.status ? storedStatus(input.status) : null},guest_status),dnr_reason=case when ${input.dnrRemarks !== undefined} then ${dnrRemarks} when ${input.dnrCode !== undefined} then ${dnrCode} else dnr_reason end,room_preferences=${tx.json(preferences as never)},updated_at=now() where id=${input.guestId}::uuid and property_id=${session.propertyId}::uuid`;
+      if (input.status === "Do Not Rent") {
+        await tx`
+          update loyalty_memberships set status=case when status='active' then 'paused' else status end,
+            sms_consent=false,email_consent=false,updated_at=now()
+          where guest_id=${input.guestId}::uuid and property_id=${session.propertyId}::uuid
+        `;
+        await tx`
+          update loyalty_wallet_passes set status='revoked',updated_at=now()
+          where property_id=${session.propertyId}::uuid and membership_id in (
+            select id from loyalty_memberships where guest_id=${input.guestId}::uuid and property_id=${session.propertyId}::uuid
+          )
+        `;
+      }
       if (input.vehicle !== undefined) {
         await tx`delete from guest_vehicles where property_id=${session.propertyId}::uuid and guest_id=${input.guestId}::uuid`;
         const hasVehicle = input.vehicle && [input.vehicle.plate, input.vehicle.make, input.vehicle.color, input.vehicle.year].some((value) => value?.trim());
@@ -319,6 +333,11 @@ async function routePATCH(request: Request) {
             }
           }
         }
+        await ensureLoyaltyMembership(tx, {
+          propertyId: session.propertyId,
+          guestId: input.guestId,
+          actorAuthUserId: session.authUserId,
+        });
       }
       return true;
     });
@@ -357,6 +376,7 @@ async function routePOST(request: Request) {
             if (row.dateOfBirth !== undefined) preferences.dateOfBirth = row.dateOfBirth;
             if (row.idExpires !== undefined) preferences.idExpires = row.idExpires;
             await tx`update guests set first_name=${row.firstName},last_name=${row.lastName},phone=${row.phone?.replace(/\D/g, "") || null},email=${row.email || null},address=${tx.json(address)},remarks=case when ${notes} is null then remarks else ${notes} end,guest_status=${existing.guestStatus === "do_not_rent" ? "do_not_rent" : storedStatus(row.status ?? "New")},room_preferences=${tx.json(preferences as never)},updated_at=now() where id=${existing.guestId}::uuid and property_id=${session.propertyId}::uuid`;
+            await ensureLoyaltyMembership(tx, { propertyId: session.propertyId, guestId: existing.guestId, actorAuthUserId: session.authUserId });
             return { guestId: existing.guestId, merged: true };
           }
         }
@@ -367,6 +387,7 @@ async function routePOST(request: Request) {
         `;
         if (row.idType && row.idNumber?.trim()) {
           await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guest.id}::uuid,${row.idType},${row.idNumber},${normalizedId(row.idNumber)},'9999-12-31T00:00:00Z'::timestamptz) on conflict (property_id,id_type,normalized_id_number) do update set guest_id=excluded.guest_id,id_number=excluded.id_number,deleted_at=null,captured_at=now(),delete_after=excluded.delete_after`;
+          await ensureLoyaltyMembership(tx, { propertyId: session.propertyId, guestId: guest.id, actorAuthUserId: session.authUserId });
         }
         return { guestId: guest.id };
       });
@@ -387,10 +408,22 @@ async function routePOST(request: Request) {
         const idNumber = normalizedId(row.driverLicenseNumber);
         const [identity] = await tx<Array<{ guestId: string }>>`select guest_id as "guestId" from guest_identities where property_id=${session.propertyId}::uuid and id_type=${row.idType} and normalized_id_number=${idNumber} and deleted_at is null for update`;
         const address = { addressLine1: row.addressLine1 ?? "", city: row.city ?? "" };
-        if (identity) { merged += 1; await tx`update guests set first_name=${row.firstName},last_name=${row.lastName},phone=${row.phone?.replace(/\D/g, "") || null},address=${tx.json(address)},remarks=coalesce(${row.notes || null},remarks),updated_at=now() where id=${identity.guestId}::uuid and property_id=${session.propertyId}::uuid`; }
-        else {
+        if (identity) {
+          merged += 1;
+          await tx`
+            update guests set first_name=${row.firstName},last_name=${row.lastName},phone=${row.phone?.replace(/\D/g, "") || null},
+              address=${tx.json(address)},remarks=coalesce(${row.notes || null},remarks),updated_at=now()
+            where id=${identity.guestId}::uuid and property_id=${session.propertyId}::uuid
+          `;
+          await ensureLoyaltyMembership(tx, {
+            propertyId: session.propertyId,
+            guestId: identity.guestId,
+            actorAuthUserId: session.authUserId,
+          });
+        } else {
           const [guest] = await tx<Array<{ id: string }>>`insert into guests (property_id,first_name,last_name,phone,address,remarks,guest_status) values (${session.propertyId}::uuid,${row.firstName},${row.lastName},${row.phone?.replace(/\D/g, "") || null},${tx.json(address)},${row.notes || null},'active') returning id`;
           await tx`insert into guest_identities (property_id,guest_id,id_type,id_number,normalized_id_number,delete_after) values (${session.propertyId}::uuid,${guest.id}::uuid,${row.idType},${row.driverLicenseNumber},${idNumber},'9999-12-31T00:00:00Z'::timestamptz) on conflict (property_id,id_type,normalized_id_number) do update set guest_id=excluded.guest_id,id_number=excluded.id_number,deleted_at=null,captured_at=now(),delete_after=excluded.delete_after`;
+          await ensureLoyaltyMembership(tx, { propertyId: session.propertyId, guestId: guest.id, actorAuthUserId: session.authUserId });
         }
       }
     });
