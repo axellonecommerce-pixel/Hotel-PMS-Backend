@@ -12,3 +12,6 @@ next-env.d.ts
 
 # macOS Finder files
 .DS_Store
+.vercel
+.env.local
+.env.*.local

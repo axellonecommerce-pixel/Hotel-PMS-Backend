@@ -1,13 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import { GET } from "./route";
+import { GET, loyaltyManifest } from "./route";
 
 describe("loyalty card manifest", () => {
-  test("reopens the exact private loyalty card as an installed web app", async () => {
+  test("uses the motel brand and reopens the exact private card", () => {
     const token = "a".repeat(32);
-    const response = await GET(new Request(`https://app.innseva.com/l/${token}/manifest.webmanifest`), { params: Promise.resolve({ token }) });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ start_url: `/l/${token}`, display: "standalone" });
+    expect(loyaltyManifest(token, "Sun Star Inn")).toMatchObject({ name: "Sun Star Inn Rewards", short_name: "Sun Star Inn Rewards", start_url: `/l/${token}`, display: "standalone", icons: [{ src: `/l/${token}/app-icon` }] });
   });
 
   test("rejects malformed card tokens", async () => {
