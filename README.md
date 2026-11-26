@@ -69,11 +69,12 @@ Tax Payable, and stores enough information to reverse the redemption exactly.
 Native Apple Wallet and Google Wallet buttons are optional. Configure
 `APPLE_WALLET_PASS_URL` and `GOOGLE_WALLET_SAVE_URL` only after the matching
 issuer service and credentials are ready; each issuer URL receives the private
-card token as its `token` query parameter. SMS/email choices record guest
-consent. Automated delivery uses the scheduled `/api/jobs/loyalty-reminders`
-job: configure the Twilio variables for SMS and `RESEND_API_KEY` plus
-`LOYALTY_EMAIL_FROM` for email. Reminders are disabled by default and are sent
-only on channels the guest separately consented to.
+card token as its `token` query parameter. Guests enable phone deal alerts
+directly on their private loyalty card; the browser push subscription records
+that permission. Automated delivery uses the scheduled
+`/api/jobs/loyalty-reminders` job: configure the VAPID variables for web push
+and `RESEND_API_KEY` plus `LOYALTY_EMAIL_FROM` for optional email. Reminders are
+disabled by default and are sent only to subscribed devices or consented email.
 
 ## Platform Admin
 

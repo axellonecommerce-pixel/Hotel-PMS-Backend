@@ -136,7 +136,6 @@ export async function ensureLoyaltyMembership(
     requireIdentity?: boolean;
     customNightsRequired?: number;
     customRewardDescription?: string;
-    smsConsent?: boolean;
     emailConsent?: boolean;
   },
 ): Promise<EnsuredLoyaltyMember | null> {
@@ -173,8 +172,8 @@ export async function ensureLoyaltyMembership(
         (property_id,guest_id,program_id,member_number,custom_nights_required,custom_reward_description,sms_consent,email_consent,consented_at)
       values
         (${input.propertyId}::uuid,${guest.id}::uuid,${program.id}::uuid,${loyaltyMemberNumber(guest.propertyName, guest.id)},
-         ${input.customNightsRequired ?? null},${input.customRewardDescription ?? null},${input.smsConsent ?? false},${input.emailConsent ?? false},
-         ${input.smsConsent || input.emailConsent ? new Date().toISOString() : null})
+         ${input.customNightsRequired ?? null},${input.customRewardDescription ?? null},false,${input.emailConsent ?? false},
+         ${input.emailConsent ? new Date().toISOString() : null})
       on conflict (property_id,guest_id) do nothing returning id
     `;
     created = Boolean(inserted);

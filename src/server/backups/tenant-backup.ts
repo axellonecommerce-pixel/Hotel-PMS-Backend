@@ -3,7 +3,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { downloadPrivateBytes, uploadPrivateBytes } from "@/server/storage/private-files";
 
 const tableOrder = [
-  "property_settings","loyalty_programs","employees","bank_accounts","card_terminals","card_settlements","property_tasks","room_types","rooms","rate_calendar","maintenance_schedules","guests","guest_remarks","guest_identities","guest_payment_sources","guest_vehicles","loyalty_memberships","loyalty_campaigns","loyalty_campaign_members","loyalty_reminders",
+  "property_settings","loyalty_programs","employees","bank_accounts","card_terminals","card_settlements","property_tasks","room_types","rooms","rate_calendar","maintenance_schedules","guests","guest_remarks","guest_identities","guest_payment_sources","guest_vehicles","loyalty_memberships","loyalty_campaigns","loyalty_campaign_members","loyalty_reminders","loyalty_push_subscriptions",
   "companies","company_contacts","company_room_rates","booking_sources","promotions","promotion_room_types","tax_definitions","charge_types",
   "registration_rule_versions","reservations","reservation_rooms","reservation_guests","dnr_overrides","registration_acceptances","nightly_rates",
   "reservation_promotions","room_moves","reservation_activity","loyalty_rewards","loyalty_transactions","loyalty_wallet_passes","lost_found_items","document_sequences","folios","terminal_payments","charges","charge_taxes",

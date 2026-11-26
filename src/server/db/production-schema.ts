@@ -275,6 +275,13 @@ export const loyaltyWalletPasses = pgTable("loyalty_wallet_passes", {
   uniqueIndex("loyalty_wallet_passes_token_key").on(table.tokenHash),
 ]);
 
+export const loyaltyPushSubscriptions = pgTable("loyalty_push_subscriptions", {
+  id: id(), propertyId: propertyId(), membershipId: uuid("membership_id").notNull().references(() => loyaltyMemberships.id),
+  endpoint: text("endpoint").notNull(), endpointHash: text("endpoint_hash").notNull(), p256dh: text("p256dh").notNull(), auth: text("auth").notNull(),
+  cardPath: text("card_path").notNull(), status: text("status").notNull().default("active"), failureCount: integer("failure_count").notNull().default(0),
+  lastSuccessAt: timestamp("last_success_at", { withTimezone: true }), createdAt: createdAt(), updatedAt: updatedAt(),
+}, (table) => [uniqueIndex("loyalty_push_subscriptions_member_endpoint").on(table.membershipId, table.endpointHash), index("loyalty_push_subscriptions_member_active").on(table.membershipId, table.status)]);
+
 export const companies = pgTable("companies", {
   id: id(),
   propertyId: propertyId(),

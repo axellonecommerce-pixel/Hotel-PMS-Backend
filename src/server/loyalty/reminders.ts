@@ -1,22 +1,15 @@
 import type { Sql } from "postgres";
+import { isExpiredPushSubscription, sendWebPush, type StoredPushSubscription } from "./web-push";
 
 type Candidate = {
-  propertyId: string; membershipId: string; firstName: string; phone: string | null; email: string | null;
-  smsConsent: boolean; emailConsent: boolean; memberNumber: string; rewardDescription: string;
+  propertyId: string; membershipId: string; firstName: string; email: string | null;
+  emailConsent: boolean; memberNumber: string; rewardDescription: string;
   nightsRequired: number; balance: number; availableRewards: number; settings: Record<string, unknown>;
 };
 
 function fill(template: string, row: Candidate, nightsLeft: number) {
   return template.replaceAll("{firstName}", row.firstName).replaceAll("{nightsLeft}", String(nightsLeft))
     .replaceAll("{reward}", row.rewardDescription).replaceAll("{memberId}", row.memberNumber);
-}
-
-export async function sendSms(to: string, message: string) {
-  const sid = process.env.TWILIO_ACCOUNT_SID; const token = process.env.TWILIO_AUTH_TOKEN; const from = process.env.TWILIO_FROM_NUMBER;
-  if (!sid || !token || !from) throw new Error("SMS provider is not configured.");
-  const body = new URLSearchParams({ To: to, From: from, Body: message });
-  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Messages.json`, { method: "POST", headers: { Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString("base64")}`, "Content-Type": "application/x-www-form-urlencoded" }, body });
-  if (!response.ok) throw new Error(`SMS provider returned ${response.status}.`);
 }
 
 export async function sendEmail(to: string, subject: string, message: string) {
@@ -29,8 +22,8 @@ export async function sendEmail(to: string, subject: string, message: string) {
 export async function processLoyaltyReminders(sql: Sql) {
   await sql`update loyalty_rewards set status='expired',updated_at=now() where status='available' and expires_at is not null and expires_at<=now()`;
   const candidates = await sql<Candidate[]>`
-    select lm.property_id as "propertyId",lm.id as "membershipId",g.first_name as "firstName",g.phone,g.email,
-      lm.sms_consent as "smsConsent",lm.email_consent as "emailConsent",lm.member_number as "memberNumber",
+    select lm.property_id as "propertyId",lm.id as "membershipId",g.first_name as "firstName",g.email,
+      lm.email_consent as "emailConsent",lm.member_number as "memberNumber",
       eo.reward_description as "rewardDescription",eo.nights_required as "nightsRequired",
       lmp.progress_nights as balance,
       (select count(*)::int from loyalty_rewards where membership_id=lm.id and status='available' and (expires_at is null or expires_at>now())) as "availableRewards",
@@ -48,11 +41,13 @@ export async function processLoyaltyReminders(sql: Sql) {
     const targets = Array.isArray(row.settings.nightsRemaining) ? row.settings.nightsRemaining.map(Number) : [2, 1];
     const rewardReady = row.availableRewards > 0 && row.settings.sendRewardReady !== false;
     if (!rewardReady && !targets.includes(nightsLeft)) continue;
-    const smsTemplate = String(row.settings.smsTemplate ?? "Hi {firstName}, you are {nightsLeft} night(s) away from {reward}. Member ID: {memberId}.");
-    const emailTemplate = String(row.settings.emailTemplate ?? smsTemplate);
+    const pushTemplate = String(row.settings.pushTemplate ?? "Hi {firstName}, you are {nightsLeft} night(s) away from {reward}. Member ID: {memberId}.");
+    const pushTitle = String(row.settings.pushTitle ?? "Your motel loyalty progress");
+    const emailTemplate = String(row.settings.emailTemplate ?? pushTemplate);
     const subject = String(row.settings.emailSubject ?? "Your loyalty progress");
-    const channels: Array<{ channel: "sms" | "email"; to: string; message: string }> = [];
-    if (row.smsConsent && row.phone) channels.push({ channel: "sms", to: row.phone, message: rewardReady ? fill(smsTemplate, row, 0).replace("0 night(s) away from", "your reward is ready:") : fill(smsTemplate, row, nightsLeft) });
+    const subscriptions = await sql<Array<StoredPushSubscription & { id: string }>>`select id,endpoint,p256dh,auth,card_path as "cardPath" from loyalty_push_subscriptions where membership_id=${row.membershipId}::uuid and status='active'`;
+    const channels: Array<{ channel: "push" | "email"; to: string; message: string }> = [];
+    if (subscriptions.length) channels.push({ channel: "push", to: "subscribed devices", message: rewardReady ? fill(pushTemplate, row, 0).replace("0 night(s) away from", "your reward is ready:") : fill(pushTemplate, row, nightsLeft) });
     if (row.emailConsent && row.email) channels.push({ channel: "email", to: row.email, message: rewardReady ? fill(emailTemplate, row, 0).replace("0 night(s) away from", "your reward is ready:") : fill(emailTemplate, row, nightsLeft) });
     for (const delivery of channels) {
       const target = rewardReady ? "ready" : `left-${nightsLeft}`;
@@ -66,7 +61,18 @@ export async function processLoyaltyReminders(sql: Sql) {
       if (!reminder) continue;
       queued += 1;
       try {
-        if (delivery.channel === "sms") await sendSms(delivery.to, delivery.message); else await sendEmail(delivery.to, subject, delivery.message);
+        if (delivery.channel === "email") await sendEmail(delivery.to, subject, delivery.message);
+        else {
+          let delivered = 0;
+          for (const subscription of subscriptions) {
+            try { await sendWebPush(subscription, { title: pushTitle, body: delivery.message }); await sql`update loyalty_push_subscriptions set last_success_at=now(),failure_count=0,updated_at=now() where id=${subscription.id}::uuid`; delivered += 1; }
+            catch (error) {
+              if (isExpiredPushSubscription(error)) await sql`update loyalty_push_subscriptions set status='revoked',failure_count=failure_count+1,updated_at=now() where id=${subscription.id}::uuid`;
+              else throw error;
+            }
+          }
+          if (!delivered) throw new Error("No active guest device accepted the notification.");
+        }
         await sql`update loyalty_reminders set status='sent',sent_at=now() where id=${reminder.id}::uuid`; sent += 1;
       } catch (error) {
         await sql`update loyalty_reminders set status='failed',error=${error instanceof Error ? error.message : "Delivery failed"} where id=${reminder.id}::uuid`; failed += 1;

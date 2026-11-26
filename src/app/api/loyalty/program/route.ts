@@ -10,7 +10,8 @@ const reminderSchema = z.object({
   enabled: z.boolean().default(false),
   nightsRemaining: z.array(z.number().int().min(1).max(30)).max(10).default([2, 1]),
   sendRewardReady: z.boolean().default(true),
-  smsTemplate: z.string().trim().min(10).max(500),
+  pushTitle: z.string().trim().min(3).max(80),
+  pushTemplate: z.string().trim().min(10).max(500),
   emailSubject: z.string().trim().min(3).max(120),
   emailTemplate: z.string().trim().min(10).max(2_000),
 });
@@ -44,7 +45,8 @@ const programSchema = z.object({
 
 const defaultReminders = {
   enabled: false, nightsRemaining: [2, 1], sendRewardReady: true,
-  smsTemplate: "Hi {firstName}, you are {nightsLeft} night(s) away from {reward}. Member ID: {memberId}.",
+  pushTitle: "Your motel loyalty progress",
+  pushTemplate: "Hi {firstName}, you are {nightsLeft} night(s) away from {reward}. Member ID: {memberId}.",
   emailSubject: "Your loyalty progress",
   emailTemplate: "Hi {firstName}, you are {nightsLeft} night(s) away from {reward}. Member ID: {memberId}.",
 };

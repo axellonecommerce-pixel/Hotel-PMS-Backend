@@ -10,9 +10,9 @@ import { applyLoyaltyReward, restoreLoyaltyReward } from "@/server/loyalty/redem
 import { recordChange } from "@/server/realtime/change-events";
 
 const bodySchema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("enroll"), guestId: z.string().uuid(), nightsRequired: z.number().int().min(1).max(365).default(10), rewardDescription: z.string().trim().min(3).max(160).default("One free night"), smsConsent: z.boolean().default(false), emailConsent: z.boolean().default(false) }),
+  z.object({ action: z.literal("enroll"), guestId: z.string().uuid(), nightsRequired: z.number().int().min(1).max(365).default(10), rewardDescription: z.string().trim().min(3).max(160).default("One free night"), emailConsent: z.boolean().default(false) }),
   z.object({ action: z.literal("adjust"), membershipId: z.string().uuid(), nightsDelta: z.number().int().min(-365).max(365).refine((value) => value !== 0), reason: z.string().trim().min(3).max(500) }),
-  z.object({ action: z.literal("update"), membershipId: z.string().uuid(), status: z.enum(["active", "paused", "closed"]).optional(), customNightsRequired: z.number().int().min(1).max(365).nullable().optional(), customRewardDescription: z.string().trim().max(160).nullable().optional(), customRewardType: z.enum(["free_night", "fixed_discount", "percent_discount", "member_rate"]).nullable().optional(), customRewardValueCents: z.number().int().min(1).max(10_000_000).nullable().optional(), customRewardPercentBasisPoints: z.number().int().min(1).max(10_000).nullable().optional(), customTerms: z.string().trim().max(2_000).nullable().optional(), customRewardExpiresDays: z.number().int().min(1).max(3_650).nullable().optional(), customQualificationType: z.enum(["none", "days", "date_range"]).nullable().optional(), customQualificationDays: z.number().int().min(1).max(3_650).nullable().optional(), customQualificationStartsOn: z.string().date().nullable().optional(), customQualificationEndsOn: z.string().date().nullable().optional(), smsConsent: z.boolean().optional(), emailConsent: z.boolean().optional() }),
+  z.object({ action: z.literal("update"), membershipId: z.string().uuid(), status: z.enum(["active", "paused", "closed"]).optional(), customNightsRequired: z.number().int().min(1).max(365).nullable().optional(), customRewardDescription: z.string().trim().max(160).nullable().optional(), customRewardType: z.enum(["free_night", "fixed_discount", "percent_discount", "member_rate"]).nullable().optional(), customRewardValueCents: z.number().int().min(1).max(10_000_000).nullable().optional(), customRewardPercentBasisPoints: z.number().int().min(1).max(10_000).nullable().optional(), customTerms: z.string().trim().max(2_000).nullable().optional(), customRewardExpiresDays: z.number().int().min(1).max(3_650).nullable().optional(), customQualificationType: z.enum(["none", "days", "date_range"]).nullable().optional(), customQualificationDays: z.number().int().min(1).max(3_650).nullable().optional(), customQualificationStartsOn: z.string().date().nullable().optional(), customQualificationEndsOn: z.string().date().nullable().optional(), emailConsent: z.boolean().optional() }),
   z.object({ action: z.literal("wallet_link"), membershipId: z.string().uuid() }),
   z.object({ action: z.literal("redeem_reward"), membershipId: z.string().uuid(), rewardId: z.string().uuid(), reservationId: z.string().uuid() }),
   z.object({ action: z.literal("restore_reward"), membershipId: z.string().uuid(), rewardId: z.string().uuid(), reason: z.string().trim().min(3).max(500) }),
@@ -22,7 +22,7 @@ async function details(propertyId: string, guestId: string) {
   const sql = productionSql();
   const [membership] = await sql<Array<Record<string, unknown>>>`
     select lm.id as "membershipId",lm.guest_id as "guestId",lm.member_number as "memberNumber",lm.status,
-      lm.sms_consent as "smsConsent",lm.email_consent as "emailConsent",lm.joined_at::text as "joinedAt",
+      lm.email_consent as "emailConsent",lm.joined_at::text as "joinedAt",
       lm.custom_nights_required as "customNightsRequired",lm.custom_reward_description as "customRewardDescription",
       lm.custom_reward_type as "customRewardType",lm.custom_reward_value_cents as "customRewardValueCents",
       lm.custom_reward_percent_basis_points as "customRewardPercentBasisPoints",lm.custom_terms as "customTerms",
@@ -125,7 +125,6 @@ async function routePOST(request: Request) {
           requireIdentity: false,
           customNightsRequired: input.nightsRequired,
           customRewardDescription: input.rewardDescription,
-          smsConsent: input.smsConsent,
           emailConsent: input.emailConsent,
         });
         if (!member) throw new Error("Loyalty membership could not be created.");
@@ -172,9 +171,9 @@ async function routePOST(request: Request) {
           custom_qualification_days=case when ${input.customQualificationType !== undefined || input.customQualificationDays !== undefined} then ${input.customQualificationType === "days" ? input.customQualificationDays ?? null : null} else custom_qualification_days end,
           custom_qualification_starts_on=case when ${input.customQualificationType !== undefined || input.customQualificationStartsOn !== undefined} then ${input.customQualificationType === "date_range" ? input.customQualificationStartsOn ?? null : null}::date else custom_qualification_starts_on end,
           custom_qualification_ends_on=case when ${input.customQualificationType !== undefined || input.customQualificationEndsOn !== undefined} then ${input.customQualificationType === "date_range" ? input.customQualificationEndsOn ?? null : null}::date else custom_qualification_ends_on end,
-          sms_consent=case when ${input.smsConsent !== undefined} then ${input.smsConsent ?? false} else sms_consent end,
+          sms_consent=false,
           email_consent=case when ${input.emailConsent !== undefined} then ${input.emailConsent ?? false} else email_consent end,
-          consented_at=case when ${input.smsConsent === true || input.emailConsent === true} then coalesce(consented_at,now()) else consented_at end,
+          consented_at=case when ${input.emailConsent === true} then coalesce(consented_at,now()) else consented_at end,
           updated_at=now() where id=${member.id}::uuid`;
         const [updated] = await tx<Array<{ status: string; programStatus: string; nightsRequired: number; rewardDescription: string; rewardValueCents: number | null; rewardType: string; rewardPercentBasisPoints: number | null; terms: string | null; rewardExpiresDays: number | null }>>`
           select lm.status,lp.status as "programStatus",eo.nights_required as "nightsRequired",
