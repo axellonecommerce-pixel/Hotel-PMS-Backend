@@ -9,30 +9,20 @@ export function hasProductionDatabase() {
   return Boolean(process.env.DATABASE_URL);
 }
 
-let lastUsed = 0;
-/** After this long unused, pooled connections are not trusted. */
-const STALE_AFTER_MS = 60_000;
-
 export function productionSql() {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL is not configured.");
-  // A server paused while idle (serverless between requests, or a computer
-  // that slept) keeps sockets the database has already closed; the next query
-  // then waits until the dead connection times out. Start fresh instead and
-  // let the old client finish anything still running.
-  const now = Date.now();
-  if (client && now - lastUsed > STALE_AFTER_MS) {
-    const old = client;
-    client = null;
-    void old.end({ timeout: 60 }).catch(() => undefined);
-  }
-  lastUsed = now;
   if (!client) {
     client = postgres(connectionString, {
       // Always encrypted to the database (Supabase can then refuse any
       // unencrypted connection); a database on this computer has no TLS.
       ssl: databaseNeedsTls(connectionString) ? "require" : false,
-      max: 5,
+      // A single local Next.js process serves the whole PMS shell, whose
+      // providers load several independent screens' data at once. Five
+      // connections made those reads queue for ~30 seconds and the browser
+      // rendered an empty property while it waited. Serverless production
+      // stays conservative because each instance has its own pool.
+      max: process.env.NODE_ENV === "production" ? 5 : 15,
       prepare: false,
       idle_timeout: 20,
       connect_timeout: 10,

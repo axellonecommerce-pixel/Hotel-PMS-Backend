@@ -29,6 +29,13 @@ const updateSchema = z.union([
     }).nullable(),
   }),
   z.object({
+    action: z.literal("advance"),
+    id: z.string().uuid(), employeeId: z.string().uuid(), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    amountCents: z.number().int().min(1).max(10_000_000),
+    paymentMethod: z.enum(PAYROLL_PAYMENT_METHODS), cashSource: z.enum(CASH_SOURCES).optional(),
+    bankAccountId: z.string().uuid().optional(), note: z.string().trim().max(500).optional(),
+  }),
+  z.object({
     id: z.string().uuid(),
     status: z.enum(["Pending", "Approved", "Paid"]).optional(),
     adjustmentCents: z.number().int().min(-10_000_000).max(10_000_000).optional(),
@@ -103,14 +110,14 @@ function datesForPeriod(today: string, frequency: string, weekStart = 1) {
  * length: 30 days a month and 15 a half-month, so a day is worth the same in
  * a 30- or 31-day month (weekly: 7, biweekly: 14).
  */
-function salaryNotYetPaid(salaryCents: number, period: { start: string; end: string }, startDate: string | undefined, paid: (date: string) => boolean, frequency: string) {
+function salaryNotYetPaid(salaryCents: number, period: { start: string; end: string }, startDate: string | undefined, paid: (date: string) => boolean, frequency: string, fullPeriod = true) {
   let days = 0;
   let owed = 0;
   for (let date = period.start; date <= period.end; date = shiftDate(date, 1)) {
     days += 1;
     if ((!startDate || date >= startDate) && !paid(date)) owed += 1;
   }
-  if (owed === days) return salaryCents;
+  if (owed === days && fullPeriod) return salaryCents;
   const basis = /semi/i.test(frequency) ? 15 : /month/i.test(frequency) ? 30 : days;
   return Math.round(salaryCents * Math.min(1, owed / basis));
 }
@@ -187,7 +194,8 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
   // Days already paid in another period (for example after the week start
   // changed) are never paid again: neither their hours nor their salary.
   const paidRanges = await tx<Array<{ employeeId: string; periodId: string; start: string; end: string; description: string | null }>>`
-    select pe.employee_id as "employeeId",pe.pay_period_id as "periodId",pp.starts_on::text as start,pp.ends_on::text as "end",pe.description
+    select pe.employee_id as "employeeId",pe.pay_period_id as "periodId",pp.starts_on::text as start,
+      least(pp.ends_on,coalesce(pe.paid_on,pp.ends_on))::text as "end",pe.description
     from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id
     where pe.property_id=${propertyId}::uuid and pe.paid and pp.ends_on >= ${from}::date and pp.starts_on <= ${to}::date
   `;
@@ -208,7 +216,7 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
     if (meta.removed || !employee.active) return [];
     let counted: boolean;
     if (startDate && startDate > period.end) counted = false;
-    else if (period.status === "custom") counted = shown || Boolean(current);
+    else if (period.status === "custom" || period.status === "partial") counted = shown || Boolean(current);
     else if (!onSchedule(period, setup.frequencyOf.get(employee.id) ?? "Semi-monthly", setup.weekStartOf.get(employee.id) ?? 1)) counted = false;
     else counted = shown || Boolean(startDate) || Boolean(current);
     if (!counted) {
@@ -225,7 +233,7 @@ async function recountPeriods(tx: Tx, propertyId: string, state: string, employe
     const hours = salaried ? { regularMinutes: split.regularMinutes + split.overtimeMinutes + split.doubleTimeMinutes, overtimeMinutes: 0, doubleTimeMinutes: 0 } : manual ?? split;
     return [{
       period: period.id, employee: employee.id, type: salaried ? "salary" : "hourly", regular: hours.regularMinutes, overtime: hours.overtimeMinutes,
-      double: hours.doubleTimeMinutes, rate, gross: salaried ? salaryNotYetPaid(rate, period, startDate, (date) => paidDay(employee.id, period.id, date), period.status === "custom" ? "custom" : setup.frequencyOf.get(employee.id) ?? "Weekly") : grossPayCents(hours, rate),
+      double: hours.doubleTimeMinutes, rate, gross: salaried ? salaryNotYetPaid(rate, period, startDate, (date) => paidDay(employee.id, period.id, date), period.status === "custom" ? "custom" : setup.frequencyOf.get(employee.id) ?? "Weekly", period.status !== "partial") : grossPayCents(hours, rate),
     }];
   }));
   // A start date moved later, or a changed pay schedule, removes unpaid pay that no longer applies.
@@ -301,6 +309,18 @@ async function routeGET(request: Request) {
         const own = settingsByName.get(nameKey(employee.name))?.payFrequency;
         return [employee.id, own && PAY_FREQUENCIES.includes(own) ? own : frequency] as const;
       }));
+      // A payroll paid before its scheduled period ends closes only the days
+      // through the payment date. The remaining days form a continuation,
+      // rather than making the entire week look paid. This also repairs old
+      // entries that were saved before partial-week payroll was supported.
+      const earlyPaid = await tx<Array<{ employeeId: string; startsOn: string; endsOn: string; paidOn: string }>>`
+        select pe.employee_id as "employeeId",pp.starts_on::text as "startsOn",pp.ends_on::text as "endsOn",pe.paid_on::text as "paidOn"
+        from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id
+        where pe.property_id=${session.propertyId}::uuid and pe.paid and pe.paid_on is not null
+          and pe.paid_on between pp.starts_on and pp.ends_on - 1
+          and pp.ends_on >= ${shiftDate(today, -30)}::date
+        order by pe.paid_on desc
+      `;
       const scheduleFrom = shiftDate(today, -SCHEDULE_DAYS);
       // Every pay period needed: the motel's current and last period, the
       // custom range, and for each employee their own current and last period
@@ -324,7 +344,12 @@ async function routeGET(request: Request) {
         const current = datesForPeriod(today, employeeFrequency, employeeWeekStart);
         const previous = datesForPeriod(shiftDate(current.start, -1), employeeFrequency, employeeWeekStart);
         want(current, employeeFrequency, employeePayDay); want(previous, employeeFrequency, employeePayDay);
-        shownDates.set(employee.id, mode === "custom" && range ? range : mode === "previous" ? previous : current);
+        const partial = mode === "current"
+          ? earlyPaid.find((paid) => paid.employeeId === employee.id && paid.startsOn >= current.start && paid.endsOn <= current.end)
+          : undefined;
+        const continuation = partial ? { start: shiftDate(partial.paidOn, 1), end: current.end } : null;
+        if (continuation && continuation.start <= continuation.end) want(continuation, employeeFrequency, employeePayDay, "partial");
+        shownDates.set(employee.id, mode === "custom" && range ? range : mode === "previous" ? previous : continuation ?? current);
         const startDate = startDates.get(nameKey(employee.name));
         if (startDate && startDate < current.start) {
           for (let dates = previous; dates.end >= startDate && dates.end >= scheduleFrom; dates = datesForPeriod(shiftDate(dates.start, -1), employeeFrequency, employeeWeekStart)) want(dates, employeeFrequency, employeePayDay);
@@ -378,13 +403,14 @@ async function routeGET(request: Request) {
       const entries = scheduleRows.filter((entry) => shownPeriodOf.has(entry.employeeId) ? shownPeriodOf.get(entry.employeeId) === entry.periodId : entry.periodId === period.id);
       const mapEntry = (entry: EntryRow) => {
         const meta = parseDescription(entry.description);
+        const effectiveEnd = entry.paid && entry.paidOn && entry.paidOn < entry.endsOn ? entry.paidOn : entry.endsOn;
         return {
           id: entry.id, payrollPeriodId: entry.periodId, employeeId: entry.employeeId, regularMinutes: entry.regularMinutes,
           overtimeMinutes: entry.overtimeMinutes ?? 0, doubleTimeMinutes: meta.doubleTimeMinutes ?? 0, payType: entry.calculationType === "salary" ? "salary" : "hourly",
           hourlyRateCents: entry.hourlyRateCents ?? 0, grossPayCents: entry.grossPayCents ?? 0, adjustmentCents: meta.adjustmentCents ?? 0,
           paymentStatus: entry.paid ? "Paid" : meta.status === "Approved" ? "Approved" : "Pending", paidOn: entry.paidOn, paymentMethod: entry.paymentMethod, cashSource: entry.cashSource ?? undefined, bankAccountId: entry.bankAccountId ?? undefined,
           hoursEntered: Boolean(meta.manualHours), roomsCleaned: Number(entry.roomsCleaned),
-          periodLabel: `${entry.startsOn} to ${entry.endsOn}`, periodStart: entry.startsOn, periodEnd: entry.endsOn, payDate: entry.payDate,
+          periodLabel: `${entry.startsOn} to ${effectiveEnd}`, periodStart: entry.startsOn, periodEnd: effectiveEnd, payDate: entry.payDate,
           customRange: entry.periodStatus === "custom",
         };
       };
@@ -468,6 +494,28 @@ async function handlePATCH(request: Request) {
       if (result === "paid") return Response.json({ error: "This pay is already marked paid. Mark it Pending to change the hours." }, { status: 409 });
       if (result === "salary") return Response.json({ error: "Salary pay does not depend on hours." }, { status: 400 });
       return Response.json({ updated: true });
+    }
+    if ("action" in input && input.action === "advance") {
+      if (input.paymentMethod === "Cash" && !input.cashSource) return Response.json({ error: "Choose whether the advance came from Cash Drop or Cash in Safe." }, { status: 400 });
+      const recorded = await productionSql().begin(async (tx) => {
+        const [employee] = await tx<Array<{ name: string }>>`select name from employees where id=${input.employeeId}::uuid and property_id=${session.propertyId}::uuid and active=true`;
+        if (!employee) return false;
+        const bankAccount = isBankMethod(input.paymentMethod) ? await bankAccountFor(tx, session.propertyId, input.bankAccountId) : null;
+        const source = input.cashSource ?? (bankAccount ? "bank" as const : null);
+        if (source) await payOut(tx, {
+          propertyId: session.propertyId, authUserId: session.authUserId, source, bankAccount,
+          amountCents: input.amountCents, kind: "payroll", resourceType: "payroll-advance", resourceId: input.id,
+          paidTo: employee.name, reason: "Employee advance", description: `${employee.name} · payroll advance${input.note ? ` · ${input.note}` : ""}`,
+        });
+        await postProductionLedger(tx, {
+          propertyId: session.propertyId, businessDate: input.date, resourceType: "payroll-advance", resourceId: input.id,
+          description: `Advance paid to ${employee.name}`, debitAccount: "Employee Advances",
+          creditAccount: creditAccountFor(input.paymentMethod, input.cashSource ?? null, bankAccount), amountCents: input.amountCents,
+        });
+        return true;
+      });
+      if (!recorded) return Response.json({ error: "Active employee not found." }, { status: 404 });
+      return Response.json({ recorded: true });
     }
     if ("action" in input) {
       if (input.payType === "salary" && !input.salaryCents) return Response.json({ error: "Enter the salary paid each pay period." }, { status: 400 });

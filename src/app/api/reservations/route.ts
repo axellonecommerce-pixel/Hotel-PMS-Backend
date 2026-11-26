@@ -290,6 +290,12 @@ function normalizePhone(phone: string) {
   return phone.replace(/\D/g, "");
 }
 
+/** Compare the stable first/last parts while allowing middle names or suffixes. */
+function guestNameKey(firstName: string, lastName: string) {
+  const word = (value: string) => value.toLowerCase().match(/[a-z0-9]+/)?.[0] ?? "";
+  return `${word(firstName)}|${word(lastName)}`;
+}
+
 /**
  * Settings created by older versions used names such as "Walk Inn", while
  * the reservation UI has always used "Walk-In" (and "Motel Website" for
@@ -502,10 +508,15 @@ export async function createProductionReservationTransaction(tx: TransactionSql,
     if (!company || company.status !== "active") throw new ReservationRequestError("Select an active company for Direct Bill.");
   }
   const normalizedId = normalizeId(payload.idNumber);
-  const [identity] = await tx<Array<{ guestId: string; guestStatus: string; roomPreferences: unknown; address: unknown }>>`
-    select gi.guest_id as "guestId",g.guest_status as "guestStatus",g.room_preferences as "roomPreferences",g.address from guest_identities gi join guests g on g.id=gi.guest_id
-    where gi.property_id=${session.propertyId}::uuid and gi.normalized_id_number=${normalizedId} and gi.deleted_at is null for update
+  const [identity] = await tx<Array<{ guestId: string; guestStatus: string; firstName: string; lastName: string; roomPreferences: unknown; address: unknown }>>`
+    select gi.guest_id as "guestId",g.guest_status as "guestStatus",g.first_name as "firstName",g.last_name as "lastName",g.room_preferences as "roomPreferences",g.address
+    from guest_identities gi join guests g on g.id=gi.guest_id
+    where gi.property_id=${session.propertyId}::uuid and gi.id_type=${payload.idType}
+      and gi.normalized_id_number=${normalizedId} and gi.deleted_at is null for update
   `;
+  if (identity && guestNameKey(identity.firstName, identity.lastName) !== guestNameKey(payload.firstName, payload.lastName)) {
+    throw new ReservationRequestError(`This scanned ID belongs to ${identity.firstName} ${identity.lastName}. Use that guest or scan ${payload.firstName} ${payload.lastName}'s own ID; the existing guest and reservations were not changed.`, 409);
+  }
   if (identity?.guestStatus === "do_not_rent" && !payload.dnrOverrideReason) throw new ReservationRequestError("Enter a reason to override the Do Not Rent warning.", 403);
   let guestId = identity?.guestId;
   const asRecord = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};

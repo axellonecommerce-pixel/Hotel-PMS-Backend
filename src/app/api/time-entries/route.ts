@@ -20,7 +20,7 @@ const entrySchema = z.object({
   roomNumbers: z.array(z.string().trim().min(1).max(20)).max(200).optional(),
 });
 
-type EntryRow = { id: string; workDate: string; employeeName: string; clockIn: string; clockOut: string | null; breakStart: string | null; breakEnd: string | null; breakMinutes: number; hourlyRateCents: number | null; roomsCleaned: number; rooms: string[] };
+type EntryRow = { id: string; workDate: string; employeeName: string; clockIn: string; clockOut: string | null; breakStart: string | null; breakEnd: string | null; breakMinutes: number; hourlyRateCents: number | null; roomsCleaned: number; rooms: string[]; payStatus: "Paid" | "Approved" | "Pending"; payrollEntryId: string | null };
 
 /** Clock times are entered and shown in the motel's own time zone. */
 async function propertyZone(propertyId: string) {
@@ -40,6 +40,15 @@ async function listEntries(propertyId: string, options: { db?: Db; id?: string }
       case when te.break_start_at is null then null else to_char(te.break_start_at at time zone ${zone}::text,'HH24:MI') end as "breakStart",
       case when te.break_end_at is null then null else to_char(te.break_end_at at time zone ${zone}::text,'HH24:MI') end as "breakEnd",
       te.break_minutes as "breakMinutes",e.hourly_rate_cents as "hourlyRateCents",
+      coalesce((select case when pe.paid then 'Paid' when pe.description like '%\"status\":\"Approved\"%' then 'Approved' else 'Pending' end
+        from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id
+        where pe.employee_id=te.employee_id and te.work_date between pp.starts_on and
+          case when pe.paid then least(pp.ends_on,coalesce(pe.paid_on,pp.ends_on)) else pp.ends_on end
+        order by pe.paid desc,pp.ends_on desc limit 1),'Pending') as "payStatus",
+      (select pe.id::text from payroll_entries pe join pay_periods pp on pp.id=pe.pay_period_id
+        where pe.employee_id=te.employee_id and te.work_date between pp.starts_on and
+          case when pe.paid then least(pp.ends_on,coalesce(pe.paid_on,pp.ends_on)) else pp.ends_on end
+        order by pe.paid desc,pp.ends_on desc limit 1) as "payrollEntryId",
       ${db.unsafe(roomsCleanedCountSql("te"))} as "roomsCleaned",
       ${db.unsafe(roomsCleanedListSql("te"))} as rooms
     from time_entries te join employees e on e.id=te.employee_id

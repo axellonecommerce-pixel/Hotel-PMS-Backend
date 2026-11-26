@@ -8,11 +8,14 @@ import { ensureLoyaltyMembership, issueAvailableRewards } from "@/server/loyalty
 import { publicCardUrl } from "@/server/loyalty/public-card-url";
 import { applyLoyaltyReward, restoreLoyaltyReward } from "@/server/loyalty/redemption";
 import { recordChange } from "@/server/realtime/change-events";
+import { sendEmail } from "@/server/loyalty/reminders";
+import { isExpiredPushSubscription, sendWebPush, type StoredPushSubscription } from "@/server/loyalty/web-push";
 
 const bodySchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("enroll"), guestId: z.string().uuid(), nightsRequired: z.number().int().min(1).max(365).default(10), rewardDescription: z.string().trim().min(3).max(160).default("One free night"), emailConsent: z.boolean().default(false) }),
   z.object({ action: z.literal("adjust"), membershipId: z.string().uuid(), nightsDelta: z.number().int().min(-365).max(365).refine((value) => value !== 0), reason: z.string().trim().min(3).max(500) }),
-  z.object({ action: z.literal("update"), membershipId: z.string().uuid(), status: z.enum(["active", "paused", "closed"]).optional(), customNightsRequired: z.number().int().min(1).max(365).nullable().optional(), customRewardDescription: z.string().trim().max(160).nullable().optional(), customRewardType: z.enum(["free_night", "fixed_discount", "percent_discount", "member_rate"]).nullable().optional(), customRewardValueCents: z.number().int().min(1).max(10_000_000).nullable().optional(), customRewardPercentBasisPoints: z.number().int().min(1).max(10_000).nullable().optional(), customTerms: z.string().trim().max(2_000).nullable().optional(), customRewardExpiresDays: z.number().int().min(1).max(3_650).nullable().optional(), customQualificationType: z.enum(["none", "days", "date_range"]).nullable().optional(), customQualificationDays: z.number().int().min(1).max(3_650).nullable().optional(), customQualificationStartsOn: z.string().date().nullable().optional(), customQualificationEndsOn: z.string().date().nullable().optional(), emailConsent: z.boolean().optional() }),
+  z.object({ action: z.literal("update"), membershipId: z.string().uuid(), status: z.enum(["active", "paused", "closed"]).optional(), phone: z.string().trim().max(80).nullable().optional(), email: z.string().trim().email().nullable().optional(), customNightsRequired: z.number().int().min(1).max(365).nullable().optional(), customRewardDescription: z.string().trim().max(160).nullable().optional(), customRewardType: z.enum(["free_night", "fixed_discount", "percent_discount", "member_rate"]).nullable().optional(), customRewardValueCents: z.number().int().min(1).max(10_000_000).nullable().optional(), customRewardPercentBasisPoints: z.number().int().min(1).max(10_000).nullable().optional(), customTerms: z.string().trim().max(2_000).nullable().optional(), customRewardExpiresDays: z.number().int().min(1).max(3_650).nullable().optional(), customQualificationType: z.enum(["none", "days", "date_range"]).nullable().optional(), customQualificationDays: z.number().int().min(1).max(3_650).nullable().optional(), customQualificationStartsOn: z.string().date().nullable().optional(), customQualificationEndsOn: z.string().date().nullable().optional(), emailConsent: z.boolean().optional() }),
+  z.object({ action: z.literal("send_reminder"), membershipId: z.string().uuid(), channel: z.enum(["email", "push"]), subject: z.string().trim().min(1).max(160), message: z.string().trim().min(1).max(2_000) }),
   z.object({ action: z.literal("wallet_link"), membershipId: z.string().uuid() }),
   z.object({ action: z.literal("redeem_reward"), membershipId: z.string().uuid(), rewardId: z.string().uuid(), reservationId: z.string().uuid() }),
   z.object({ action: z.literal("restore_reward"), membershipId: z.string().uuid(), rewardId: z.string().uuid(), reason: z.string().trim().min(3).max(500) }),
@@ -22,7 +25,10 @@ async function details(propertyId: string, guestId: string) {
   const sql = productionSql();
   const [membership] = await sql<Array<Record<string, unknown>>>`
     select lm.id as "membershipId",lm.guest_id as "guestId",lm.member_number as "memberNumber",lm.status,
-      lm.email_consent as "emailConsent",lm.joined_at::text as "joinedAt",
+      lm.email_consent as "emailConsent",lm.joined_at::text as "joinedAt",g.phone,g.email,
+      exists(select 1 from loyalty_push_subscriptions lps where lps.membership_id=lm.id and lps.status='active') as "pushOptedIn",
+      (select count(*)::int from loyalty_push_subscriptions lps where lps.membership_id=lm.id and lps.status='active') as "pushDeviceCount",
+      (select max(coalesce(lps.last_success_at,lps.created_at))::text from loyalty_push_subscriptions lps where lps.membership_id=lm.id and lps.status='active') as "pushLastActiveAt",
       lm.custom_nights_required as "customNightsRequired",lm.custom_reward_description as "customRewardDescription",
       lm.custom_reward_type as "customRewardType",lm.custom_reward_value_cents as "customRewardValueCents",
       lm.custom_reward_percent_basis_points as "customRewardPercentBasisPoints",lm.custom_terms as "customTerms",
@@ -44,7 +50,7 @@ async function details(propertyId: string, guestId: string) {
       lmp.progress_nights as "progressNights",
       greatest(coalesce((select sum(lt.nights_delta) from loyalty_transactions lt where lt.membership_id=lm.id and lt.type in ('enrollment_credit','stay_credit','stay_reversal')),0),0)::int as "totalQualifyingNights",
       (select count(*)::int from loyalty_rewards lr where lr.membership_id=lm.id and lr.status='available' and (lr.expires_at is null or lr.expires_at>now())) as "availableRewards"
-    from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id
+    from loyalty_memberships lm join loyalty_programs lp on lp.id=lm.program_id join guests g on g.id=lm.guest_id
     join loyalty_effective_offers eo on eo.membership_id=lm.id
     join loyalty_member_progress lmp on lmp.membership_id=lm.id
     where lm.property_id=${propertyId}::uuid and lm.guest_id=${guestId}::uuid
@@ -108,6 +114,7 @@ async function routePOST(request: Request) {
     }
     let guestId = "";
     let walletUrl: string | undefined;
+    let deliveryFailure: string | undefined;
     await productionSql().begin(async (tx) => {
       if (input.action === "enroll") {
         const [guest] = await tx<Array<{ id: string; status: string }>>`
@@ -175,6 +182,10 @@ async function routePOST(request: Request) {
           email_consent=case when ${input.emailConsent !== undefined} then ${input.emailConsent ?? false} else email_consent end,
           consented_at=case when ${input.emailConsent === true} then coalesce(consented_at,now()) else consented_at end,
           updated_at=now() where id=${member.id}::uuid`;
+        if (input.phone !== undefined || input.email !== undefined) await tx`update guests set
+          phone=case when ${input.phone !== undefined} then ${input.phone?.replace(/\D/g, "") || null} else phone end,
+          email=case when ${input.email !== undefined} then ${input.email || null} else email end,updated_at=now()
+          where id=${member.guestId}::uuid and property_id=${session.propertyId}::uuid`;
         const [updated] = await tx<Array<{ status: string; programStatus: string; nightsRequired: number; rewardDescription: string; rewardValueCents: number | null; rewardType: string; rewardPercentBasisPoints: number | null; terms: string | null; rewardExpiresDays: number | null }>>`
           select lm.status,lp.status as "programStatus",eo.nights_required as "nightsRequired",
             eo.reward_description as "rewardDescription",eo.reward_value_cents as "rewardValueCents",
@@ -184,6 +195,31 @@ async function routePOST(request: Request) {
           join loyalty_effective_offers eo on eo.membership_id=lm.id where lm.id=${member.id}::uuid
         `;
         if (updated?.status === "active" && updated.programStatus === "active") await issueAvailableRewards(tx, session.propertyId, { id: member.id, programId: member.programId, nightsRequired: updated.nightsRequired, rewardDescription: updated.rewardDescription, rewardValueCents: updated.rewardValueCents, rewardType: updated.rewardType, rewardPercentBasisPoints: updated.rewardPercentBasisPoints, terms: updated.terms, rewardExpiresDays: updated.rewardExpiresDays }, session.authUserId);
+      } else if (input.action === "send_reminder") {
+        const [guest] = await tx<Array<{ email: string | null; emailConsent: boolean }>>`select g.email,lm.email_consent as "emailConsent" from loyalty_memberships lm join guests g on g.id=lm.guest_id where lm.id=${member.id}::uuid`;
+        let reminderStatus = "sent";
+        let reminderError: string | null = null;
+        try {
+          if (input.channel === "email") {
+            if (!guest?.email || !guest.emailConsent) throw new Error("Save the guest email and email permission first.");
+            await sendEmail(guest.email, input.subject, input.message);
+          } else {
+            const subscriptions = await tx<Array<StoredPushSubscription & { id: string }>>`select id,endpoint,p256dh,auth,card_path as "cardPath" from loyalty_push_subscriptions where membership_id=${member.id}::uuid and status='active'`;
+            if (!subscriptions.length) throw new Error("This customer has not enabled offer notifications on a phone.");
+            let delivered = 0;
+            for (const subscription of subscriptions) try {
+              await sendWebPush(subscription, { title: input.subject, body: input.message });
+              await tx`update loyalty_push_subscriptions set last_success_at=now(),failure_count=0,updated_at=now() where id=${subscription.id}::uuid`; delivered += 1;
+            } catch (error) {
+              if (isExpiredPushSubscription(error)) await tx`update loyalty_push_subscriptions set status='revoked',failure_count=failure_count+1,updated_at=now() where id=${subscription.id}::uuid`;
+              else throw error;
+            }
+            if (!delivered) throw new Error("No subscribed phone accepted the notification.");
+          }
+        } catch (error) { reminderStatus = "failed"; reminderError = error instanceof Error ? error.message : "Delivery failed."; }
+        await tx`insert into loyalty_reminders (property_id,membership_id,channel,status,subject,message,idempotency_key,sent_at,error)
+          values (${session.propertyId}::uuid,${member.id}::uuid,${input.channel},${reminderStatus},${input.subject},${input.message},${`manual:${randomBytes(16).toString("hex")}`},case when ${reminderStatus}='sent' then now() else null end,${reminderError})`;
+        if (reminderError) deliveryFailure = reminderError;
       } else if (input.action === "redeem_reward") {
         await applyLoyaltyReward(tx, { propertyId: session.propertyId, authUserId: session.authUserId }, { membershipId: member.id, rewardId: input.rewardId, reservationId: input.reservationId });
       } else if (input.action === "restore_reward") {
@@ -198,6 +234,7 @@ async function routePOST(request: Request) {
         walletUrl = publicCardUrl(request.url, token);
       }
     });
+    if (deliveryFailure) return Response.json({ error: deliveryFailure }, { status: 409 });
     await recordChange({ propertyId: session.propertyId, actorAuthUserId: session.authUserId, entityType: "guest", entityId: guestId, action: "updated", entityVersion: Date.now(), payload: { change: `loyalty-${input.action}` } });
     return Response.json({ membership: await details(session.propertyId, guestId), ...(walletUrl ? { walletUrl } : {}) });
   } catch (error) {

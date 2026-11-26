@@ -8,6 +8,7 @@ import { hasProductionDatabase, productionSql } from "@/server/db/production";
 import { postProductionLedger } from "@/server/finance/production-finance";
 import { BankAccountError, bankAccountFor, CASH_SOURCES, creditAccountFor, isBankMethod, payOut } from "@/server/finance/cash-sources";
 import { paidWagesAsExpenses } from "@/server/finance/paid-wages";
+import { listOtaCommissions } from "@/server/finance/ota-commission";
 import { ShiftRequiredError } from "@/server/finance/shift-guard";
 import { recordChange } from "@/server/realtime/change-events";
 import { withIdempotency } from "@/server/http/idempotency";
@@ -47,6 +48,21 @@ async function routeGET(request: Request) {
       // payroll entry itself (the P&L already counts them as "Wages"), so
       // nothing is entered twice and past payments show without any re-entry.
       const wages = await paidWagesAsExpenses(productionSql(), session.propertyId);
+      const commissions = (await listOtaCommissions(productionSql(), session.propertyId))
+        .filter((commission) => commission.reservationStatus === "checked_out" && commission.commissionCents > 0)
+        .filter((commission) => !records.some((record) => record.id === commission.reservationId))
+        .map((commission) => ({
+          id: `ota-commission-${commission.reservationId}`,
+          date: commission.departureDate,
+          category: "OTA Commission",
+          vendor: commission.source,
+          description: `${commission.source} commission · ${commission.confirmationNumber} · ${commission.guestName}`,
+          paymentMethod: commission.settlement,
+          amountCents: commission.commissionCents,
+          recurring: false,
+          enteredBy: "OTA checkout",
+          source: "ota-commission" as const,
+        }));
       const recurringExpenses = await productionSql()<Array<{
         id: string; category: string; vendor: string; description: string;
         paymentMethod: string; amountCents: number; recurrence: string; nextDueDate: string;
@@ -62,6 +78,7 @@ async function routeGET(request: Request) {
         expenses: [
           ...records.map((record) => ({ ...record, receiptName: record.receiptName ?? undefined, cashSource: record.cashSource ?? undefined, bankAccountId: record.bankAccountId ?? undefined, bankAccountName: record.bankAccountName ?? undefined, recurring: false, enteredBy: "Hotel Staff" })),
           ...wages.map((wage) => ({ ...wage, cashSource: wage.cashSource ?? undefined, bankAccountId: wage.bankAccountId ?? undefined, bankAccountName: wage.bankAccountName ?? undefined, recurring: false, enteredBy: "Payroll", source: "payroll" as const })),
+          ...commissions,
         ].sort((left, right) => right.date.localeCompare(left.date)),
         recurringExpenses,
       });
